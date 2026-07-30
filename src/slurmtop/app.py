@@ -345,15 +345,16 @@ class SlurmTopApp(App):
         active_table = self.query_one("#active-jobs", ActiveJobTable)
         completed_table = self.query_one("#completed-jobs", CompletedJobTable)
 
-        running, completed, summary = await asyncio.gather(
+        running, completed, part_info = await asyncio.gather(
             slurm.get_running_jobs(self.config),
             slurm.get_completed_jobs(self.config),
-            slurm.get_cluster_summary(self.config),
+            slurm.get_partition_availability(self.config),
         )
         active_table.update_jobs(running)
         completed_table.update_jobs(completed)
 
-        # Update cluster bar
+        # Update cluster bar (counts derived from the squeue result above)
+        summary = slurm.format_cluster_summary(running, part_info, self.config)
         self.query_one("#cluster-bar", Static).update(summary)
 
         # Job completion notifications
@@ -366,6 +367,10 @@ class SlurmTopApp(App):
                     "completed",
                 )
                 self._notify_job_done(job_id, final)
+            # If the job we're viewing just ended, reload its details so the
+            # panels reflect the terminal state instead of stale running data.
+            if self._selected_job_id in disappeared:
+                self._trigger_load(self._selected_job_id)
         self._known_running_ids = current_ids
         self._first_poll_done = True
 
@@ -665,9 +670,13 @@ class SlurmTopApp(App):
         if self._multiselect_mode and self._multiselect_ids:
             ids = sorted(self._multiselect_ids)
             self._log(f"scancel --signal=KILL {len(ids)} jobs")
+            failed = 0
             for jid in ids:
                 success, msg = await slurm.cancel_job(jid, force=True)
+                failed += not success
                 self._log("force cancel", msg)
+            if failed:
+                self._log("force cancel", f"{failed}/{len(ids)} failed")
             self._exit_multiselect()
             await self._poll_jobs()
             return

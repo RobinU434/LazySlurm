@@ -21,6 +21,11 @@ dependencies = [
     "textual>=0.86",
 ]
 
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
+
 [project.scripts]
 slurmtop = "slurmtop.__main__:main"
 slurmtop-daemon = "slurmtop.daemon:main"

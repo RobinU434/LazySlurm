@@ -69,7 +69,8 @@ class JobDetail:
 
     @property
     def submit_line(self) -> str:
-        return self.raw.get("Command", self.raw.get("SubmitLine", "N/A"))
+        # Prefer SubmitLine (full sbatch command line) over Command (just script path)
+        return self.raw.get("SubmitLine") or self.raw.get("Command") or "N/A"
 
     @property
     def partition(self) -> str:

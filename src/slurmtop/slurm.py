@@ -15,11 +15,26 @@ USER = os.environ.get("USER", os.environ.get("LOGNAME", ""))
 # Module-level config, set once from app.py via set_config().
 _config: Config = Config()
 
+# Multiplex SSH connections: the first command opens a master connection and
+# subsequent commands reuse it (ControlPersist keeps it warm), turning many
+# TCP+auth handshakes per poll into one. Biggest latency win for --remote mode.
+_SSH_CONTROL_DIR = os.path.join(os.path.expanduser("~"), ".ssh", "cm-slurmtop")
+try:
+    os.makedirs(_SSH_CONTROL_DIR, mode=0o700, exist_ok=True)
+except OSError:
+    _SSH_CONTROL_DIR = ""
+
 _SSH_OPTS = [
     "-o", "StrictHostKeyChecking=no",
     "-o", "ConnectTimeout=3",
     "-o", "BatchMode=yes",
 ]
+if _SSH_CONTROL_DIR:
+    _SSH_OPTS += [
+        "-o", "ControlMaster=auto",
+        "-o", "ControlPersist=60s",
+        "-o", f"ControlPath={os.path.join(_SSH_CONTROL_DIR, '%C')}",
+    ]
 _SSH_TIMEOUT = 8  # seconds
 
 
@@ -204,9 +219,21 @@ async def get_completed_jobs(config: Config | None = None) -> list[CompletedJob]
 
 
 def _parse_scontrol(output: str) -> dict[str, str]:
-    """Parse scontrol show job output into a key-value dict."""
+    """Parse scontrol show job output into a key-value dict.
+
+    Most fields are whitespace-separated ``key=value`` tokens, but a few
+    (notably ``SubmitLine``) hold a value that itself contains spaces and runs
+    to the end of its line. Those are captured whole so the full sbatch command
+    survives — otherwise ``SubmitLine=sbatch --array=1-4 job.sh`` would be
+    truncated to just ``sbatch`` and break resubmission.
+    """
     result: dict[str, str] = {}
     for line in output.splitlines():
+        marker = "SubmitLine="
+        idx = line.find(marker)
+        if idx != -1:
+            result["SubmitLine"] = line[idx + len(marker):].strip()
+            line = line[:idx]  # parse any tokens preceding it normally
         for token in line.split():
             if "=" in token:
                 key, _, value = token.partition("=")
@@ -245,7 +272,7 @@ async def _get_job_detail_sacct(job_id: str) -> JobDetail | None:
     fmt = (
         "JobID,JobName,State,ExitCode,Partition,NodeList,NCPUS,NNodes,"
         "ReqMem,Timelimit,Elapsed,Submit,Start,End,WorkDir,Account,QOS,"
-        "ReqTRES,AllocTRES"
+        "ReqTRES,AllocTRES,SubmitLine"
     )
     stdout, _, rc = await _run_cmd(
         "sacct",
@@ -259,7 +286,7 @@ async def _get_job_detail_sacct(job_id: str) -> JobDetail | None:
 
     for line in stdout.strip().splitlines():
         parts = line.split("|")
-        if len(parts) < 19:
+        if len(parts) < 20:
             continue
         jid = parts[0].strip()
         if "." in jid:
@@ -285,6 +312,7 @@ async def _get_job_detail_sacct(job_id: str) -> JobDetail | None:
             "QoS": parts[16].strip(),
             "ReqTRES": parts[17].strip(),
             "AllocTRES": parts[18].strip(),
+            "SubmitLine": parts[19].strip(),
         }
         work_dir = raw["WorkDir"]
         job_name = raw["JobName"]
@@ -302,7 +330,7 @@ async def _get_job_detail_sacct(job_id: str) -> JobDetail | None:
 
         # Restore cached command/workdir into raw dict if sacct didn't provide them
         cached_cmd, cached_wd = persistent_config.get_cached_command(job_id)
-        if cached_cmd and "Command" not in raw and "SubmitLine" not in raw:
+        if cached_cmd and not raw.get("Command") and not raw.get("SubmitLine"):
             raw["Command"] = cached_cmd
         if cached_wd and not work_dir:
             work_dir = cached_wd
@@ -523,8 +551,21 @@ async def cancel_job(job_id: str, force: bool = False) -> tuple[bool, str]:
 
 
 async def resubmit_job(command: str, work_dir: str) -> tuple[bool, str]:
-    """Resubmit a job using its original sbatch command. Returns (success, msg)."""
-    stdout, stderr, rc = await _run_cmd("sbatch", "--chdir", work_dir, command)
+    """Resubmit a job using its original sbatch command. Returns (success, msg).
+
+    `command` is either a script path (from scontrol Command=) or a full
+    sbatch command line (from sacct SubmitLine=, e.g. "sbatch --array=1-4 job.sh").
+    """
+    tokens = shlex.split(command) if command else []
+    if not tokens:
+        return False, "Resubmit failed: empty submit command"
+
+    # Drop a leading "sbatch" from a full SubmitLine so we don't pass it as a script.
+    if tokens[0] == "sbatch":
+        tokens = tokens[1:]
+    args = (["--chdir", work_dir] if work_dir else []) + tokens
+
+    stdout, stderr, rc = await _run_cmd("sbatch", *args)
     if rc == 0:
         return True, stdout.strip()
     return False, f"Resubmit failed: {stderr.strip()}"
@@ -535,60 +576,62 @@ async def resubmit_job(command: str, work_dir: str) -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 
 
-async def get_cluster_summary(config: Config | None = None) -> str:
-    """Get a one-line cluster summary: user job counts + partition availability."""
+async def get_partition_availability(config: Config | None = None) -> list[str]:
+    """Return per-partition node availability strings from `sinfo`.
+
+    Each entry looks like "gpu:10/5/0/15" (allocated/idle/other/total).
+    Honors cfg.partition_order for display ordering.
+    """
+    cfg = config or _config
+    stdout_si, _, _ = await _run_cmd(
+        "sinfo", "--noheader", "--summarize", "--format=%P|%a|%F",
+    )
+    if not stdout_si.strip():
+        return []
+
+    # Parse sinfo: partition|availability|allocated/idle/other/total
+    part_dict: dict[str, str] = {}
+    for line in stdout_si.strip().splitlines():
+        fields = line.split("|")
+        if len(fields) >= 3:
+            pname = fields[0].strip().rstrip("*")
+            avail = fields[1].strip()
+            nodes = fields[2].strip()  # e.g. "10/5/0/15"
+            if avail == "up":
+                part_dict[pname] = f"{pname}:{nodes}"
+
+    if cfg.partition_order:
+        ordered = [part_dict[p] for p in cfg.partition_order if p in part_dict]
+        # Append remaining partitions not in the order list
+        for p in part_dict:
+            if p not in cfg.partition_order:
+                ordered.append(part_dict[p])
+        return ordered
+    return list(part_dict.values())
+
+
+def format_cluster_summary(
+    running_jobs: list[RunningJob],
+    part_info: list[str],
+    config: Config | None = None,
+) -> str:
+    """Build the one-line cluster bar from already-fetched data (no I/O).
+
+    Running/pending counts are derived from the squeue result we already have,
+    avoiding a second squeue call per poll.
+    """
     cfg = config or _config
     user = cfg.user or USER
-
-    squeue_out, sinfo_out = await asyncio.gather(
-        _run_cmd("squeue", "-u", user, "--noheader", "--format=%T"),
-        _run_cmd("sinfo", "--noheader", "--summarize", "--format=%P|%a|%F"),
-    )
-
-    # Count running/pending from squeue
-    running = pending = 0
-    stdout_sq = squeue_out[0]
-    if stdout_sq.strip():
-        for line in stdout_sq.strip().splitlines():
-            state = line.strip()
-            if state == "RUNNING":
-                running += 1
-            elif state == "PENDING":
-                pending += 1
+    running = sum(1 for j in running_jobs if j.state == "RUNNING")
+    pending = sum(1 for j in running_jobs if j.state == "PENDING")
 
     parts: list[str] = [
         f"[bold]{user}[/]",
         f"[green]{running}[/] running",
         f"[yellow]{pending}[/] pending",
     ]
-
-    # Parse sinfo: partition|availability|allocated/idle/other/total
-    stdout_si = sinfo_out[0]
-    if stdout_si.strip():
-        part_dict: dict[str, str] = {}
-        for line in stdout_si.strip().splitlines():
-            fields = line.split("|")
-            if len(fields) >= 3:
-                pname = fields[0].strip().rstrip("*")
-                avail = fields[1].strip()
-                nodes = fields[2].strip()  # e.g. "10/5/0/15"
-                if avail == "up":
-                    part_dict[pname] = f"{pname}:{nodes}"
-
-        # Apply user-specified partition order if given
-        if cfg.partition_order:
-            ordered = [part_dict[p] for p in cfg.partition_order if p in part_dict]
-            # Append remaining partitions not in the order list
-            for p in part_dict:
-                if p not in cfg.partition_order:
-                    ordered.append(part_dict[p])
-            part_info = ordered
-        else:
-            part_info = list(part_dict.values())
-
-        if part_info:
-            parts.append("  " + "  ".join(part_info))
-
+    if part_info:
+        parts.append("  " + "  ".join(part_info))
     return "  ".join(parts)
 
 
