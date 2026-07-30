@@ -16,6 +16,7 @@ except ImportError:
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "slurmtop"
 CONFIG_FILE = CONFIG_DIR / "config.toml"
 LOG_CACHE_FILE = CONFIG_DIR / "log_cache.json"
+SCRIPT_CACHE_DIR = CONFIG_DIR / "scripts"
 
 
 def load() -> dict:
@@ -104,7 +105,11 @@ def _load_log_cache() -> dict:
 
 def _save_log_cache(cache: dict) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    LOG_CACHE_FILE.write_text(json.dumps(cache))
+    # Write via a temp file + rename so a concurrent reader never sees a
+    # half-written file (the TUI and a resubmit can both touch this).
+    tmp = LOG_CACHE_FILE.with_suffix(f".tmp{os.getpid()}")
+    tmp.write_text(json.dumps(cache))
+    os.replace(tmp, LOG_CACHE_FILE)
 
 
 def cache_job_paths(
@@ -113,9 +118,16 @@ def cache_job_paths(
     stderr_path: str | None = None,
     command: str | None = None,
     work_dir: str | None = None,
+    submit_line: str | None = None,
 ) -> None:
-    """Store paths for a job (called when scontrol provides them)."""
-    if not any((stdout_path, stderr_path, command, work_dir)):
+    """Store paths for a job (called when scontrol provides them).
+
+    ``command`` (scontrol Command=, a bare script path) and ``submit_line``
+    (scontrol SubmitLine=, the full "sbatch --array=1-4 job.sh") are stored
+    separately so resubmission can prefer the richer one instead of depending
+    on which field happened to be written last.
+    """
+    if not any((stdout_path, stderr_path, command, work_dir, submit_line)):
         return
     cache = _load_log_cache()
     entry = cache.get(job_id, {})
@@ -125,6 +137,8 @@ def cache_job_paths(
         entry["stderr"] = stderr_path
     if command:
         entry["command"] = command
+    if submit_line:
+        entry["submit_line"] = submit_line
     if work_dir:
         entry["workdir"] = work_dir
     entry["ts"] = time.time()
@@ -146,12 +160,17 @@ def get_cached_log_paths(job_id: str) -> tuple[str | None, str | None]:
 
 
 def get_cached_command(job_id: str) -> tuple[str | None, str | None]:
-    """Retrieve cached command and workdir for a job. Returns (command, workdir)."""
+    """Retrieve cached command and workdir for a job. Returns (command, workdir).
+
+    Prefers the full submit line over the bare script path — it carries the
+    sbatch flags (--array etc.) that resubmission needs.
+    """
     cache = _load_log_cache()
     entry = cache.get(job_id)
     if not entry:
         return None, None
-    return entry.get("command") or None, entry.get("workdir") or None
+    command = entry.get("submit_line") or entry.get("command") or None
+    return command, entry.get("workdir") or None
 
 
 def prune_log_cache(max_age_days: int | None = 30) -> None:
@@ -163,3 +182,94 @@ def prune_log_cache(max_age_days: int | None = 30) -> None:
     pruned = {k: v for k, v in cache.items() if v.get("ts", 0) > cutoff}
     if len(pruned) < len(cache):
         _save_log_cache(pruned)
+
+
+# ---------------------------------------------------------------------------
+# Batch script cache — archives the sbatch script text itself
+# ---------------------------------------------------------------------------
+# Slurm only keeps a job's batch script until MinJobAge seconds after it ends
+# (300s on many clusters), so `scontrol write batch_script` fails for anything
+# older. Archiving the text — rather than the path, which the user may edit,
+# move, or delete — is what makes an old job's script recoverable at all.
+# Layout: <SCRIPT_CACHE_DIR>/<base_job_id>.sh
+
+
+def set_script_cache_dir(path: str | Path | None) -> None:
+    """Point the script cache at a custom directory (from config.toml)."""
+    global SCRIPT_CACHE_DIR
+    if not path:
+        return
+    SCRIPT_CACHE_DIR = Path(path)
+
+
+def base_job_id(job_id: str) -> str:
+    """Reduce any Slurm job id to the base id that owns the batch script.
+
+    All tasks of an array share one script, so ``123_11``, ``123_[1-40]``,
+    ``123+0`` (heterogeneous) and ``123.batch`` (a step, as sacct reports it)
+    all map to ``123``. Returns "" if no digits remain — callers treat that as
+    "no valid id", which also keeps arbitrary text out of cache filenames.
+    """
+    head = job_id.strip()
+    for sep in ("_", "+", "."):
+        head = head.split(sep, 1)[0]
+    return head if head.isdigit() else ""
+
+
+def script_cache_path(job_id: str) -> Path | None:
+    """Path where this job's script is (or would be) cached."""
+    base = base_job_id(job_id)
+    if not base:
+        return None
+    return SCRIPT_CACHE_DIR / f"{base}.sh"
+
+
+def get_cached_script(job_id: str) -> Path | None:
+    """Return the cached script path, or None if not cached."""
+    path = script_cache_path(job_id)
+    if path is None:
+        return None
+    try:
+        # Require non-empty: a truncated write must not open as a blank buffer.
+        if path.stat().st_size > 0:
+            return path
+    except OSError:
+        pass
+    return None
+
+
+def cache_script(job_id: str, text: str) -> Path | None:
+    """Archive a job's batch script text. Returns the path, or None on failure."""
+    path = script_cache_path(job_id)
+    if path is None or not text.strip():
+        return None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(path.parent, 0o700)
+        # Batch scripts routinely hold tokens and private paths, so keep the
+        # archive owner-only. No exec bit — this copy is for reading, not running.
+        tmp = path.with_suffix(f".tmp{os.getpid()}")
+        tmp.write_text(text)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+        return path
+    except OSError:
+        return None
+
+
+def prune_script_cache(max_age_days: int | None = 30) -> None:
+    """Remove archived scripts older than max_age_days. None = never prune."""
+    if max_age_days is None:
+        return
+    cutoff = time.time() - max_age_days * 86400
+    try:
+        scripts = list(SCRIPT_CACHE_DIR.glob("*.sh"))
+    except OSError:
+        return
+    for path in scripts:
+        try:
+            # mtime, not a JSON timestamp — the file itself is the record here.
+            if path.stat().st_mtime <= cutoff:
+                path.unlink()
+        except OSError:
+            pass

@@ -23,6 +23,7 @@ class Config:
     max_partition_width: int = 16  # max characters for partition column
     abbreviate_states: bool = False  # show abbreviated state names in terminated jobs
     cache_max_age_days: int | None = 30  # prune cache entries older than this (None = never)
+    script_cache_dir: str = ""  # where to archive sbatch scripts ("" = <config_dir>/scripts)
 
 
 @dataclass

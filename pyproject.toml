@@ -28,7 +28,6 @@ dev = [
 
 [project.scripts]
 slurmtop = "slurmtop.__main__:main"
-slurmtop-daemon = "slurmtop.daemon:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -103,6 +103,7 @@ availability.
 | `Shift+C` | **Force cancel** — sends SIGKILL immediately, no confirmation |
 | `Ctrl+V` | Toggle multi-select mode (vim-visual style). Use Up/Down to extend the selection range from an anchor row, then press `c` or `Shift+C` to cancel all selected jobs. Press `Ctrl+V` again to exit. Detail panels freeze on the last single-selected job. |
 | `s` | Resubmit a terminated job using its original sbatch script (with confirmation) |
+| `b` | View the job's sbatch script, read-only, in your editor |
 | `e` | Open the job's **stdout** log in an external editor (suspends TUI) |
 | `Shift+E` | Open the job's **stderr** log in an external editor |
 | `o` | SSH to the selected job's compute node. Suspends the TUI; type `exit` to return |
@@ -243,6 +244,25 @@ Partition format is `name:A/I/O/T`:
 Press `m` to bookmark any job. Bookmarked jobs are pinned to the top of their table with
 a ★ prefix. Bookmarks persist for the duration of the session.
 
+### View sbatch Script
+
+Press `b` to open the selected job's sbatch script in your editor, read-only. Works on
+pending, running, and terminated jobs. The TUI suspends while the editor is open.
+
+With `vim` the file opens via `-R`, so you can still `:w /some/other/path` to keep a copy
+— useful when the original script has been changed since the job was submitted. Editors
+without a known read-only flag open writable, and the Command Log says so.
+
+The script **text** is archived, not just its path, so your copy stays readable even if you
+later edit, move, or delete the original file. Archiving happens automatically whenever you
+select a job that Slurm still knows about, and on demand when you press `b`. Array tasks
+share one script: `123_11`, `123_[1-40]`, and `123` all resolve to the same file.
+
+**Slurm only keeps a job's script until `MinJobAge` seconds after it ends** — often just
+300. A job that finished before SlurmTop ever saw it has no archived copy and Slurm can no
+longer produce one; pressing `b` reports that the script is unavailable. See
+[Job Cache](#job-cache) for the cache location and `script_cache_dir`.
+
 ### Open Logs in Editor
 
 Press `e` to open the selected job's stdout log in an external text editor, or
@@ -283,65 +303,51 @@ The bottom-right panel shows a timestamped log of all actions and their results:
   >>> 2465485 COMPLETED
 ```
 
-## Log Path Cache
+## Job Cache
 
-Slurm's `scontrol show job` provides the exact `StdOut`/`StdErr` file paths for a job,
-but only while the job is still in Slurm's memory (typically a few minutes to hours after
-completion). After that, the paths are lost and SlurmTop has to guess based on filename
-patterns — which can fail if you use custom `--output`/`--error` names.
+Slurm forgets a job shortly after it ends — `MinJobAge` seconds, often just 300. Until
+then, `scontrol` can tell you the job's exact `StdOut`/`StdErr` paths and hand you its
+sbatch script; afterwards both are gone and only `sacct` remains, which knows neither.
 
-To solve this, SlurmTop **caches log paths while jobs are still running**, so they remain
-available after the job terminates. The cache is stored in
-`~/.config/slurmtop/log_cache.json` and is automatically pruned on startup.
+SlurmTop caches both while a job is still live, so they survive the job.
 
-### How the cache is populated
-
-There are two modes, chosen automatically:
-
-| Mode | When | How |
-|------|------|-----|
-| **Background thread** | No daemon running | SlurmTop starts a thread that polls `scontrol` every 30s for all running jobs and caches their log paths. The thread stops when SlurmTop exits. |
-| **External daemon** | Daemon is running | SlurmTop detects the daemon via PID file and lets it handle caching. The daemon runs independently and keeps caching even when SlurmTop is closed. |
-
-The active mode is shown in the Command Log at startup.
-
-### Standalone daemon
-
-The daemon caches log paths continuously in the background, even when SlurmTop isn't
-open. This is useful if you want to be able to read logs of jobs that finished while you
-were away.
+Check your cluster's window with:
 
 ```bash
-# Start the daemon (runs in foreground, Ctrl+C to stop)
-slurmtop-daemon start
-
-# Start in background
-slurmtop-daemon start &
-
-# With remote mode
-slurmtop-daemon start --remote user@login.hpc.edu &
-
-# Custom poll interval (default: 30s)
-slurmtop-daemon start --interval 60
-
-# Check if daemon is running
-slurmtop-daemon status
-
-# Stop the daemon
-slurmtop-daemon stop
+scontrol show config | grep MinJobAge
 ```
 
-When the daemon is running, SlurmTop detects it automatically and skips starting its own
-caching thread. When the daemon is stopped, SlurmTop falls back to the built-in thread.
+### Batch scripts
+
+Archived as text under the base job ID, so all tasks of an array share one file. See
+[View sbatch Script](#view-sbatch-script) for the `b` keybinding and its limitations.
+
+### Log paths
+
+Log paths are cached the same way, into `log_cache.json`, whenever you select a job that
+Slurm still knows about. For older jobs SlurmTop falls back to guessing from filename
+patterns (`slurm-JOBID.out`, `JOBNAME-JOBID.out`, `logs/` subdirectories), which can fail
+if you use custom `--output`/`--error` names.
+
+### Resubmit fallback
+
+Resubmit (**`s`**) runs the job's original sbatch command. If the script file it names no
+longer exists, SlurmTop substitutes the archived copy and says so in the Command Log. Not
+available in remote mode, where the archive is local but `sbatch` runs on the login node.
 
 ### Cache files
 
 | File | Purpose |
 |------|---------|
-| `~/.config/slurmtop/log_cache.json` | Cached `StdOut`/`StdErr` paths per job ID |
-| `~/.config/slurmtop/daemon.pid` | PID file for daemon coordination |
+| `~/.config/slurmtop/log_cache.json` | Cached `StdOut`/`StdErr` paths, work dir, and submit command per job ID |
+| `~/.config/slurmtop/scripts/<job_id>.sh` | Archived sbatch scripts, mode `600` (they often contain tokens and private paths) |
 
-Entries older than 30 days (or `--days`, whichever is larger) are pruned automatically.
+Both are pruned on startup using `cache_max_age_days` (default 30, `null` to never prune).
+Set `script_cache_dir` in `config.toml` to archive scripts somewhere else.
+
+> Earlier versions shipped a `slurmtop-daemon` that polled for log paths in the background.
+> It has been removed — caching now happens inline. A leftover
+> `~/.config/slurmtop/daemon.pid` is inert and can be deleted.
 
 ## Remote Mode
 
@@ -401,6 +407,8 @@ abbreviate_states = false # use short state names: DONE, FAIL, TIME, CAN, OOM, .
 # Cache settings
 # cache_max_age_days = 30  # auto-delete cached job info older than N days
                            # set to null to never delete (keep forever)
+# script_cache_dir = ""    # where archived sbatch scripts live
+                           # (default: ~/.config/slurmtop/scripts)
 
 # Partition display order in the cluster bar.
 # Partitions not listed appear after these in their default order.
@@ -456,21 +464,6 @@ slurmtop [-h] [-r SEC] [-d N] [-u USER] [-p PARTITION]
 | `--no-live` | Disable live CPU and GPU monitoring (no SSH/srun to nodes) | off |
 | `--partition-order` | Comma-separated partition display order for cluster bar | (sinfo order) |
 | `-H`, `--remote` | SSH target for remote mode (e.g. `user@login.hpc.edu`) | (local) |
-
-### slurmtop-daemon
-
-```
-slurmtop-daemon {start,stop,status} [--user USER] [--remote HOST] [--interval SEC]
-```
-
-| Argument | Description |
-|----------|-------------|
-| `start` | Start the daemon (runs in foreground; use `&` for background) |
-| `stop` | Stop the running daemon |
-| `status` | Check if the daemon is running |
-| `--user` | Slurm user to monitor (default: `$USER`) |
-| `--remote` | SSH target for remote mode |
-| `--interval` | Poll interval in seconds (default: 30) |
 
 ## Requirements
 

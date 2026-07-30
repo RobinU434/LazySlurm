@@ -162,6 +162,7 @@ def main() -> None:
     abbreviate_states = bool(saved.get("abbreviate_states", False))
     raw_cache_age = saved.get("cache_max_age_days", 30)
     cache_max_age_days = None if raw_cache_age is None else int(raw_cache_age)
+    script_cache_dir = os.path.expanduser(str(saved.get("script_cache_dir", "")))
 
     config = Config(
         refresh=float(resolved["refresh"]),
@@ -178,6 +179,7 @@ def main() -> None:
         max_partition_width=max_partition_width,
         abbreviate_states=abbreviate_states,
         cache_max_age_days=cache_max_age_days,
+        script_cache_dir=script_cache_dir,
     )
 
     from slurmtop.app import SlurmTopApp

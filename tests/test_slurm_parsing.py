@@ -189,6 +189,174 @@ def test_resubmit_empty_command():
 
 
 # ---------------------------------------------------------------------------
+# _script_token_index
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "tokens,expected",
+    [
+        (["job.sh"], 0),
+        (["--array=1-4", "job.sh"], 1),
+        (["--array", "1-4", "job.sh"], 2),        # separate-form option value skipped
+        (["-J", "myname", "job.sh"], 2),
+        (["--array=1-4", "-J", "n", "job.sh"], 3),
+        (["--hold"], None),                        # flags only, no script
+        ([], None),
+    ],
+)
+def test_script_token_index(tokens, expected):
+    assert slurm._script_token_index(tokens) == expected
+
+
+# ---------------------------------------------------------------------------
+# batch script fetch + archive
+# ---------------------------------------------------------------------------
+
+
+def test_get_batch_script_success(monkeypatch):
+    calls = {}
+
+    async def _fake(*args):
+        calls["args"] = args
+        return "#!/bin/bash\necho hi\n", "", 0
+
+    monkeypatch.setattr(slurm, "_run_cmd", _fake)
+    text = asyncio.run(slurm.get_batch_script("123"))
+    assert text == "#!/bin/bash\necho hi\n"
+    # The trailing "-" is what sends the script to stdout instead of a file in cwd.
+    assert calls["args"] == ("scontrol", "write", "batch_script", "123", "-")
+
+
+def test_get_batch_script_failure_rc_zero(monkeypatch):
+    """scontrol exits 0 even when retrieval fails, so rc must not be trusted."""
+
+    async def _fake(*args):
+        return "", "job script retrieval failed: Invalid job id specified", 0
+
+    monkeypatch.setattr(slurm, "_run_cmd", _fake)
+    assert asyncio.run(slurm.get_batch_script("123")) is None
+
+
+def test_archive_batch_script_writes_cache(tmp_path, monkeypatch):
+    from slurmtop import config as cfg
+
+    monkeypatch.setattr(cfg, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "SCRIPT_CACHE_DIR", tmp_path / "scripts")
+
+    async def _fake(*args):
+        return "#!/bin/bash\necho hi\n", "", 0
+
+    monkeypatch.setattr(slurm, "_run_cmd", _fake)
+    path = asyncio.run(slurm.archive_batch_script("123"))
+    assert path == tmp_path / "scripts" / "123.sh"
+    assert path.read_text() == "#!/bin/bash\necho hi\n"
+
+
+def test_archive_batch_script_uses_cache(tmp_path, monkeypatch):
+    from slurmtop import config as cfg
+
+    monkeypatch.setattr(cfg, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "SCRIPT_CACHE_DIR", tmp_path / "scripts")
+    cfg.cache_script("123", "#!/bin/bash\ncached\n")
+
+    async def _fail(*args):
+        raise AssertionError("should not hit Slurm when the script is cached")
+
+    monkeypatch.setattr(slurm, "_run_cmd", _fail)
+    # An array task resolves to the same cached script as its base id.
+    path = asyncio.run(slurm.archive_batch_script("123_7"))
+    assert path.read_text() == "#!/bin/bash\ncached\n"
+
+
+def test_archive_batch_script_unavailable(tmp_path, monkeypatch):
+    from slurmtop import config as cfg
+
+    monkeypatch.setattr(cfg, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "SCRIPT_CACHE_DIR", tmp_path / "scripts")
+
+    async def _fake(*args):
+        return "", "job script retrieval failed: Invalid job id specified", 0
+
+    monkeypatch.setattr(slurm, "_run_cmd", _fake)
+    assert asyncio.run(slurm.archive_batch_script("123")) is None
+
+
+# ---------------------------------------------------------------------------
+# resubmit falls back to the archived script
+# ---------------------------------------------------------------------------
+
+
+def test_resubmit_falls_back_to_archive(tmp_path, monkeypatch):
+    from slurmtop import config as cfg
+
+    monkeypatch.setattr(cfg, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "SCRIPT_CACHE_DIR", tmp_path / "scripts")
+    archived = cfg.cache_script("123", "#!/bin/bash\n")
+
+    slurm.set_config(Config())  # local mode
+    fake, calls = _capture_run_cmd()
+    monkeypatch.setattr(slurm, "_run_cmd", fake)
+
+    ok, msg = asyncio.run(
+        slurm.resubmit_job("sbatch --array=1-4 /gone/job.sh", "/work", "123")
+    )
+    assert ok
+    # The missing script token is replaced; flags and --chdir are untouched.
+    assert calls["args"] == (
+        "sbatch", "--chdir", "/work", "--array=1-4", str(archived),
+    )
+    assert "archived copy" in msg
+
+
+def test_resubmit_prefers_existing_original(tmp_path, monkeypatch):
+    from slurmtop import config as cfg
+
+    monkeypatch.setattr(cfg, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "SCRIPT_CACHE_DIR", tmp_path / "scripts")
+    cfg.cache_script("123", "#!/bin/bash\n")
+
+    original = tmp_path / "job.sh"
+    original.write_text("#!/bin/bash\n")
+
+    slurm.set_config(Config())
+    fake, calls = _capture_run_cmd()
+    monkeypatch.setattr(slurm, "_run_cmd", fake)
+
+    ok, msg = asyncio.run(slurm.resubmit_job(f"sbatch {original}", "/work", "123"))
+    assert ok
+    # Original still there, so the archive is ignored.
+    assert calls["args"] == ("sbatch", "--chdir", "/work", str(original))
+    assert "archived" not in msg
+
+
+def test_resubmit_missing_script_no_archive(tmp_path, monkeypatch):
+    from slurmtop import config as cfg
+
+    monkeypatch.setattr(cfg, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "SCRIPT_CACHE_DIR", tmp_path / "scripts")
+
+    slurm.set_config(Config())
+    fake, _calls = _capture_run_cmd()
+    monkeypatch.setattr(slurm, "_run_cmd", fake)
+
+    ok, msg = asyncio.run(slurm.resubmit_job("sbatch /gone/job.sh", "/work", "123"))
+    assert not ok
+    assert "no archived copy" in msg
+
+
+def test_resubmit_without_job_id_skips_fallback(monkeypatch):
+    """Existing callers that pass no job_id must not gain a file-existence check."""
+    slurm.set_config(Config())
+    fake, calls = _capture_run_cmd()
+    monkeypatch.setattr(slurm, "_run_cmd", fake)
+
+    ok, _ = asyncio.run(slurm.resubmit_job("sbatch /gone/job.sh", "/work"))
+    assert ok
+    assert calls["args"] == ("sbatch", "--chdir", "/work", "/gone/job.sh")
+
+
+# ---------------------------------------------------------------------------
 # cluster summary: partition availability (sinfo) + count formatting
 # ---------------------------------------------------------------------------
 

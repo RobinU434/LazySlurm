@@ -7,6 +7,7 @@ import os
 import shlex
 from collections import deque
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from slurmtop.models import CompletedJob, Config, JobDetail, JobStats, RunningJob
 
@@ -250,12 +251,25 @@ async def get_job_detail(job_id: str) -> JobDetail | None:
         raw = _parse_scontrol(stdout)
         stdout_path = raw.get("StdOut")
         stderr_path = raw.get("StdErr")
-        command = raw.get("Command", raw.get("SubmitLine"))
         work_dir = raw.get("WorkDir", "")
-        # Cache all paths so they survive after the job leaves scontrol
+        # Cache all paths so they survive after the job leaves scontrol.
+        # Command and SubmitLine are stored separately — see cache_job_paths.
         persistent_config.cache_job_paths(
-            job_id, stdout_path, stderr_path, command, work_dir,
+            job_id,
+            stdout_path,
+            stderr_path,
+            raw.get("Command"),
+            work_dir,
+            submit_line=raw.get("SubmitLine"),
         )
+        # scontrol answered, so the job is still in slurmctld and its batch
+        # script is still retrievable — archive it now, because after MinJobAge
+        # it is gone for good. Cheap after the first time (one stat), and a
+        # failure here must never stop detail loading.
+        try:
+            await archive_batch_script(job_id)
+        except Exception:
+            pass
         return JobDetail(
             job_id=job_id,
             raw=raw,
@@ -550,12 +564,42 @@ async def cancel_job(job_id: str, force: bool = False) -> tuple[bool, str]:
     return False, f"Failed to cancel job {job_id}: {stderr.strip()}"
 
 
-async def resubmit_job(command: str, work_dir: str) -> tuple[bool, str]:
+def _script_token_index(tokens: list[str]) -> int | None:
+    """Index of the script path in an sbatch argument list, or None.
+
+    The script is the last bare (non-flag) token, skipping any token that is the
+    value of a preceding separate-form option such as "--array 1-4" or "-J name".
+    """
+    skip_next = False
+    found = None
+    for i, tok in enumerate(tokens):
+        if skip_next:
+            skip_next = False
+            continue
+        if tok.startswith("-"):
+            # A separate-form option ("--array 1-4") consumes the next token;
+            # the "=" form ("--array=1-4") carries its own value.
+            if "=" not in tok:
+                skip_next = True
+            continue
+        found = i
+    return found
+
+
+async def resubmit_job(
+    command: str, work_dir: str, job_id: str | None = None,
+) -> tuple[bool, str]:
     """Resubmit a job using its original sbatch command. Returns (success, msg).
 
     `command` is either a script path (from scontrol Command=) or a full
     sbatch command line (from sacct SubmitLine=, e.g. "sbatch --array=1-4 job.sh").
+
+    If `job_id` is given and the original script file is gone, falls back to the
+    archived copy of the script (see archive_batch_script) so a job whose script
+    was moved or deleted can still be resubmitted.
     """
+    from slurmtop import config as persistent_config
+
     tokens = shlex.split(command) if command else []
     if not tokens:
         return False, "Resubmit failed: empty submit command"
@@ -563,12 +607,76 @@ async def resubmit_job(command: str, work_dir: str) -> tuple[bool, str]:
     # Drop a leading "sbatch" from a full SubmitLine so we don't pass it as a script.
     if tokens[0] == "sbatch":
         tokens = tokens[1:]
+
+    note = ""
+    idx = _script_token_index(tokens)
+    if job_id and idx is not None and not await _file_exists(tokens[idx]):
+        archived = persistent_config.get_cached_script(job_id)
+        if archived is None:
+            return False, (
+                f"Resubmit failed: script '{tokens[idx]}' no longer exists and "
+                "no archived copy is available"
+            )
+        if _config.remote:
+            # The archive is local but sbatch runs on the login node.
+            return False, (
+                f"Resubmit failed: script '{tokens[idx]}' no longer exists; the "
+                "archived-script fallback is not supported in remote mode"
+            )
+        note = f" (original script missing — submitted archived copy {archived})"
+        tokens[idx] = str(archived)
+
     args = (["--chdir", work_dir] if work_dir else []) + tokens
 
     stdout, stderr, rc = await _run_cmd("sbatch", *args)
     if rc == 0:
-        return True, stdout.strip()
+        return True, stdout.strip() + note
     return False, f"Resubmit failed: {stderr.strip()}"
+
+
+# ---------------------------------------------------------------------------
+# scontrol write batch_script – the job's sbatch script
+# ---------------------------------------------------------------------------
+
+
+async def get_batch_script(job_id: str) -> str | None:
+    """Fetch a job's sbatch script text from Slurm, or None if unavailable.
+
+    Only works while the job is still in slurmctld — same window as
+    `scontrol show job`, i.e. until MinJobAge seconds after the job ends.
+
+    Two things to know about this command:
+      * The trailing "-" makes it write to stdout. Without it, scontrol drops a
+        slurm-<id>.sh file into the current directory, which would litter the
+        user's cwd and land on the wrong host in remote mode.
+      * The exit code is 0 *even when retrieval fails* ("job script retrieval
+        failed: Invalid job id specified" goes to stderr, stdout stays empty).
+        So rc is deliberately ignored; non-empty stdout is the only success test.
+    """
+    stdout, _stderr, _rc = await _run_cmd(
+        "scontrol", "write", "batch_script", job_id, "-",
+    )
+    return stdout if stdout.strip() else None
+
+
+async def archive_batch_script(job_id: str, force: bool = False) -> Path | None:
+    """Return a local path to the job's sbatch script, fetching it if needed.
+
+    Uses the cached archive when present (arrays share one script via the base
+    job id), otherwise fetches from Slurm and archives the text. Returns None
+    when the script is neither cached nor still retrievable.
+    """
+    from slurmtop import config as persistent_config
+
+    if not force:
+        cached = persistent_config.get_cached_script(job_id)
+        if cached is not None:
+            return cached
+
+    text = await get_batch_script(job_id)
+    if text is None:
+        return None
+    return persistent_config.cache_script(job_id, text)
 
 
 # ---------------------------------------------------------------------------

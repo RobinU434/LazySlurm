@@ -7,6 +7,7 @@ import os
 import shlex
 import shutil
 from datetime import datetime
+from pathlib import Path
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -15,7 +16,6 @@ from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Input, RichLog, Static
 
 from slurmtop import slurm
-from slurmtop.daemon import CacheThread, is_daemon_running
 from slurmtop.models import Config
 from slurmtop.widgets.detail_view import DetailView, parse_mem_bytes
 from slurmtop.widgets.job_table import ActiveJobTable, CompletedJobTable, JobSelected, set_partition_colors, set_display_config
@@ -67,6 +67,7 @@ class HelpScreen(ModalScreen[None]):
                 "  [bold cyan]Shift+C[/]         Force cancel job(s) (SIGKILL, no confirmation)\n"
                 "  [bold cyan]Ctrl+V[/]          Toggle multi-select mode (vim-visual)\n"
                 "  [bold cyan]s[/]               Resubmit terminated job (with confirmation)\n"
+                "  [bold cyan]b[/]               View job's sbatch script (read-only, cached)\n"
                 "  [bold cyan]e[/]               Open stdout in editor (vim/nano, set in config)\n"
                 "  [bold cyan]Shift+E[/]         Open stderr in editor\n"
                 "  [bold cyan]o[/]               SSH to job's compute node (suspends TUI)\n"
@@ -201,6 +202,7 @@ class SlurmTopApp(App):
         Binding("shift+c", "force_cancel_job", "Force Cancel", show=False),
         Binding("ctrl+v", "toggle_multiselect", "Multi-select", show=True),
         Binding("s", "resubmit_job", "Resubmit", show=True),
+        Binding("b", "view_batch_script", "Script", show=True),
         Binding("o", "ssh_to_node", "SSH", show=True),
         Binding("e", "edit_stdout", "Edit Out", show=True),
         Binding("shift+e", "edit_stderr", "Edit Err", show=False),
@@ -241,6 +243,7 @@ class SlurmTopApp(App):
         # Resubmit state
         self._resubmit_script: str = ""
         self._resubmit_work_dir: str = ""
+        self._resubmit_job_id: str = ""
         # Current job log paths (for editor)
         self._stdout_path: str | None = None
         self._stderr_path: str | None = None
@@ -249,8 +252,6 @@ class SlurmTopApp(App):
         self._multiselect_table: str = ""  # "active" or "completed"
         self._multiselect_anchor: str | None = None  # job_id where visual mode started
         self._multiselect_ids: set[str] = set()
-        # Log path cache thread
-        self._cache_thread: CacheThread | None = None
 
     def compose(self) -> ComposeResult:
         show_gpu = not self.config.no_gpu and not self.config.no_live
@@ -278,9 +279,12 @@ class SlurmTopApp(App):
             abbreviate=self.config.abbreviate_states,
         )
 
-        # Prune old log path cache entries
+        # Prune old cache entries. Point the script cache at the configured
+        # directory first, so we prune the one we will actually be using.
         from slurmtop import config as persistent_config
         persistent_config.prune_log_cache(max_age_days=self.config.cache_max_age_days)
+        persistent_config.set_script_cache_dir(self.config.script_cache_dir)
+        persistent_config.prune_script_cache(max_age_days=self.config.cache_max_age_days)
 
         self.query_one("#active-jobs").border_title = "Active Jobs"
         self.query_one("#completed-jobs").border_title = "Terminated Jobs"
@@ -299,17 +303,6 @@ class SlurmTopApp(App):
         # Log config overrides
         for override in self._config_overrides:
             self._log("config override", override)
-
-        # Start log path caching (daemon or thread)
-        if is_daemon_running():
-            self._log("log cache", "daemon is running, using external daemon")
-        else:
-            self._cache_thread = CacheThread(
-                user=self.config.user,
-                remote=self.config.remote,
-            )
-            self._cache_thread.start()
-            self._log("log cache", "started background thread")
 
         # Login node warning
         import socket
@@ -332,10 +325,6 @@ class SlurmTopApp(App):
                 self.set_interval(self.config.refresh, self._refresh_live_monitors)
         else:
             self._log("auto-refresh", "disabled (refresh=0)")
-
-    def on_unmount(self) -> None:
-        if self._cache_thread and self._cache_thread.running:
-            self._cache_thread.stop()
 
     # ------------------------------------------------------------------
     # Data polling
@@ -771,6 +760,7 @@ class SlurmTopApp(App):
 
         self._resubmit_script = script
         self._resubmit_work_dir = detail.work_dir
+        self._resubmit_job_id = self._selected_job_id
         self.push_screen(
             ConfirmResubmitScreen(self._selected_job_id, script),
             callback=self._on_resubmit_confirmed,
@@ -781,7 +771,7 @@ class SlurmTopApp(App):
             return
         self._log(f"sbatch {self._resubmit_script}")
         success, msg = await slurm.resubmit_job(
-            self._resubmit_script, self._resubmit_work_dir,
+            self._resubmit_script, self._resubmit_work_dir, self._resubmit_job_id,
         )
         self._log("resubmit", msg)
         if success:
@@ -813,6 +803,31 @@ class SlurmTopApp(App):
     # ------------------------------------------------------------------
     # Open log files in editor
     # ------------------------------------------------------------------
+
+    async def action_view_batch_script(self) -> None:
+        if self._selected_job_id is None:
+            self._set_status("No job selected")
+            return
+
+        job_id = self._selected_job_id
+        from slurmtop import config as persistent_config
+
+        was_cached = persistent_config.get_cached_script(job_id) is not None
+        if not was_cached:
+            self._log("batch script", f"fetching script for {job_id}...")
+
+        path = await slurm.archive_batch_script(job_id)
+        if path is None:
+            msg = (
+                "batch script unavailable — Slurm no longer holds this job "
+                "(MinJobAge) and no copy was archived while it was live"
+            )
+            self._log("batch script", msg)
+            self._set_status(f"No sbatch script available for job {job_id}")
+            return
+
+        self._log("batch script", f"{'cached' if was_cached else 'archived'} {path}")
+        await self._open_readonly_in_editor(path, f"script {job_id}")
 
     async def action_edit_stdout(self) -> None:
         await self._open_in_editor(self._stdout_path, "stdout")
@@ -860,10 +875,14 @@ class SlurmTopApp(App):
             max_partition_width=int(saved.get("max_partition_width", old.max_partition_width)),
             abbreviate_states=bool(saved.get("abbreviate_states", old.abbreviate_states)),
             cache_max_age_days=saved.get("cache_max_age_days", old.cache_max_age_days),
+            script_cache_dir=os.path.expanduser(
+                str(saved.get("script_cache_dir", old.script_cache_dir))
+            ),
         )
 
         # Re-apply module-level settings
         slurm.set_config(self.config)
+        persistent_config.set_script_cache_dir(self.config.script_cache_dir)
         set_partition_colors(self.config.partition_colors)
         set_display_config(
             max_name=self.config.max_name_width,
@@ -876,7 +895,7 @@ class SlurmTopApp(App):
         for field in (
             "refresh", "days", "user", "partition", "no_gpu", "no_live",
             "editor", "max_name_width", "max_partition_width", "abbreviate_states",
-            "partition_order",
+            "partition_order", "cache_max_age_days", "script_cache_dir",
         ):
             old_val = getattr(old, field)
             new_val = getattr(self.config, field)
@@ -941,6 +960,35 @@ class SlurmTopApp(App):
                 pass
 
         self._log(f"edit {label}", "editor closed")
+
+    # Read-only flag per editor. vim gets -R rather than -M on purpose: -R still
+    # allows ":w /somewhere/else", which is the "save it elsewhere" workflow.
+    _READONLY_FLAGS = {
+        "vim": ["-R"], "nvim": ["-R"], "vi": ["-R"], "view": ["-R"], "gvim": ["-R"],
+        "nano": ["-v"],
+        "less": [], "more": [], "bat": [], "most": [],
+    }
+
+    async def _open_readonly_in_editor(self, path: str | Path, label: str) -> None:
+        """Open a local file read-only. Unlike _open_in_editor, no scp step:
+        archived scripts are always local (their text arrived over ssh stdout).
+        """
+        editor = self.config.editor
+        if shutil.which(editor) is None:
+            self._log(label, f"editor '{editor}' not found — set 'editor' in config.toml")
+            return
+
+        name = os.path.basename(editor)
+        if name in self._READONLY_FLAGS:
+            flags = self._READONLY_FLAGS[name]
+        else:
+            flags = []
+            self._log(label, f"'{editor}' has no known read-only flag — opening writable")
+
+        self._log(label, f"{editor} {os.path.basename(str(path))}")
+        with self.suspend():
+            os.system(" ".join(shlex.quote(a) for a in [editor, *flags, str(path)]))
+        self._log(label, "editor closed")
 
     async def action_refresh(self) -> None:
         self._log("refresh")

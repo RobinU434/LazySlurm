@@ -20,6 +20,7 @@
 
 # Cache settings
 # cache_max_age_days = 30    # auto-delete cached job info older than N days (null = never)
+# script_cache_dir = ""      # where archived sbatch scripts live (default: <config_dir>/scripts)
 
 # Partition display order in the cluster bar.
 # Partitions not listed appear after these in their default order.

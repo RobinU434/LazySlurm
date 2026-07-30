@@ -179,3 +179,137 @@ def test_prune_log_cache_none_never_prunes(tmp_path, monkeypatch):
     }))
     cfg.prune_log_cache(max_age_days=None)
     assert "x" in cfg._load_log_cache()
+
+
+def test_cached_command_prefers_submit_line(tmp_path, monkeypatch):
+    monkeypatch.setattr(cfg, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "LOG_CACHE_FILE", tmp_path / "log_cache.json")
+
+    # Both fields stored; the full submit line carries the sbatch flags resubmit needs.
+    cfg.cache_job_paths(
+        "777",
+        command="/w/run.sh",
+        work_dir="/w",
+        submit_line="sbatch --array=1-4 /w/run.sh",
+    )
+    assert cfg.get_cached_command("777") == ("sbatch --array=1-4 /w/run.sh", "/w")
+
+    # With only Command cached, it is still returned.
+    cfg.cache_job_paths("888", command="/w/other.sh")
+    assert cfg.get_cached_command("888")[0] == "/w/other.sh"
+
+
+# ---------------------------------------------------------------------------
+# batch script cache
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "job_id,expected",
+    [
+        ("123", "123"),
+        ("123_11", "123"),          # array task
+        ("123_[1-40]", "123"),      # pending array
+        ("123+0", "123"),           # heterogeneous job
+        ("123.batch", "123"),       # step, as sacct reports it
+        ("  123  ", "123"),
+        ("", ""),
+        ("abc", ""),
+        ("; rm -rf /", ""),         # never let junk reach a cache filename
+    ],
+)
+def test_base_job_id(job_id, expected):
+    assert cfg.base_job_id(job_id) == expected
+
+
+def _script_cache(tmp_path, monkeypatch):
+    monkeypatch.setattr(cfg, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "SCRIPT_CACHE_DIR", tmp_path / "scripts")
+
+
+def test_script_cache_round_trip(tmp_path, monkeypatch):
+    _script_cache(tmp_path, monkeypatch)
+
+    assert cfg.get_cached_script("777") is None
+    path = cfg.cache_script("777", "#!/bin/bash\necho hi\n")
+    assert path is not None
+    assert path == tmp_path / "scripts" / "777.sh"
+    assert cfg.get_cached_script("777") == path
+    assert path.read_text() == "#!/bin/bash\necho hi\n"
+
+
+def test_script_cache_array_task_shares_base(tmp_path, monkeypatch):
+    _script_cache(tmp_path, monkeypatch)
+
+    cfg.cache_script("777", "#!/bin/bash\n")
+    # All tasks of an array resolve to the one script written for the base id.
+    assert cfg.get_cached_script("777_11") == tmp_path / "scripts" / "777.sh"
+    assert cfg.get_cached_script("777_[1-40]") == tmp_path / "scripts" / "777.sh"
+
+
+def test_cache_script_rejects_empty(tmp_path, monkeypatch):
+    _script_cache(tmp_path, monkeypatch)
+
+    assert cfg.cache_script("777", "") is None
+    assert cfg.cache_script("777", "   \n") is None
+    assert cfg.get_cached_script("777") is None
+
+
+def test_cache_script_rejects_bad_job_id(tmp_path, monkeypatch):
+    _script_cache(tmp_path, monkeypatch)
+
+    assert cfg.cache_script("; rm -rf /", "#!/bin/bash\n") is None
+    assert cfg.script_cache_path("abc") is None
+
+
+def test_cache_script_permissions(tmp_path, monkeypatch):
+    import stat
+
+    _script_cache(tmp_path, monkeypatch)
+    path = cfg.cache_script("777", "#!/bin/bash\nsecret_token=abc\n")
+    # Scripts hold tokens and private paths — owner-only, and not executable.
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_get_cached_script_ignores_empty_file(tmp_path, monkeypatch):
+    _script_cache(tmp_path, monkeypatch)
+
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "777.sh").write_text("")
+    # A truncated write must not open as a blank buffer.
+    assert cfg.get_cached_script("777") is None
+
+
+def test_prune_script_cache_removes_old(tmp_path, monkeypatch):
+    import os
+    import time
+
+    _script_cache(tmp_path, monkeypatch)
+    old = cfg.cache_script("111", "#!/bin/bash\n")
+    new = cfg.cache_script("222", "#!/bin/bash\n")
+    os.utime(old, (0, time.time() - 100 * 86400))
+
+    cfg.prune_script_cache(max_age_days=30)
+    assert not old.exists()
+    assert new.exists()
+
+
+def test_prune_script_cache_none_never_prunes(tmp_path, monkeypatch):
+    import os
+
+    _script_cache(tmp_path, monkeypatch)
+    path = cfg.cache_script("111", "#!/bin/bash\n")
+    os.utime(path, (0, 0))
+
+    cfg.prune_script_cache(max_age_days=None)
+    assert path.exists()
+
+
+def test_set_script_cache_dir(tmp_path, monkeypatch):
+    _script_cache(tmp_path, monkeypatch)
+
+    cfg.set_script_cache_dir(tmp_path / "custom")
+    assert cfg.script_cache_path("777") == tmp_path / "custom" / "777.sh"
+    # Falsy input keeps the current directory (empty config value = use default).
+    cfg.set_script_cache_dir("")
+    assert cfg.script_cache_path("777") == tmp_path / "custom" / "777.sh"
