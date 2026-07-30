@@ -31,22 +31,8 @@ nodes, cancel or resubmit jobs, and more — all from a single terminal.
 Requires Python 3.10+ and access to Slurm CLI tools (`squeue`, `sacct`, `scontrol`).
 
 ```bash
-# Clone the repository
-git clone https://github.com/your-org/slurmtop.git
-cd slurmtop
-
 # Install with uv (recommended)
-uv pip install -e .
-
-# Or with pip
-pip install -e .
-```
-
-You can also install the repository directly from remote via: 
-
-```bash
-# Install via pip into local python environment
-pip install git+ssh://git@github.com/RobinU434/SlurmTop.git
+uv tool install git+ssh://git@github.com/RobinU434/SlurmTop.git
 ```
 
 ## Quick Start
