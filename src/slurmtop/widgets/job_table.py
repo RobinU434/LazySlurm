@@ -101,24 +101,31 @@ def _styled_state(state: str) -> Text:
     return Text(display, style=style)
 
 
-def _apply_diff(table: DataTable, new_data: dict[str, tuple], force: bool = False) -> None:
-    """Apply a diff to a DataTable, preserving scroll when only cells change."""
-    existing_keys: set[str] = set()
+def _row_keys(table: DataTable) -> list[str]:
+    """Return the current row keys (job IDs) in display order."""
+    order: list[str] = []
     for i in range(table.row_count):
         try:
             row_key, _ = table.coordinate_to_cell_key(
                 table.cursor_coordinate._replace(row=i, column=0)
             )
-            existing_keys.add(str(row_key.value))
+            order.append(str(row_key.value))
         except Exception:
             break
+    return order
 
-    new_keys = set(new_data.keys())
-    added = new_keys - existing_keys
-    removed = existing_keys - new_keys
 
-    # Full rebuild when rows changed or force requested (e.g. display settings changed)
-    if added or removed or force:
+def _apply_diff(table: DataTable, new_data: dict[str, tuple], force: bool = False) -> None:
+    """Apply a diff to a DataTable, preserving scroll when only cells change."""
+    existing_order = _row_keys(table)
+    existing_keys = set(existing_order)
+    new_order = list(new_data.keys())
+    new_keys = set(new_order)
+
+    # Full rebuild when rows are added/removed, reordered (e.g. a bookmark was
+    # pinned to the top), or a rebuild was forced (display settings changed).
+    # Same-key same-order polls take the cheap in-place path below.
+    if existing_keys != new_keys or existing_order != new_order or force:
         old_selected = table.get_selected_job_id()
         table.clear(columns=force)  # clear columns too on force to reset widths
         if force:
@@ -157,18 +164,25 @@ class JobSelected(Message):
 
 
 # ---------------------------------------------------------------------------
-# Active Jobs Table
+# Shared base
 # ---------------------------------------------------------------------------
 
 
-class ActiveJobTable(DataTable):
-    """Upper-left panel: currently running / pending jobs."""
+class _BaseJobTable(DataTable):
+    """Common behavior for the active and completed job tables.
 
-    COLUMNS = ("Job ID", "Name", "Elapsed", "Partition")
+    Subclasses provide `COLUMNS`, `SOURCE` (the JobSelected tag), whether the
+    cursor is shown before first focus, and two row-shaping hooks:
+    `_filter_match(job, text)` and `_row_for(job)`.
+    """
+
+    COLUMNS: tuple[str, ...] = ()
+    SOURCE: str = ""
+    SHOW_CURSOR_INITIAL: bool = True
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self._all_jobs: list[RunningJob] = []
+        self._all_jobs: list = []
         self._filter_text: str = ""
         self._bookmarked: set[str] = set()
         self._multiselected: set[str] = set()
@@ -179,15 +193,16 @@ class ActiveJobTable(DataTable):
             self.add_column(col, key=col)
         self.cursor_type = "row"
         self.zebra_stripes = True
+        self.show_cursor = self.SHOW_CURSOR_INITIAL
 
     def watch_has_focus(self, focused: bool) -> None:
         self.show_cursor = focused
         if focused:
             job_id = self.get_selected_job_id()
             if job_id:
-                self.post_message(JobSelected(job_id, "active"))
+                self.post_message(JobSelected(job_id, self.SOURCE))
 
-    def update_jobs(self, jobs: list[RunningJob]) -> None:
+    def update_jobs(self, jobs: list) -> None:
         self._all_jobs = jobs
         self._rebuild()
 
@@ -210,47 +225,7 @@ class ActiveJobTable(DataTable):
 
     def get_row_order(self) -> list[str]:
         """Return current row order (job IDs) as they appear in the table."""
-        order: list[str] = []
-        for i in range(self.row_count):
-            try:
-                row_key, _ = self.coordinate_to_cell_key(
-                    self.cursor_coordinate._replace(row=i, column=0)
-                )
-                order.append(str(row_key.value))
-            except Exception:
-                break
-        return order
-
-    def _rebuild(self) -> None:
-        """Rebuild table from _all_jobs, applying filter and bookmark sorting."""
-        filtered = self._all_jobs
-        if self._filter_text:
-            filtered = [
-                j for j in filtered
-                if self._filter_text in j.job_id.lower()
-                or self._filter_text in j.name.lower()
-                or self._filter_text in j.partition.lower()
-            ]
-
-        bookmarked = [j for j in filtered if j.job_id in self._bookmarked]
-        rest = [j for j in filtered if j.job_id not in self._bookmarked]
-
-        new_data: dict[str, tuple] = {}
-        for job in bookmarked + rest:
-            sel_marker = "◉ " if job.job_id in self._multiselected else ""
-            bm_marker = "★ " if job.job_id in self._bookmarked else ""
-            name = _truncate(f"{sel_marker}{bm_marker}{job.name}", _max_name_width)
-            state_style = _ACTIVE_STATE_STYLES.get(job.state, "")
-            id_text = Text(job.job_id, style=state_style)
-            part_text = Text(
-                _truncate(job.partition, _max_partition_width),
-                style=_partition_style(job.partition),
-            )
-            new_data[job.job_id] = (id_text, name, job.elapsed, part_text)
-
-        force = self._force_next
-        self._force_next = False
-        _apply_diff(self, new_data, force=force)
+        return _row_keys(self)
 
     def get_selected_job_id(self) -> str | None:
         if self.row_count == 0:
@@ -264,7 +239,62 @@ class ActiveJobTable(DataTable):
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         job_id = str(event.row_key.value) if event.row_key else self.get_selected_job_id()
         if job_id:
-            self.post_message(JobSelected(job_id, "active"))
+            self.post_message(JobSelected(job_id, self.SOURCE))
+
+    def _markers(self, job_id: str) -> str:
+        sel = "◉ " if job_id in self._multiselected else ""
+        bm = "★ " if job_id in self._bookmarked else ""
+        return sel + bm
+
+    def _rebuild(self) -> None:
+        """Rebuild from _all_jobs, applying filter and pinning bookmarks to top."""
+        filtered = self._all_jobs
+        if self._filter_text:
+            filtered = [j for j in filtered if self._filter_match(j, self._filter_text)]
+
+        bookmarked = [j for j in filtered if j.job_id in self._bookmarked]
+        rest = [j for j in filtered if j.job_id not in self._bookmarked]
+
+        new_data = {job.job_id: self._row_for(job) for job in bookmarked + rest}
+
+        force = self._force_next
+        self._force_next = False
+        _apply_diff(self, new_data, force=force)
+
+    # --- subclass hooks ---
+    def _filter_match(self, job, text: str) -> bool:
+        raise NotImplementedError
+
+    def _row_for(self, job) -> tuple:
+        raise NotImplementedError
+
+
+# ---------------------------------------------------------------------------
+# Active Jobs Table
+# ---------------------------------------------------------------------------
+
+
+class ActiveJobTable(_BaseJobTable):
+    """Upper-left panel: currently running / pending jobs."""
+
+    COLUMNS = ("Job ID", "Name", "Elapsed", "Partition")
+    SOURCE = "active"
+
+    def _filter_match(self, job: RunningJob, text: str) -> bool:
+        return (
+            text in job.job_id.lower()
+            or text in job.name.lower()
+            or text in job.partition.lower()
+        )
+
+    def _row_for(self, job: RunningJob) -> tuple:
+        name = _truncate(f"{self._markers(job.job_id)}{job.name}", _max_name_width)
+        id_text = Text(job.job_id, style=_ACTIVE_STATE_STYLES.get(job.state, ""))
+        part_text = Text(
+            _truncate(job.partition, _max_partition_width),
+            style=_partition_style(job.partition),
+        )
+        return (id_text, name, job.elapsed, part_text)
 
 
 # ---------------------------------------------------------------------------
@@ -272,107 +302,25 @@ class ActiveJobTable(DataTable):
 # ---------------------------------------------------------------------------
 
 
-class CompletedJobTable(DataTable):
+class CompletedJobTable(_BaseJobTable):
     """Lower-left panel: past completed / failed / cancelled jobs."""
 
     COLUMNS = ("Job ID", "Name", "State", "Partition", "Elapsed")
+    SOURCE = "completed"
+    SHOW_CURSOR_INITIAL = False
 
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self._all_jobs: list[CompletedJob] = []
-        self._filter_text: str = ""
-        self._bookmarked: set[str] = set()
-        self._multiselected: set[str] = set()
-        self._force_next: bool = False
+    def _filter_match(self, job: CompletedJob, text: str) -> bool:
+        return (
+            text in job.job_id.lower()
+            or text in job.name.lower()
+            or text in job.partition.lower()
+            or text in job.state.lower()
+        )
 
-    def on_mount(self) -> None:
-        for col in self.COLUMNS:
-            self.add_column(col, key=col)
-        self.cursor_type = "row"
-        self.zebra_stripes = True
-        self.show_cursor = False
-
-    def watch_has_focus(self, focused: bool) -> None:
-        self.show_cursor = focused
-        if focused:
-            job_id = self.get_selected_job_id()
-            if job_id:
-                self.post_message(JobSelected(job_id, "completed"))
-
-    def update_jobs(self, jobs: list[CompletedJob]) -> None:
-        self._all_jobs = jobs
-        self._rebuild()
-
-    def apply_filter(self, text: str) -> None:
-        self._filter_text = text.lower()
-        self._rebuild()
-
-    def set_bookmarks(self, ids: set[str]) -> None:
-        self._bookmarked = ids
-        self._rebuild()
-
-    def set_multiselected(self, ids: set[str]) -> None:
-        self._multiselected = ids
-        self._rebuild()
-
-    def force_rebuild(self) -> None:
-        """Force a full table rebuild (e.g. after display settings change)."""
-        self._force_next = True
-        self._rebuild()
-
-    def get_row_order(self) -> list[str]:
-        """Return current row order (job IDs) as they appear in the table."""
-        order: list[str] = []
-        for i in range(self.row_count):
-            try:
-                row_key, _ = self.coordinate_to_cell_key(
-                    self.cursor_coordinate._replace(row=i, column=0)
-                )
-                order.append(str(row_key.value))
-            except Exception:
-                break
-        return order
-
-    def _rebuild(self) -> None:
-        filtered = self._all_jobs
-        if self._filter_text:
-            filtered = [
-                j for j in filtered
-                if self._filter_text in j.job_id.lower()
-                or self._filter_text in j.name.lower()
-                or self._filter_text in j.partition.lower()
-                or self._filter_text in j.state.lower()
-            ]
-
-        bookmarked = [j for j in filtered if j.job_id in self._bookmarked]
-        rest = [j for j in filtered if j.job_id not in self._bookmarked]
-
-        new_data: dict[str, tuple] = {}
-        for job in bookmarked + rest:
-            sel_marker = "◉ " if job.job_id in self._multiselected else ""
-            bm_marker = "★ " if job.job_id in self._bookmarked else ""
-            name = _truncate(f"{sel_marker}{bm_marker}{job.name}", _max_name_width)
-            state_text = _styled_state(job.state)
-            part_text = Text(
-                _truncate(job.partition, _max_partition_width),
-                style=_partition_style(job.partition),
-            )
-            new_data[job.job_id] = (job.job_id, name, state_text, part_text, job.elapsed)
-
-        force = self._force_next
-        self._force_next = False
-        _apply_diff(self, new_data, force=force)
-
-    def get_selected_job_id(self) -> str | None:
-        if self.row_count == 0:
-            return None
-        try:
-            row_key, _ = self.coordinate_to_cell_key(self.cursor_coordinate)
-            return str(row_key.value)
-        except Exception:
-            return None
-
-    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
-        job_id = str(event.row_key.value) if event.row_key else self.get_selected_job_id()
-        if job_id:
-            self.post_message(JobSelected(job_id, "completed"))
+    def _row_for(self, job: CompletedJob) -> tuple:
+        name = _truncate(f"{self._markers(job.job_id)}{job.name}", _max_name_width)
+        part_text = Text(
+            _truncate(job.partition, _max_partition_width),
+            style=_partition_style(job.partition),
+        )
+        return (job.job_id, name, _styled_state(job.state), part_text, job.elapsed)
