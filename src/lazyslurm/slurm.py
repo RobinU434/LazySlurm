@@ -18,8 +18,10 @@ from lazyslurm.models import (
     NodeInfo,
     PartitionInfo,
     PartitionJob,
+    FairShare,
     PriorityInfo,
     RunningJob,
+    UsageRow,
     parse_mem_bytes,
 )
 
@@ -487,6 +489,155 @@ async def _file_exists(path: str) -> bool:
         _, _, rc = await _run_remote(f"test -f {shlex.quote(path)}")
         return rc == 0
     return await asyncio.to_thread(os.path.isfile, path)
+
+
+# ---------------------------------------------------------------------------
+# Account usage and fairshare (sreport + sshare)
+# ---------------------------------------------------------------------------
+
+# Selectable windows for the usage panel. Each returns (start, end, label);
+# sreport takes "now" and plain dates, so no clock arithmetic is needed beyond
+# finding the first of the month or the year.
+USAGE_WINDOWS: tuple[str, ...] = ("month", "30d", "year")
+
+_WINDOW_LABELS = {
+    "month": "this month",
+    "30d": "last 30 days",
+    "year": "this year",
+}
+
+
+def usage_window(window: str, today: datetime | None = None) -> tuple[str, str, str]:
+    """(start, end, label) for a window key — sreport-ready date strings."""
+    now = today or datetime.now()
+    if window == "year":
+        start = now.replace(month=1, day=1).strftime("%Y-%m-%d")
+    elif window == "30d":
+        start = (now - timedelta(days=30)).strftime("%Y-%m-%d")
+    else:
+        window = "month"
+        start = now.replace(day=1).strftime("%Y-%m-%d")
+    return start, "now", _WINDOW_LABELS[window]
+
+
+def next_usage_window(window: str) -> str:
+    """Cycle month -> 30d -> year -> month."""
+    try:
+        index = USAGE_WINDOWS.index(window)
+    except ValueError:
+        return USAGE_WINDOWS[0]
+    return USAGE_WINDOWS[(index + 1) % len(USAGE_WINDOWS)]
+
+
+def parse_sreport(stdout: str) -> list[UsageRow]:
+    """Parse `sreport ... -P` output.
+
+    sreport prints a banner of dashes and a title before the parsable rows, and
+    the column header itself is parsable-looking, so rows are recognised by
+    content rather than position: a header starts with "Cluster", banners have
+    no separator, and the hours column must be a number.
+    """
+    rows: list[UsageRow] = []
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line or "|" not in line or line.startswith("-"):
+            continue
+        fields = [f.strip() for f in line.split("|")]
+        if len(fields) < 5 or fields[0].lower() in ("cluster", "cluster/account/user"):
+            continue
+        try:
+            hours = float(fields[4].replace(",", ""))
+        except ValueError:
+            continue  # the header row, or a line we do not understand
+        rows.append(UsageRow(
+            account=fields[1], user=fields[2], name=fields[3], hours=hours,
+        ))
+    return rows
+
+
+def parse_sshare(stdout: str) -> list[FairShare]:
+    """Parse `sshare -P -o Account,User,RawShares,NormShares,RawUsage,EffectvUsage,FairShare`."""
+    shares: list[FairShare] = []
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line or "|" not in line:
+            continue
+        fields = [f.strip() for f in line.split("|")]
+        if len(fields) < 7 or fields[0].lower() == "account":
+            continue
+
+        def _float(text: str) -> float:
+            try:
+                return float(text)
+            except ValueError:
+                return 0.0
+
+        factor: float | None
+        try:
+            factor = float(fields[6])
+        except ValueError:
+            factor = None   # account rows leave FairShare empty
+        shares.append(FairShare(
+            account=fields[0],
+            user=fields[1],
+            raw_shares=fields[2],
+            norm_shares=_float(fields[3]),
+            raw_usage=_float(fields[4]),
+            effective_usage=_float(fields[5]),
+            fairshare=factor,
+        ))
+    return shares
+
+
+# Remembered once accounting turns out to be unavailable, so the panel can say
+# so instead of showing an empty table.
+_accounting_missing = False
+
+
+def accounting_available() -> bool:
+    return not _accounting_missing
+
+
+def _note_accounting_failure(stderr: str) -> None:
+    global _accounting_missing
+    text = stderr.lower()
+    if any(m in text for m in ("not found", "no such file", "not configured",
+                               "accounting_storage", "slurmdbd")):
+        _accounting_missing = True
+
+
+async def get_account_usage(
+    window: str = "month",
+    account: str = "",
+    today: datetime | None = None,
+) -> list[UsageRow]:
+    """Per-user hours in the account over the given window, largest first."""
+    start, end, _ = usage_window(window, today)
+    cmd = [
+        "sreport", "cluster", "AccountUtilizationByUser",
+        f"start={start}", f"end={end}", "-t", "hours", "-P", "--noheader",
+    ]
+    if account:
+        cmd.append(f"account={account}")
+    stdout, stderr, rc = await _run_cmd(*cmd)
+    if rc != 0:
+        _note_accounting_failure(stderr)
+        return []
+    rows = parse_sreport(stdout)
+    rows.sort(key=lambda r: (r.is_account_total, -r.hours))
+    return rows
+
+
+async def get_fairshare(user: str = "") -> list[FairShare]:
+    """Fairshare rows for a user (their own associations)."""
+    cmd = ["sshare", "-P", "-o",
+           "Account,User,RawShares,NormShares,RawUsage,EffectvUsage,FairShare"]
+    cmd += ["-u", user] if user else ["-U"]
+    stdout, stderr, rc = await _run_cmd(*cmd)
+    if rc != 0:
+        _note_accounting_failure(stderr)
+        return []
+    return parse_sshare(stdout)
 
 
 # ---------------------------------------------------------------------------

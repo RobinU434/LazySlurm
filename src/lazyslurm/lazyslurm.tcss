@@ -155,6 +155,37 @@
     border-title-color: $accent;
 }
 
+/* Account usage screen */
+#usage-bar {
+    dock: top;
+    height: 1;
+    background: transparent;
+    color: $text-muted;
+    padding: 0 1;
+}
+
+#usage-fairshare {
+    height: auto;
+    min-height: 4;
+    max-height: 8;
+    border: round $secondary-background-lighten-2;
+    border-title-color: $text-muted;
+    border-title-align: center;
+    padding: 0 1;
+}
+
+#usage-table {
+    height: 1fr;
+    border: round $secondary-background-lighten-2;
+    border-title-color: $text-muted;
+    border-title-align: center;
+}
+
+#usage-table:focus-within {
+    border: round $accent;
+    border-title-color: $accent;
+}
+
 /* Minimal tab styling */
 TabbedContent {
     height: 1fr;

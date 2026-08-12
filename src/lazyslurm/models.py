@@ -289,6 +289,71 @@ class PriorityInfo:
 
 
 @dataclass
+class UsageRow:
+    """One line of ``sreport cluster AccountUtilizationByUser``.
+
+    sreport emits a row per user plus, where the caller is allowed to see it, a
+    row for the account itself with an empty login.
+    """
+
+    account: str
+    user: str = ""
+    name: str = ""
+    hours: float = 0.0
+
+    @property
+    def is_account_total(self) -> bool:
+        return not self.user
+
+
+@dataclass
+class FairShare:
+    """One line of ``sshare`` — what actually drives queue priority.
+
+    ``norm_shares`` is the slice of the cluster you are entitled to;
+    ``effective_usage`` is the slice you have actually consumed. The
+    ``fairshare`` factor Slurm derives from the two is what enters the priority
+    calculation: 0.5 means you are using exactly your share, above that you are
+    under-consuming and get boosted, below that you are over-consuming.
+    """
+
+    account: str
+    user: str = ""
+    raw_shares: str = ""       # a number, or "parent"
+    norm_shares: float = 0.0
+    raw_usage: float = 0.0
+    effective_usage: float = 0.0
+    fairshare: float | None = None
+
+    @property
+    def share_ratio(self) -> float | None:
+        """How many times your entitlement you have used. 1.0 is exactly fair."""
+        if self.norm_shares <= 0:
+            return None
+        return self.effective_usage / self.norm_shares
+
+    @property
+    def reading(self) -> str:
+        """The fairshare factor in a sentence."""
+        if self.fairshare is None:
+            return "no fairshare factor reported for this association"
+        ratio = self.share_ratio
+        share = ""
+        if ratio is not None and ratio > 0:
+            share = (f" (using {ratio:.1f}x your share)" if ratio >= 1.05
+                     else f" (using {ratio:.2f} of your share)" if ratio <= 0.95 else "")
+        if self.fairshare >= 0.75:
+            return f"well under your share — your jobs get boosted priority{share}"
+        if self.fairshare > 0.55:
+            return f"a little under your share — slight priority boost{share}"
+        if self.fairshare >= 0.45:
+            return f"using about exactly your share{share}"
+        if self.fairshare >= 0.25:
+            return f"over your share — your jobs get reduced priority{share}"
+        return f"far over your share — your jobs are heavily deprioritised{share}"
+
+
+@dataclass
 class JobDetail:
     """Detailed job info parsed from scontrol show job or sacct."""
 

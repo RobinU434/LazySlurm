@@ -20,6 +20,7 @@ from lazyslurm.models import Config, PriorityInfo
 from lazyslurm.widgets.detail_view import DetailView, parse_mem_bytes
 from lazyslurm.widgets.job_table import ActiveJobTable, CompletedJobTable, JobSelected, set_partition_colors, set_display_config
 from lazyslurm.widgets.metadata_view import MetadataView
+from lazyslurm.widgets.usage_view import UsageTable, format_hours
 from lazyslurm.widgets.partition_view import (
     NodeSelected,
     NodeTable,
@@ -77,6 +78,7 @@ class HelpScreen(ModalScreen[None]):
                 "  [bold cyan]s[/]               Resubmit terminated job (with confirmation)\n"
                 "  [bold cyan]u[/]               Edit pending job(s): runtime, partition, nodes, CPUs, memory\n"
                 "  [bold cyan]p[/]               Partition monitor: load, A/I/O/T, all users' jobs\n"
+                "  [bold cyan]Shift+U[/]         Account usage: CPU-hours and your fairshare\n"
                 "  [bold cyan]Enter[/]           (in the partition monitor) nodes of that partition\n"
                 "  [bold cyan]b[/]               View job's sbatch script (read-only, cached)\n"
                 "  [bold cyan]l[/]               Page the active log tab (less: / search, F follow, q quit)\n"
@@ -569,6 +571,100 @@ class PartitionScreen(Screen):
         self.app.pop_screen()
 
 
+class UsageScreen(Screen):
+    """Account usage and fairshare — where the allocation went, and what it costs you.
+
+    sreport can take seconds on a busy accounting database, so the screen opens
+    immediately with a placeholder and fills in when the data lands. Nothing
+    here touches the poll loop: it is fetched on open, on `r`, and when the
+    window changes.
+    """
+
+    BINDINGS = [
+        Binding("escape", "close", "Back"),
+        Binding("U", "close", "Back"),
+        Binding("q", "close", "Back"),
+        Binding("r", "reload", "Refresh"),
+        Binding("w", "cycle_window", "Window"),
+    ]
+
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        self.config = config
+        self.window = "month"
+        self.user = config.user or slurm.USER
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="usage-bar")
+        yield Static(id="usage-fairshare")
+        yield UsageTable(id="usage-table", user=self.user)
+        yield Footer()
+
+    async def on_mount(self) -> None:
+        self.query_one("#usage-table").border_title = "Account usage"
+        self.query_one("#usage-fairshare").border_title = "Fair share"
+        self.query_one("#usage-bar", Static).update("[dim]loading usage...[/]")
+        self.query_one("#usage-fairshare", Static).update("[dim]loading...[/]")
+        self.query_one("#usage-table", UsageTable).focus()
+        self.run_worker(self._load(), exclusive=True)
+
+    async def _load(self) -> None:
+        _, _, label = slurm.usage_window(self.window)
+        rows, shares = await asyncio.gather(
+            slurm.get_account_usage(self.window),
+            slurm.get_fairshare(self.user),
+        )
+
+        table = self.query_one("#usage-table", UsageTable)
+        table.update_rows(rows)
+
+        if not rows and not shares:
+            reason = ("this cluster has no Slurm accounting enabled"
+                      if not slurm.accounting_available()
+                      else "no accounting data for you in this window")
+            self.query_one("#usage-bar", Static).update(
+                f"[dim]{label} — {reason}[/]"
+            )
+            self.query_one("#usage-fairshare", Static).update("")
+            return
+
+        total = table.total_hours
+        mine = table.my_hours
+        share = f"  [bold]{mine / total * 100:.0f}%[/] of it yours" if total else ""
+        self.query_one("#usage-bar", Static).update(
+            f"[bold]{label}[/]   {format_hours(mine)} CPU-hours used by you   "
+            f"[dim]account total {format_hours(total)}[/]{share}"
+            f"   [dim](w cycles window)[/]"
+        )
+        self.query_one("#usage-fairshare", Static).update(self._fairshare_text(shares))
+
+    def _fairshare_text(self, shares: list) -> str:
+        mine = [s for s in shares if s.user] or shares
+        if not mine:
+            return "[dim]sshare reported no association for you[/]"
+        lines = []
+        for share in mine[:3]:
+            factor = "n/a" if share.fairshare is None else f"{share.fairshare:.3f}"
+            lines.append(
+                f"[bold]{share.account}[/]  factor [bold]{factor}[/]  "
+                f"entitled {share.norm_shares * 100:.2f}%  "
+                f"used {share.effective_usage * 100:.2f}%"
+            )
+            lines.append(f"  [dim]{share.reading}[/]")
+        return "\n".join(lines)
+
+    async def action_reload(self) -> None:
+        self.query_one("#usage-bar", Static).update("[dim]loading usage...[/]")
+        self.run_worker(self._load(), exclusive=True)
+
+    async def action_cycle_window(self) -> None:
+        self.window = slurm.next_usage_window(self.window)
+        await self.action_reload()
+
+    def action_close(self) -> None:
+        self.app.pop_screen()
+
+
 # ---------------------------------------------------------------------------
 # Main app
 # ---------------------------------------------------------------------------
@@ -598,6 +694,7 @@ class LazySlurmApp(App):
         Binding("s", "resubmit_job", "Resubmit", show=False),
         Binding("u", "edit_job", "Edit Job", show=False),
         Binding("p", "partitions", "Partitions", show=False),
+        Binding("U", "usage", "Usage", show=False),
         Binding("b", "view_batch_script", "Script", show=False),
         Binding("o", "ssh_to_node", "SSH", show=False),
         Binding("l", "page_log", "Pager", show=False),
@@ -1197,6 +1294,10 @@ class LazySlurmApp(App):
     def action_partitions(self) -> None:
         """Open the partition monitor screen (Escape or p returns)."""
         self.push_screen(PartitionScreen(self.config))
+
+    def action_usage(self) -> None:
+        """Open the account usage screen (Escape or U returns)."""
+        self.push_screen(UsageScreen(self.config))
 
     # ------------------------------------------------------------------
     # Edit job properties (scontrol update)
