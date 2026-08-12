@@ -10,7 +10,12 @@ from textual.widgets import DataTable
 from rich.text import Text
 
 from lazyslurm.config import base_job_id
-from lazyslurm.models import CompletedJob, RunningJob, array_task_count, gres_count
+from lazyslurm.models import (
+    CompletedJob,
+    RunningJob,
+    array_index_span,
+    array_task_count,
+)
 
 # Color mapping for terminated job states
 _STATE_STYLES: dict[str, str] = {
@@ -510,12 +515,8 @@ class _BaseJobTable(DataTable):
     def _group_label(self, base: str, members: list, expanded: bool) -> Text:
         """`▸ 123_[0-11] ×12` — the collapsed row's Job ID cell."""
         tasks = sum(array_task_count(m.job_id) for m in members)
-        indices = []
-        for member in members:
-            _, _, suffix = member.job_id.partition("_")
-            digits = "".join(c if c.isdigit() else " " for c in suffix).split()
-            indices.extend(int(d) for d in digits)
-        span = f"[{min(indices)}-{max(indices)}]" if indices else "[]"
+        bounds = array_index_span(m.job_id for m in members)
+        span = f"[{bounds[0]}-{bounds[1]}]" if bounds else "[]"
         arrow = "▾" if expanded else "▸"
         return Text.assemble(
             (f"{arrow} ", "dim"), f"{base}_{span}", (f" ×{tasks}", "dim"),
