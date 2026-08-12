@@ -583,23 +583,27 @@ class LazySlurmApp(App):
     TITLE = "LazySlurm"
     CSS_PATH = "lazyslurm.tcss"
 
+    # Only four bindings appear in the key bar: at 80 columns — or narrower —
+    # anything more overflows and Textual turns the bar into a scrollable
+    # slider, which hides keys instead of advertising them. Everything else is
+    # one keypress away in the help screen.
     BINDINGS = [
         Binding("q", "quit", "Quit", show=True),
         Binding("question_mark", "help", "Help", show=True, key_display="?"),
         Binding("slash", "toggle_search", "Search", show=True, key_display="/"),
-        Binding("m", "toggle_bookmark", "Bookmark", show=True),
-        Binding("c", "cancel_job", "Cancel", show=True),
+        Binding("m", "toggle_bookmark", "Bookmark", show=False),
+        Binding("c", "cancel_job", "Cancel", show=False),
         Binding("shift+c", "force_cancel_job", "Force Cancel", show=False),
-        Binding("ctrl+v", "toggle_multiselect", "Multi-select", show=True),
-        Binding("s", "resubmit_job", "Resubmit", show=True),
-        Binding("u", "edit_job", "Edit Job", show=True),
-        Binding("p", "partitions", "Partitions", show=True),
-        Binding("b", "view_batch_script", "Script", show=True),
-        Binding("o", "ssh_to_node", "SSH", show=True),
-        Binding("l", "page_log", "Pager", show=True),
-        Binding("e", "edit_stdout", "Edit Out", show=True),
+        Binding("ctrl+v", "toggle_multiselect", "Multi-select", show=False),
+        Binding("s", "resubmit_job", "Resubmit", show=False),
+        Binding("u", "edit_job", "Edit Job", show=False),
+        Binding("p", "partitions", "Partitions", show=False),
+        Binding("b", "view_batch_script", "Script", show=False),
+        Binding("o", "ssh_to_node", "SSH", show=False),
+        Binding("l", "page_log", "Pager", show=False),
+        Binding("e", "edit_stdout", "Edit Out", show=False),
         Binding("shift+e", "edit_stderr", "Edit Err", show=False),
-        Binding("comma", "edit_config", "Config", show=True, key_display=","),
+        Binding("comma", "edit_config", "Config", show=False, key_display=","),
         Binding("r", "refresh", "Refresh", show=True),
         Binding("tab", "focus_next_right", "Next Panel", show=False),
         Binding("shift+tab", "focus_prev_right", "Prev Panel", show=False),
