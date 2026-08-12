@@ -157,6 +157,7 @@ def main() -> None:
     # Config-file-only settings
     partition_colors = persistent_config.get_partition_colors()
     editor = saved.get("editor", "vim")
+    pager = saved.get("pager", "less")
     max_name_width = int(saved.get("max_name_width", 16))
     max_partition_width = int(saved.get("max_partition_width", 16))
     abbreviate_states = bool(saved.get("abbreviate_states", False))
@@ -175,6 +176,7 @@ def main() -> None:
         partition_order=resolved["partition_order"],
         partition_colors=partition_colors,
         editor=str(editor),
+        pager=str(pager),
         max_name_width=max_name_width,
         max_partition_width=max_partition_width,
         abbreviate_states=abbreviate_states,

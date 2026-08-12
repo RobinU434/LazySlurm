@@ -135,6 +135,7 @@ and `/` to reveal the search bar above the job tables.
 | `u` | Edit a **pending** job's properties: runtime, partition, nodes, CPUs, memory. Works on a multi-selection too |
 | `p` | Open the [partition monitor](#partition-monitor) — per-partition load and every user's jobs. `Escape` or `p` returns |
 | `b` | View the job's sbatch script, read-only, in your editor |
+| `l` | Open the active log tab (stdout or stderr) in a **pager** — the way to read a huge log |
 | `e` | Open the job's **stdout** log in an external editor (suspends TUI) |
 | `Shift+E` | Open the job's **stderr** log in an external editor |
 | `o` | SSH to the selected job's compute node. Suspends the TUI; type `exit` to return |
@@ -367,6 +368,39 @@ share one script: `123_11`, `123_[1-40]`, and `123` all resolve to the same file
 longer produce one; pressing `b` reports that the script is unavailable. See
 [Job Cache](#job-cache) for the cache location and `script_cache_dir`.
 
+### Reading Big Logs
+
+The stdout/stderr tabs show the **last 500 lines**, read by seeking backwards from the end
+of the file — a 200 MB log tails as fast as an empty one, and the panel never blocks the
+UI while a job floods its log.
+
+To read more than the tail, press `l` to open the active tab's log in a pager (`less` by
+default). This is the right tool for a multi-gigabyte log: it seeks instead of loading, so
+it opens instantly at the end of the file, and inside it you get
+
+| In `less` | |
+|-----------|--|
+| `/pattern`, `n` / `N` | search forwards and back |
+| `G` / `g` | jump to end / start |
+| `F` | **follow** the file as the job writes to it (like `tail -f`); `Ctrl+C` stops |
+| `q` | back to LazySlurm |
+
+The TUI suspends while the pager is open. In remote mode the pager runs **on the cluster**
+over the existing SSH connection, so nothing is copied to your machine and you are not
+asked for a 2FA code again.
+
+Set your pager in `config.toml`:
+
+```toml
+pager = "less"   # or "more", "bat", "most"
+```
+
+`less` is opened with `-R +G` (keep the log's colors, start at the end); other known pagers
+get their equivalent end-of-file flag. An unknown pager is run with no flags.
+
+If a log has no line break in its last 4 MB — a progress bar writing `\r` forever — the
+tail is cut there and the panel says so; press `l` to see the file properly.
+
 ### Open Logs in Editor
 
 Press `e` to open the selected job's stdout log in an external text editor, or
@@ -545,6 +579,7 @@ no_gpu = false           # --no-gpu: disable GPU monitoring tab
 no_live = false          # --no-live: disable live CPU/GPU monitoring
 remote = ""              # -H/--remote: SSH target for remote mode
 editor = "vim"           # text editor for viewing logs ("vim", "nano", "less", etc.)
+pager = "less"           # pager for browsing whole logs with 'l' ("less", "more", "bat")
 
 # Column display settings
 max_name_width = 16      # max characters for job name column (0 = unlimited)

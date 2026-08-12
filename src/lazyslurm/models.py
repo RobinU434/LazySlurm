@@ -19,6 +19,7 @@ class Config:
     partition_order: list[str] | None = None  # e.g. ["gpu", "cpu", "fat"]
     partition_colors: dict[str, str] | None = None  # e.g. {"gpu": "green", "cpu": "cyan"}
     editor: str = "vim"  # text editor for viewing log files ("vim", "nano", etc.)
+    pager: str = "less"  # pager for browsing whole logs ("less", "more", "bat", ...)
     max_name_width: int = 16  # max characters for job name column
     max_partition_width: int = 16  # max characters for partition column
     abbreviate_states: bool = False  # show abbreviated state names in terminated jobs

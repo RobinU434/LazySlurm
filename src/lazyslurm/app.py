@@ -71,6 +71,7 @@ class HelpScreen(ModalScreen[None]):
                 "  [bold cyan]u[/]               Edit pending job(s): runtime, partition, nodes, CPUs, memory\n"
                 "  [bold cyan]p[/]               Partition monitor: load, A/I/O/T, all users' jobs\n"
                 "  [bold cyan]b[/]               View job's sbatch script (read-only, cached)\n"
+                "  [bold cyan]l[/]               Page the active log tab (less: / search, F follow, q quit)\n"
                 "  [bold cyan]e[/]               Open stdout in editor (vim/nano, set in config)\n"
                 "  [bold cyan]Shift+E[/]         Open stderr in editor\n"
                 "  [bold cyan]o[/]               SSH to job's compute node (suspends TUI)\n"
@@ -484,6 +485,7 @@ class LazySlurmApp(App):
         Binding("p", "partitions", "Partitions", show=True),
         Binding("b", "view_batch_script", "Script", show=True),
         Binding("o", "ssh_to_node", "SSH", show=True),
+        Binding("l", "page_log", "Pager", show=True),
         Binding("e", "edit_stdout", "Edit Out", show=True),
         Binding("shift+e", "edit_stderr", "Edit Err", show=False),
         Binding("comma", "edit_config", "Config", show=True, key_display=","),
@@ -1273,6 +1275,7 @@ class LazySlurmApp(App):
             partition_order=saved.get("partition_order", old.partition_order),
             partition_colors=persistent_config.get_partition_colors() or old.partition_colors,
             editor=str(saved.get("editor", old.editor)),
+            pager=str(saved.get("pager", old.pager)),
             max_name_width=int(saved.get("max_name_width", old.max_name_width)),
             max_partition_width=int(saved.get("max_partition_width", old.max_partition_width)),
             abbreviate_states=bool(saved.get("abbreviate_states", old.abbreviate_states)),
@@ -1315,6 +1318,63 @@ class LazySlurmApp(App):
             self.query_one("#completed-jobs", CompletedJobTable).force_rebuild()
         else:
             self._log("config reloaded", "no changes")
+
+    # Pagers that can jump to the end of the file, so a live log opens on its
+    # newest lines. `less -R` also keeps the log's own ANSI colors.
+    _PAGER_FLAGS = {
+        "less": ["-R", "+G"],
+        "most": ["+"],
+        "more": ["+G"],
+        "bat": ["--paging=always", "--style=plain"],
+    }
+
+    async def action_page_log(self) -> None:
+        """Open the log of the active detail tab in a pager (stdout or stderr).
+
+        The inline panel only ever shows the tail; this is how you read a whole
+        multi-gigabyte log — the pager seeks instead of loading, and `F` inside
+        `less` follows the file as the job writes to it.
+        """
+        tabs = self.query_one("#detail-view", DetailView).query_one("#detail-tabs")
+        if tabs.active == "tab-stderr":
+            path, label = self._stderr_path, "stderr"
+        else:
+            path, label = self._stdout_path, "stdout"
+        await self._page_file(path, label)
+
+    async def _page_file(self, path: str | None, label: str) -> None:
+        if not path:
+            self._log(f"page {label}", "no log file path available")
+            return
+
+        pager = self.config.pager
+        flags = self._PAGER_FLAGS.get(os.path.basename(pager), [])
+
+        if self.config.remote:
+            # Run the pager *on the cluster* over the existing connection: no
+            # copying a huge file down, and no second authentication.
+            if shutil.which("ssh") is None:
+                self._log(f"page {label}", "ssh not found")
+                return
+            cmd = (
+                f"ssh -t {self._ssh_control_opt()} {shlex.quote(self.config.remote)} "
+                + shlex.quote(
+                    " ".join(shlex.quote(a) for a in [pager, *flags, path])
+                )
+            )
+        else:
+            if shutil.which(pager) is None:
+                self._log(f"page {label}", f"pager '{pager}' not found — set 'pager' in config.toml")
+                return
+            if not os.path.isfile(path):
+                self._log(f"page {label}", f"file not found: {path}")
+                return
+            cmd = " ".join(shlex.quote(a) for a in [pager, *flags, path])
+
+        self._log(f"page {label}", f"{pager} {os.path.basename(path)}")
+        with self.suspend():
+            os.system(cmd)
+        self._log(f"page {label}", "pager closed")
 
     async def _open_in_editor(self, path: str | None, label: str) -> None:
         if not path:

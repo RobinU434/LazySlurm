@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import os
 import shlex
-from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -569,6 +568,45 @@ async def _get_sacct_stats(job_id: str) -> dict[str, str] | None:
 
 TAIL_LINES = 500
 
+# Never pull more than this off disk for one tail, however long the lines are.
+# A training log with a single 200 MB progress-bar "line" must not be read whole.
+_TAIL_MAX_BYTES = 4 * 1024 * 1024
+_TAIL_BLOCK = 64 * 1024
+
+
+def tail_file(path: str, tail_lines: int = TAIL_LINES) -> str:
+    """Return the last `tail_lines` lines, reading only the end of the file.
+
+    Job logs routinely reach hundreds of megabytes on a shared filesystem, so
+    this seeks backwards in blocks instead of iterating the whole file — the
+    cost is the size of the tail, not the size of the log.
+    """
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        pos = f.tell()
+        data = b""
+        while pos > 0 and data.count(b"\n") <= tail_lines and len(data) < _TAIL_MAX_BYTES:
+            step = min(_TAIL_BLOCK, pos)
+            pos -= step
+            f.seek(pos)
+            data = f.read(step) + data
+
+    truncated = pos > 0 and (data.count(b"\n") <= tail_lines)
+    text = data.decode(errors="replace")
+    lines = text.splitlines(keepends=True)
+    # The first line is partial unless we reached the start of the file.
+    if pos > 0 and lines:
+        lines = lines[1:]
+    out = "".join(lines[-tail_lines:])
+    if truncated:
+        size = _TAIL_MAX_BYTES
+        human = f"{size // (1024 * 1024)} MB" if size >= 1024 * 1024 else f"{size // 1024} KB"
+        out = (
+            f"... (truncated: no line break in the last {human} — "
+            "press 'l' to open the whole file in the pager)\n"
+        ) + out
+    return out
+
 
 async def read_log_file(path: str | None, tail_lines: int = TAIL_LINES) -> str:
     """Read the tail of a log file (locally or via SSH in remote mode)."""
@@ -584,12 +622,10 @@ async def read_log_file(path: str | None, tail_lines: int = TAIL_LINES) -> str:
     if not os.path.isfile(path):
         return f"(file not found: {path})"
 
-    def _read() -> str:
-        with open(path, errors="replace") as f:
-            lines = deque(f, maxlen=tail_lines)
-        return "".join(lines)
-
-    return await asyncio.to_thread(_read)
+    try:
+        return await asyncio.to_thread(tail_file, path, tail_lines)
+    except OSError as e:
+        return f"(could not read {path}: {e})"
 
 
 # ---------------------------------------------------------------------------

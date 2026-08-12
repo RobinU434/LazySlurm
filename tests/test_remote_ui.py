@@ -108,3 +108,71 @@ def test_ssh_helpers_degrade_without_a_session(monkeypatch):
     assert app._ssh_control_opt() == ""
     # Still a usable ProxyCommand, just without socket reuse.
     assert "-W %h:%p" in app._proxy_command()
+
+
+# ---------------------------------------------------------------------------
+# Pager integration ("l")
+# ---------------------------------------------------------------------------
+
+
+def _capture_system(monkeypatch, app):
+    """Capture the command line the pager step would run, without running it."""
+    calls: list[str] = []
+    monkeypatch.setattr("lazyslurm.app.os.system", lambda cmd: calls.append(cmd) or 0)
+
+    class _NoSuspend:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(type(app), "suspend", lambda self: _NoSuspend())
+    monkeypatch.setattr(type(app), "_log", lambda self, *a, **k: None)
+    return calls
+
+
+def test_pager_opens_the_local_log_at_the_end(monkeypatch, tmp_path):
+    log = tmp_path / "job.out"
+    log.write_text("hello\n")
+    app = LazySlurmApp(config=Config(pager="less"))
+    calls = _capture_system(monkeypatch, app)
+    monkeypatch.setattr("lazyslurm.app.shutil.which", lambda name: "/usr/bin/less")
+
+    _run(app._page_file(str(log), "stdout"))
+    assert len(calls) == 1
+    # -R keeps the log's colors, +G opens at the newest lines.
+    assert calls[0] == f"less -R +G {log}"
+
+
+def test_pager_runs_on_the_cluster_in_remote_mode(monkeypatch):
+    app = LazySlurmApp(config=Config(remote="me@login", pager="less"))
+    calls = _capture_system(monkeypatch, app)
+    monkeypatch.setattr("lazyslurm.app.shutil.which", lambda name: "/usr/bin/ssh")
+    monkeypatch.setattr(slurm, "get_session", lambda: _StubSession())
+
+    _run(app._page_file("/scratch/logs/big.err", "stderr"))
+    sent = calls[0]
+    # The file is never copied down: less runs remotely, over the live socket.
+    assert sent.startswith("ssh -t ")
+    assert "ControlPath=/home/u/.ssh/cm-lazyslurm/abc123.sock" in sent
+    assert "me@login" in sent
+    assert "less -R +G /scratch/logs/big.err" in sent
+
+
+def test_pager_reports_a_missing_pager(monkeypatch, tmp_path):
+    log = tmp_path / "job.out"
+    log.write_text("x\n")
+    app = LazySlurmApp(config=Config(pager="nosuchpager"))
+    calls = _capture_system(monkeypatch, app)
+    monkeypatch.setattr("lazyslurm.app.shutil.which", lambda name: None)
+
+    _run(app._page_file(str(log), "stdout"))
+    assert calls == []  # nothing was run
+
+
+def test_pager_without_a_log_path_does_nothing(monkeypatch):
+    app = LazySlurmApp(config=Config())
+    calls = _capture_system(monkeypatch, app)
+    _run(app._page_file(None, "stdout"))
+    assert calls == []

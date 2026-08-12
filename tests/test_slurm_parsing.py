@@ -563,3 +563,105 @@ def test_get_partition_jobs_without_partition_skips_squeue(monkeypatch):
     monkeypatch.setattr(slurm, "_run_cmd", fake)
     assert asyncio.run(slurm.get_partition_jobs("", Config())) == []
     assert "args" not in calls
+
+
+# ---------------------------------------------------------------------------
+# Log tailing — must cost the size of the tail, not the size of the log
+# ---------------------------------------------------------------------------
+
+
+def test_tail_file_returns_the_last_lines(tmp_path):
+    log = tmp_path / "job.out"
+    log.write_text("".join(f"line {i}\n" for i in range(1000)))
+    out = slurm.tail_file(str(log), tail_lines=3)
+    assert out == "line 997\nline 998\nline 999\n"
+
+
+def test_tail_file_shorter_than_requested(tmp_path):
+    log = tmp_path / "job.out"
+    log.write_text("a\nb\n")
+    assert slurm.tail_file(str(log), tail_lines=500) == "a\nb\n"
+
+
+def test_tail_file_empty(tmp_path):
+    log = tmp_path / "job.out"
+    log.write_text("")
+    assert slurm.tail_file(str(log), tail_lines=500) == ""
+
+
+def test_tail_file_without_trailing_newline(tmp_path):
+    log = tmp_path / "job.out"
+    log.write_text("first\nlast line, no newline")
+    assert slurm.tail_file(str(log), tail_lines=2) == "first\nlast line, no newline"
+
+
+def test_tail_file_never_splits_a_line_mid_way(tmp_path):
+    """Reading backwards in blocks must not emit a half line at the top."""
+    log = tmp_path / "job.out"
+    # Lines much longer than one 64 KiB read block.
+    log.write_text("".join(f"{i}:{'x' * 100_000}\n" for i in range(5)))
+    out = slurm.tail_file(str(log), tail_lines=2)
+    lines = out.splitlines()
+    assert len(lines) == 2
+    assert lines[0].startswith("3:") and lines[1].startswith("4:")
+    assert all(len(line) == 100_002 for line in lines)  # whole lines
+
+
+def test_tail_file_caps_a_single_enormous_line(tmp_path, monkeypatch):
+    """A log that is one giant line (progress bars) must still read fast."""
+    monkeypatch.setattr(slurm, "_TAIL_MAX_BYTES", 128 * 1024)
+    log = tmp_path / "job.out"
+    log.write_text("x" * (2 * 1024 * 1024))  # 2 MB, no newline at all
+    out = slurm.tail_file(str(log), tail_lines=500)
+    assert "truncated" in out
+    assert len(out) < 200 * 1024  # nowhere near the whole file
+
+
+def test_tail_file_reads_only_the_end(tmp_path):
+    """Guard against the O(filesize) regression this replaced."""
+    log = tmp_path / "job.out"
+    log.write_text("".join(f"line {i}\n" for i in range(200_000)))  # ~2.4 MB
+
+    read_bytes = 0
+    real_open = open
+
+    class _CountingFile:
+        def __init__(self, f):
+            self._f = f
+
+        def read(self, n=-1):
+            nonlocal read_bytes
+            data = self._f.read(n)
+            read_bytes += len(data)
+            return data
+
+        def __getattr__(self, name):
+            return getattr(self._f, name)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return self._f.__exit__(*exc)
+
+    import builtins
+    builtins.open = lambda *a, **k: _CountingFile(real_open(*a, **k))
+    try:
+        out = slurm.tail_file(str(log), tail_lines=10)
+    finally:
+        builtins.open = real_open
+
+    assert out.splitlines()[-1] == "line 199999"
+    assert read_bytes < 200 * 1024  # a couple of blocks, not the 2.4 MB file
+
+
+def test_read_log_file_reports_unreadable_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(slurm, "_config", Config())
+    log = tmp_path / "job.out"
+    log.write_text("data\n")
+    log.chmod(0o000)
+    try:
+        out = asyncio.run(slurm.read_log_file(str(log)))
+    finally:
+        log.chmod(0o644)
+    assert "could not read" in out.lower()

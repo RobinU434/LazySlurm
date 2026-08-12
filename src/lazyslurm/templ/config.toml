@@ -12,6 +12,7 @@
 # no_live = false            # disable live CPU/GPU monitoring
 # remote = ""                # SSH target for remote mode (e.g. "user@login.hpc.edu")
 # editor = "vim"             # text editor for viewing logs and config
+# pager = "less"             # pager for browsing whole logs with 'l' ("less", "more", "bat")
 
 # Column display settings
 # max_name_width = 16        # max characters for job name column (0 = unlimited)
