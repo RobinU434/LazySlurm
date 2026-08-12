@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="img/LazySlurm-Logo.png" alt="LazySlurm Logo" width="200">
+  <img src="https://raw.githubusercontent.com/RobinU434/LazySlurm/main/img/LazySlurm-Logo.png" alt="LazySlurm Logo" width="200">
 </p>
 
 <h1 align="center"></h1>
@@ -27,19 +27,9 @@ nodes, cancel, edit or resubmit jobs, and watch how busy each partition is — a
 single terminal. It runs against the local cluster or, with `--remote`, over a single
 background SSH connection that handles two-factor authentication once at startup.
 
-```
-+-----------------------+------------------------------------------------+
-| Active Jobs           | Job Details  [stdout] [stderr] [cpu] [gpu]     |
-|  2465501  train  0:42 |  Epoch 12/100, loss=0.0342                     |
-|  2465499  eval   1:15 |  Epoch 13/100, loss=0.0318                     |
-|  2465485  vs     3:22 |  ...                                           |
-+-----------------------+                                                |
-| Terminated Jobs       +------------------------------------------------+
-|  2465400  prep  COMP  | Job Metadata [Resources] [Submission] [Raw]    |
-|  2465312  sweep FAIL  |  Partition: gpu    Nodes: 1   CPUs: 8          |
-|  2465301  test  COMP  |  GPU: gres/gpu:rtx2080ti=1   Memory: 40G      |
-+-----------------------+------------------------------------------------+
-```
+<p align="center">
+  <img src="https://raw.githubusercontent.com/RobinU434/LazySlurm/main/img/main.png" alt="LazySlurm main view" width="100%">
+</p>
 
 ## Installation
 
@@ -111,6 +101,10 @@ and `/` to reveal the search bar above the job tables.
 
 ## Key Bindings
 
+Press `?` at any time for this list inside the app:
+
+<img src="https://raw.githubusercontent.com/RobinU434/LazySlurm/main/img/help.png" alt="Help screen" width="100%">
+
 ### Navigation
 
 | Key | Action |
@@ -176,6 +170,8 @@ Accounting statistics from `sstat` (running jobs) and `sacct`:
 - **Memory** — requested, max/average RSS, max/average VM size, peak node/task
 - **GPU** — allocated GPU count and type from TRES
 - **Disk I/O** — average and max read/write
+
+<img src="https://raw.githubusercontent.com/RobinU434/LazySlurm/main/img/stats.png" alt="Resource stats with sparkline history" width="100%">
 
 ## Metadata Tabs
 
@@ -282,20 +278,7 @@ Press `p` for a full-screen view of the cluster's partitions. The main job table
 ever show **your** jobs — this screen shows everyone's, so you can see what a partition is
 actually busy with before you queue into it.
 
-```
-13 partitions   85/113 nodes allocated   176 running   74 pending   (all users)
-+------------------------------- Partitions --------------------------------+
-| Partition      Load            Nodes A/I/O/T  CPUs A/I/O/T   Run Pend ... |
-| v100-galvani   ███░░░░░░░  31% 3/0/1/4        60/132/64/256   8   1       |
-| cpu-galvani    █░░░░░░░░░  14% 2/0/0/2        9/55/0/64       6   3       |
-| a100-galvani   █████░░░░░  53% 24/1/1/26      1152/1024/64/…  81  32      |
-+------------------------- Jobs on v100-galvani (9) ------------------------+
-| Job ID   User    Name        State    Time      Limit      N CPUs GRES    |
-| ▸2735316 you     train_v3    RUNNING  14:28:36  2-06:00:00 1 8    gpu:1   |
-|  2734106 pba870  debug       RUNNING  21:46:40  3-00:00:00 1 4            |
-|  2735270 pba175  vsv100      PENDING  0:00      3-00:00:00 1 8    gpu:1   |
-+---------------------------------------------------------------------------+
-```
+<img src="https://raw.githubusercontent.com/RobinU434/LazySlurm/main/img/partitions.png" alt="Partition monitor" width="100%">
 
 **Partition table** — `A/I/O/T` is Slurm's allocated / idle / other / total counter, given
 for both nodes and CPUs. "Other" is down, drained, or reserved capacity. The **Load** bar
@@ -333,6 +316,8 @@ Press `u` on a pending job to open the property editor:
 | Nodes | `NumNodes` | |
 | CPUs | `NumCPUs` | |
 | Memory/node | `MinMemoryNode` | Accepts `40G`, `4000M`, or plain MB — converted to the MB integer Slurm expects |
+
+<img src="https://raw.githubusercontent.com/RobinU434/LazySlurm/main/img/edit-job.png" alt="Editing a pending job" width="100%">
 
 The modal reads like a small file you edit: numbered lines, the `scontrol` key as the
 label, the job id as the "filename" in the border. The values are prefilled from the job.
@@ -516,13 +501,7 @@ only re-authenticates if the master itself is gone. The session is closed when y
 Because the master owns a pty, whatever the cluster asks at login is captured and shown to
 you in a modal instead of being lost:
 
-```
-╭─ ssh user@login.hpc.edu ─────────────────────────────╮
-│ Duo two-factor login for user                        │
-│ Passcode or option (1-3):                            │
-│ ******                                               │
-╰────────────────────── enter send  esc cancel ────────╯
-```
+<img src="https://raw.githubusercontent.com/RobinU434/LazySlurm/main/img/two-factor.png" alt="Two-factor prompt" width="100%">
 
 The label is the server's own prompt text, so it reads exactly as it would in a terminal —
 `Password:`, `Verification code:`, `Passcode or option (1-3):`, `Token_Response:` and so

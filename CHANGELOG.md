@@ -46,6 +46,13 @@ two-factor authentication.
   **Migrating from 0.1.0:** `mv ~/.config/slurmtop ~/.config/lazyslurm` to keep
   your settings and cached job paths.
 
+### Documentation
+
+- The README now shows real screenshots of the TUI — main view, partition monitor, job
+  editor, stats, help and the two-factor prompt. They are generated headlessly from
+  synthetic data by `scripts/make_screenshots.py`, so no real account, job or path is
+  ever pictured.
+
 ### Fixed
 
 - **Log tails no longer read the whole file.** `read_log_file` kept the last 500
