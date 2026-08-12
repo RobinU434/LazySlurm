@@ -583,10 +583,10 @@ class LazySlurmApp(App):
     TITLE = "LazySlurm"
     CSS_PATH = "lazyslurm.tcss"
 
-    # Only four bindings appear in the key bar: at 80 columns — or narrower —
-    # anything more overflows and Textual turns the bar into a scrollable
-    # slider, which hides keys instead of advertising them. Everything else is
-    # one keypress away in the help screen.
+    # Keep the key bar short: at typical ~80-column terminals, showing many
+    # bindings overflows and Textual turns the bar into a scrollable slider,
+    # which hides keys instead of advertising them. All bindings remain available
+    # and are listed in the `?` help screen.
     BINDINGS = [
         Binding("q", "quit", "Quit", show=True),
         Binding("question_mark", "help", "Help", show=True, key_display="?"),
