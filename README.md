@@ -8,6 +8,19 @@
   A terminal UI for monitoring Slurm HPC jobs — like <code>htop</code> for your cluster.
 </p>
 
+<p align="center">
+  <a href="https://pypi.org/project/lazyslurm-py/"><img src="https://img.shields.io/pypi/v/lazyslurm-py.svg?color=blue" alt="PyPI version"></a>
+  <a href="https://pypi.org/project/lazyslurm-py/"><img src="https://img.shields.io/pypi/pyversions/lazyslurm-py.svg" alt="Python versions"></a>
+  <a href="https://pypi.org/project/lazyslurm-py/"><img src="https://img.shields.io/pypi/dm/lazyslurm-py.svg?color=blue" alt="PyPI downloads"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/pypi/l/lazyslurm-py.svg?color=green" alt="License: MIT"></a>
+  <a href="https://github.com/RobinU434/LazySlurm"><img src="https://img.shields.io/github/stars/RobinU434/LazySlurm.svg?style=social" alt="GitHub stars"></a>
+  <br>
+  <a href="https://github.com/Textualize/textual"><img src="https://img.shields.io/badge/built%20with-Textual-5967FF.svg" alt="Built with Textual"></a>
+  <a href="https://slurm.schedmd.com/"><img src="https://img.shields.io/badge/Slurm-HPC-informational.svg" alt="Slurm"></a>
+  <img src="https://img.shields.io/badge/platform-Linux-lightgrey.svg" alt="Platform: Linux">
+  <img src="https://img.shields.io/badge/status-beta-orange.svg" alt="Status: beta">
+</p>
+
 LazySlurm gives you a live overview of your running and past jobs, lets you read
 stdout/stderr logs, inspect resource usage, monitor CPU and GPU activity on compute
 nodes, cancel or resubmit jobs, and more — all from a single terminal.
