@@ -28,30 +28,54 @@ class Config:
     script_cache_dir: str = ""  # where to archive sbatch scripts ("" = <config_dir>/scripts)
 
 
+def _array_ranges(job_id: str) -> list[tuple[int, int]]:
+    """The task-index ranges a job id covers, as ``[(lo, hi)]``.
+
+    ``123_[12-40]`` -> ``[(12, 40)]``, ``123_[1,3,5]`` -> three single ranges,
+    ``123_4`` -> ``[(4, 4)]``, a non-array id -> ``[]``.
+
+    The spec is parsed explicitly rather than by scraping digits: ``%`` starts a
+    concurrency throttle (``[1-4%10]`` runs tasks 1-4, ten at a time) whose
+    number is not an index, and any future decoration Slurm adds would be picked
+    up the same wrong way.
+    """
+    _, sep, suffix = job_id.partition("_")
+    if not sep or not suffix:
+        return []
+    if not suffix.startswith("["):
+        return [(int(suffix), int(suffix))] if suffix.isdigit() else []
+
+    spec = suffix[1:].split("]", 1)[0].split("%", 1)[0]
+    ranges: list[tuple[int, int]] = []
+    for part in spec.split(","):
+        lo, _, hi = part.strip().partition("-")
+        lo, hi = lo.strip(), hi.strip()
+        if lo.isdigit() and hi.isdigit():
+            ranges.append((int(lo), int(hi)))
+        elif lo.isdigit() and not hi:
+            ranges.append((int(lo), int(lo)))
+    return ranges
+
+
 def array_task_count(job_id: str) -> int:
     """How many array tasks one squeue/sacct row stands for.
 
     A pending array arrives as a single row covering a range — ``123_[12-40]``
-    is 29 tasks, ``123_[1,3,5]`` is 3, ``123_[1-4%2]`` is 4 (the ``%`` only
-    throttles how many run at once). Running tasks arrive one row each, so
-    anything without a range is 1.
+    is 29 tasks. Running tasks arrive one row each, so anything that is not a
+    range counts as 1.
     """
-    _, _, suffix = job_id.partition("_")
-    if not suffix.startswith("["):
+    ranges = _array_ranges(job_id)
+    if not ranges:
         return 1
-    spec = suffix[1:].split("]", 1)[0].split("%", 1)[0]
-    total = 0
-    for part in spec.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        if "-" in part:
-            lo, _, hi = part.partition("-")
-            if lo.strip().isdigit() and hi.strip().isdigit():
-                total += int(hi) - int(lo) + 1
-                continue
-        total += 1
-    return total or 1
+    return sum(hi - lo + 1 for lo, hi in ranges) or 1
+
+
+def array_index_span(job_ids) -> tuple[int, int] | None:
+    """Lowest and highest task index across several array job ids."""
+    ranges = [r for job_id in job_ids for r in _array_ranges(job_id)]
+    if not ranges:
+        return None
+    return min(lo for lo, _ in ranges), max(hi for _, hi in ranges)
 
 
 @dataclass

@@ -324,3 +324,49 @@ def test_edit_on_a_collapsed_array_targets_its_pending_tasks(monkeypatch):
     ids = _run(scenario())
     # The two RUNNING tasks are skipped; the pending ones are editable.
     assert ids == ["4815201_2", "4815201_[3-11]"]
+
+
+# ---------------------------------------------------------------------------
+# Array index spec parsing (review of #14: "%" throttle leaked into the label)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "job_id,span",
+    [
+        ("123_[1-4%10]", (1, 4)),   # %10 throttles concurrency; it is not an index
+        ("123_[12-40]", (12, 40)),
+        ("123_[1,3,5]", (1, 5)),
+        ("123_[5]", (5, 5)),
+        ("123_7", (7, 7)),
+        ("123", None),              # not an array
+        ("123_[]", None),
+        ("123_abc", None),          # unparseable decoration is ignored, not scraped
+    ],
+)
+def test_array_index_span(job_id, span):
+    from lazyslurm.models import array_index_span
+    assert array_index_span([job_id]) == span
+
+
+def test_array_index_span_across_members():
+    from lazyslurm.models import array_index_span
+    assert array_index_span(["200_0", "200_1", "200_[2-11%4]"]) == (0, 11)
+
+
+def test_throttled_array_label_shows_the_real_index_range():
+    """`[1-4%10]` must render as [1-4] ×4, never [1-10]."""
+    async def scenario():
+        app = _Harness()
+        async with app.run_test(size=(120, 24)) as pilot:
+            table = await _table(app, ActiveJobTable, [
+                RunningJob("700_0", "throttled", "1:00", "gpu", "RUNNING"),
+                RunningJob("700_[1-4%10]", "throttled", "0:00", "gpu", "PENDING"),
+            ])
+            await pilot.pause()
+            label = str(table.get_cell("700", "Job ID"))
+            assert "700_[0-4]" in label
+            assert "×5" in label          # task 0 plus tasks 1-4
+            assert "10" not in label      # the throttle never reaches the label
+
+    _run(scenario())
