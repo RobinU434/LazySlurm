@@ -387,3 +387,69 @@ def test_format_cluster_summary_counts_from_running_list():
     assert "2[/] running" in out
     assert "1[/] pending" in out
     assert "gpu:2/2/0/4" in out
+
+
+# ---------------------------------------------------------------------------
+# scontrol update – editing pending job properties
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("40G", "40960"),
+        ("4000M", "4000"),
+        ("512", "512"),
+        ("40Gn", "40960"),   # squeue's per-node marker
+        ("2000Mc", "2000"),  # squeue's per-cpu marker
+        ("1T", "1048576"),
+        ("", ""),
+        ("garbage", "garbage"),  # passed through for Slurm to reject
+    ],
+)
+def test_normalize_memory(value, expected):
+    assert slurm.normalize_memory(value) == expected
+
+
+def test_build_update_args_maps_and_skips_blanks():
+    args = slurm.build_update_args({
+        "time_limit": "2-00:00:00",
+        "partition": "gpu",
+        "nodes": "",        # blank -> unchanged
+        "cpus": "8",
+        "memory": "40G",
+    })
+    assert args == [
+        "TimeLimit=2-00:00:00",
+        "Partition=gpu",
+        "NumCPUs=8",
+        "MinMemoryNode=40960",
+    ]
+
+
+def test_update_job_builds_scontrol_command(monkeypatch):
+    fake, calls = _capture_run_cmd()
+    monkeypatch.setattr(slurm, "_run_cmd", fake)
+    ok, msg = asyncio.run(slurm.update_job("1234", {"time_limit": "4:00:00"}))
+    assert ok
+    assert calls["args"] == ("scontrol", "update", "jobid=1234", "TimeLimit=4:00:00")
+    assert "1234" in msg
+
+
+def test_update_job_no_changes_is_a_noop(monkeypatch):
+    fake, calls = _capture_run_cmd()
+    monkeypatch.setattr(slurm, "_run_cmd", fake)
+    ok, msg = asyncio.run(slurm.update_job("1234", {"partition": "   "}))
+    assert not ok
+    assert "args" not in calls  # scontrol never invoked
+    assert "nothing to update" in msg
+
+
+def test_update_job_reports_failure(monkeypatch):
+    async def _fail(*args):
+        return "", "Invalid partition name specified", 1
+
+    monkeypatch.setattr(slurm, "_run_cmd", _fail)
+    ok, msg = asyncio.run(slurm.update_job("1234", {"partition": "nope"}))
+    assert not ok
+    assert "Invalid partition name" in msg

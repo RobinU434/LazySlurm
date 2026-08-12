@@ -126,6 +126,7 @@ availability.
 | `Shift+C` | **Force cancel** — sends SIGKILL immediately, no confirmation |
 | `Ctrl+V` | Toggle multi-select mode (vim-visual style). Use Up/Down to extend the selection range from an anchor row, then press `c` or `Shift+C` to cancel all selected jobs. Press `Ctrl+V` again to exit. Detail panels freeze on the last single-selected job. |
 | `s` | Resubmit a terminated job using its original sbatch script (with confirmation) |
+| `u` | Edit a **pending** job's properties: runtime, partition, nodes, CPUs, memory. Works on a multi-selection too |
 | `b` | View the job's sbatch script, read-only, in your editor |
 | `e` | Open the job's **stdout** log in an external editor (suspends TUI) |
 | `Shift+E` | Open the job's **stderr** log in an external editor |
@@ -266,6 +267,30 @@ Partition format is `name:A/I/O/T`:
 
 Press `m` to bookmark any job. Bookmarked jobs are pinned to the top of their table with
 a ★ prefix. Bookmarks persist for the duration of the session.
+
+### Edit Pending Jobs
+
+Press `u` on a pending job to open the property editor:
+
+| Field | `scontrol` key | Notes |
+|-------|----------------|-------|
+| Runtime | `TimeLimit` | Slurm time formats: `4:00:00`, `2-00:00:00`, `30` (minutes) |
+| Partition | `Partition` | Comma-separated list is allowed, e.g. `gpu,gpu-long` |
+| Nodes | `NumNodes` | |
+| CPUs | `NumCPUs` | |
+| Memory/node | `MinMemoryNode` | Accepts `40G`, `4000M`, or plain MB — converted to the MB integer Slurm expects |
+
+The inputs are prefilled with the job's current values. `Tab` moves between fields,
+`Ctrl+S` applies, `Escape` aborts. Only fields you actually changed are sent, as a single
+`scontrol update jobid=<id> Key=Value ...` per job, and every command plus Slurm's reply is
+written to the Command Log.
+
+**Pending jobs only.** Once a job starts, Slurm fixes its runtime, partition, and resource
+allocation, so the editor refuses to open for running jobs and says so in the status line.
+
+With a `Ctrl+V` multi-selection active, `u` edits all selected pending jobs at once. Then
+the fields start **blank** and only the ones you fill in are applied to every job —
+non-pending jobs in the selection are skipped and listed in the Command Log.
 
 ### View sbatch Script
 

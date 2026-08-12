@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from lazyslurm.models import JobDetail
+from lazyslurm.models import JobDetail, RunningJob
 from lazyslurm.widgets.detail_view import parse_mem_bytes, sparkline
 from lazyslurm.widgets import job_table
 from lazyslurm import config as cfg
@@ -313,3 +313,20 @@ def test_set_script_cache_dir(tmp_path, monkeypatch):
     # Falsy input keeps the current directory (empty config value = use default).
     cfg.set_script_cache_dir("")
     assert cfg.script_cache_path("777") == tmp_path / "custom" / "777.sh"
+
+
+# ---------------------------------------------------------------------------
+# Job table lookup (used to prefill the job property editor)
+# ---------------------------------------------------------------------------
+
+
+def test_get_job_returns_dataclass_or_none():
+    table = job_table.ActiveJobTable()
+    jobs = [
+        RunningJob("1", "a", "0:10", "gpu", "RUNNING"),
+        RunningJob("2", "b", "0:00", "cpu", "PENDING", time_limit="1:00:00"),
+    ]
+    table._all_jobs = jobs  # bypass _rebuild, which needs a mounted DataTable
+    assert table.get_job("2") is jobs[1]
+    assert table.get_job("2").time_limit == "1:00:00"
+    assert table.get_job("999") is None

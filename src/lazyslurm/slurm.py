@@ -564,6 +564,77 @@ async def cancel_job(job_id: str, force: bool = False) -> tuple[bool, str]:
     return False, f"Failed to cancel job {job_id}: {stderr.strip()}"
 
 
+# ---------------------------------------------------------------------------
+# scontrol update – edit properties of a pending job
+# ---------------------------------------------------------------------------
+
+# Editable properties: field key -> (label, scontrol key, RunningJob attribute).
+# Only fields Slurm accepts for a *pending* job are offered; a running job's
+# allocation is fixed, so app.py refuses to open the editor for one.
+EDITABLE_FIELDS: tuple[tuple[str, str, str, str], ...] = (
+    ("time_limit", "Runtime", "TimeLimit", "time_limit"),
+    ("partition", "Partition", "Partition", "partition"),
+    ("nodes", "Nodes", "NumNodes", "nodes"),
+    ("cpus", "CPUs", "NumCPUs", "cpus"),
+    ("memory", "Memory/node", "MinMemoryNode", "memory"),
+)
+
+_MEM_SUFFIX_MB = {"K": 1 / 1024, "M": 1, "G": 1024, "T": 1024 * 1024}
+
+
+def normalize_memory(value: str) -> str:
+    """Convert a squeue-style memory string to the MB integer scontrol wants.
+
+    ``40G`` -> ``40960``, ``4000M`` -> ``4000``, ``512`` -> ``512``. Trailing
+    ``n``/``c`` (squeue's per-node/per-cpu marker) is stripped. Anything that
+    does not parse is passed through untouched so Slurm can report the error.
+    """
+    v = value.strip().rstrip("nc")
+    if not v:
+        return value.strip()
+    suffix = v[-1].upper()
+    if suffix in _MEM_SUFFIX_MB:
+        number = v[:-1]
+        factor = _MEM_SUFFIX_MB[suffix]
+    else:
+        number, factor = v, 1
+    try:
+        mb = float(number) * factor
+    except ValueError:
+        return value.strip()
+    return str(int(mb))
+
+
+def build_update_args(updates: dict[str, str]) -> list[str]:
+    """Turn ``{field_key: value}`` into ``Key=Value`` scontrol arguments."""
+    by_key = {key: scontrol_key for key, _, scontrol_key, _ in EDITABLE_FIELDS}
+    args: list[str] = []
+    for key, value in updates.items():
+        value = value.strip()
+        if not value:
+            continue
+        scontrol_key = by_key.get(key, key)
+        if key == "memory":
+            value = normalize_memory(value)
+        args.append(f"{scontrol_key}={value}")
+    return args
+
+
+async def update_job(job_id: str, updates: dict[str, str]) -> tuple[bool, str]:
+    """Apply property changes to a pending job via ``scontrol update``.
+
+    ``updates`` maps EDITABLE_FIELDS keys to their new values; empty values are
+    skipped so a blank input means "leave unchanged". Returns (success, msg).
+    """
+    args = build_update_args(updates)
+    if not args:
+        return False, f"Job {job_id}: nothing to update."
+    _, stderr, rc = await _run_cmd("scontrol", "update", f"jobid={job_id}", *args)
+    if rc == 0:
+        return True, f"Job {job_id} updated: {' '.join(args)}"
+    return False, f"Failed to update job {job_id}: {stderr.strip()}"
+
+
 def _script_token_index(tokens: list[str]) -> int | None:
     """Index of the script path in an sbatch argument list, or None.
 

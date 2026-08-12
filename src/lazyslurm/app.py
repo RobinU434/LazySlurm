@@ -67,6 +67,7 @@ class HelpScreen(ModalScreen[None]):
                 "  [bold cyan]Shift+C[/]         Force cancel job(s) (SIGKILL, no confirmation)\n"
                 "  [bold cyan]Ctrl+V[/]          Toggle multi-select mode (vim-visual)\n"
                 "  [bold cyan]s[/]               Resubmit terminated job (with confirmation)\n"
+                "  [bold cyan]u[/]               Edit pending job(s): runtime, partition, nodes, CPUs, memory\n"
                 "  [bold cyan]b[/]               View job's sbatch script (read-only, cached)\n"
                 "  [bold cyan]e[/]               Open stdout in editor (vim/nano, set in config)\n"
                 "  [bold cyan]Shift+E[/]         Open stderr in editor\n"
@@ -179,6 +180,92 @@ class ConfirmResubmitScreen(ModalScreen[bool]):
         self.dismiss(False)
 
 
+class EditJobScreen(ModalScreen[dict]):
+    """Edit properties (runtime, partition, resources) of pending job(s).
+
+    Dismisses with a dict of the fields the user actually changed, or None if
+    aborted. For a single job the inputs are prefilled with its current values;
+    for a multi-job edit they start blank and every non-empty field is applied
+    to all selected jobs.
+    """
+
+    BINDINGS = [
+        Binding("ctrl+s", "submit", "Apply"),
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
+    DEFAULT_CSS = """
+    EditJobScreen {
+        align: center middle;
+    }
+    EditJobScreen > Vertical {
+        width: 60;
+        height: auto;
+        border: round $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+    EditJobScreen .field {
+        height: auto;
+        margin-bottom: 1;
+    }
+    EditJobScreen .field-label {
+        width: 14;
+        padding-top: 1;
+    }
+    EditJobScreen Input {
+        width: 1fr;
+    }
+    """
+
+    def __init__(self, job_ids: list[str], current: dict[str, str] | None = None) -> None:
+        super().__init__()
+        self.job_ids = list(job_ids)
+        self.current = current or {}
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            if len(self.job_ids) == 1:
+                yield Static(f"[bold]Edit pending job {self.job_ids[0]}[/]\n")
+            else:
+                preview = ", ".join(self.job_ids[:5])
+                if len(self.job_ids) > 5:
+                    preview += f", ... ({len(self.job_ids)} total)"
+                yield Static(
+                    f"[bold]Edit {len(self.job_ids)} pending jobs[/]\n"
+                    f"[dim]{preview}[/]\n"
+                    "[dim]Blank fields are left unchanged.[/]\n"
+                )
+            for key, label, _scontrol_key, _attr in slurm.EDITABLE_FIELDS:
+                with Horizontal(classes="field"):
+                    yield Static(f"{label}:", classes="field-label")
+                    yield Input(
+                        value=self.current.get(key, ""),
+                        id=f"edit-{key}",
+                    )
+            yield Static(
+                "\n[dim]Ctrl+S apply · Escape cancel · Tab next field[/]"
+            )
+
+    def on_mount(self) -> None:
+        first = slurm.EDITABLE_FIELDS[0][0]
+        self.query_one(f"#edit-{first}", Input).focus()
+
+    def on_input_submitted(self, _event: Input.Submitted) -> None:
+        self.action_submit()
+
+    def action_submit(self) -> None:
+        changed: dict[str, str] = {}
+        for key, _label, _scontrol_key, _attr in slurm.EDITABLE_FIELDS:
+            value = self.query_one(f"#edit-{key}", Input).value.strip()
+            if value and value != self.current.get(key, "").strip():
+                changed[key] = value
+        self.dismiss(changed)
+
+    def action_cancel(self) -> None:
+        self.dismiss({})
+
+
 # ---------------------------------------------------------------------------
 # Main app
 # ---------------------------------------------------------------------------
@@ -202,6 +289,7 @@ class LazySlurmApp(App):
         Binding("shift+c", "force_cancel_job", "Force Cancel", show=False),
         Binding("ctrl+v", "toggle_multiselect", "Multi-select", show=True),
         Binding("s", "resubmit_job", "Resubmit", show=True),
+        Binding("u", "edit_job", "Edit Job", show=True),
         Binding("b", "view_batch_script", "Script", show=True),
         Binding("o", "ssh_to_node", "SSH", show=True),
         Binding("e", "edit_stdout", "Edit Out", show=True),
@@ -252,6 +340,8 @@ class LazySlurmApp(App):
         self._multiselect_table: str = ""  # "active" or "completed"
         self._multiselect_anchor: str | None = None  # job_id where visual mode started
         self._multiselect_ids: set[str] = set()
+        # Job ids currently being edited by EditJobScreen
+        self._edit_job_ids: list[str] = []
 
     def compose(self) -> ComposeResult:
         show_gpu = not self.config.no_gpu and not self.config.no_live
@@ -698,6 +788,70 @@ class LazySlurmApp(App):
             self._log("cancel", msg)
         self._exit_multiselect()
         await self._poll_jobs()
+
+    # ------------------------------------------------------------------
+    # Edit job properties (scontrol update)
+    # ------------------------------------------------------------------
+
+    def action_edit_job(self) -> None:
+        """Open the property editor for the selected (or multi-selected) jobs.
+
+        Only pending jobs can be edited — Slurm fixes runtime, partition and
+        the resource allocation once a job starts.
+        """
+        active = self.query_one("#active-jobs", ActiveJobTable)
+
+        if self._multiselect_mode and self._multiselect_ids:
+            if self._multiselect_table != "active":
+                self._set_status("Only pending jobs can be edited")
+                return
+            ids = sorted(self._multiselect_ids)
+        elif self._selected_job_id and self._selected_source == "active":
+            ids = [self._selected_job_id]
+        else:
+            self._set_status("No pending job selected")
+            return
+
+        pending, skipped = [], []
+        for jid in ids:
+            job = active.get_job(jid)
+            (pending if job is not None and job.state == "PENDING" else skipped).append(jid)
+
+        if skipped:
+            self._log("edit", f"skipping {len(skipped)} non-pending job(s): "
+                              + ", ".join(skipped[:5]) + (" ..." if len(skipped) > 5 else ""))
+        if not pending:
+            self._set_status("Only pending jobs can be edited")
+            return
+
+        # Prefill from the job's current values when editing exactly one job.
+        current: dict[str, str] = {}
+        if len(pending) == 1:
+            job = active.get_job(pending[0])
+            for key, _label, _scontrol_key, attr in slurm.EDITABLE_FIELDS:
+                current[key] = str(getattr(job, attr, "") or "")
+
+        self._edit_job_ids = pending
+        self.push_screen(EditJobScreen(pending, current), callback=self._on_edit_confirmed)
+
+    async def _on_edit_confirmed(self, updates: dict | None) -> None:
+        if not updates:
+            return
+        ids = self._edit_job_ids
+        args = " ".join(slurm.build_update_args(updates))
+        self._log(f"scontrol update {len(ids)} job(s)", args)
+        failed = 0
+        for jid in ids:
+            success, msg = await slurm.update_job(jid, updates)
+            failed += not success
+            self._log("update", msg)
+        if failed:
+            self._log("update", f"{failed}/{len(ids)} failed")
+        if self._multiselect_mode:
+            self._exit_multiselect()
+        await self._poll_jobs()
+        if self._selected_job_id:
+            self._trigger_load(self._selected_job_id)
 
     # ------------------------------------------------------------------
     # Multi-select mode (Ctrl+V)

@@ -227,6 +227,10 @@ class _BaseJobTable(DataTable):
         """Return current row order (job IDs) as they appear in the table."""
         return _row_keys(self)
 
+    def get_job(self, job_id: str):
+        """Return the job dataclass for `job_id` from the last poll, or None."""
+        return next((j for j in self._all_jobs if j.job_id == job_id), None)
+
     def get_selected_job_id(self) -> str | None:
         if self.row_count == 0:
             return None
