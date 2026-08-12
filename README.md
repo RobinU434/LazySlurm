@@ -127,6 +127,7 @@ availability.
 | `Ctrl+V` | Toggle multi-select mode (vim-visual style). Use Up/Down to extend the selection range from an anchor row, then press `c` or `Shift+C` to cancel all selected jobs. Press `Ctrl+V` again to exit. Detail panels freeze on the last single-selected job. |
 | `s` | Resubmit a terminated job using its original sbatch script (with confirmation) |
 | `u` | Edit a **pending** job's properties: runtime, partition, nodes, CPUs, memory. Works on a multi-selection too |
+| `p` | Open the [partition monitor](#partition-monitor) — per-partition load and every user's jobs. `Escape` or `p` returns |
 | `b` | View the job's sbatch script, read-only, in your editor |
 | `e` | Open the job's **stdout** log in an external editor (suspends TUI) |
 | `Shift+E` | Open the job's **stderr** log in an external editor |
@@ -267,6 +268,52 @@ Partition format is `name:A/I/O/T`:
 
 Press `m` to bookmark any job. Bookmarked jobs are pinned to the top of their table with
 a ★ prefix. Bookmarks persist for the duration of the session.
+
+### Partition Monitor
+
+Press `p` for a full-screen view of the cluster's partitions. The main job tables only
+ever show **your** jobs — this screen shows everyone's, so you can see what a partition is
+actually busy with before you queue into it.
+
+```
+13 partitions   85/113 nodes allocated   176 running   74 pending   (all users)
++------------------------------- Partitions --------------------------------+
+| Partition      Load            Nodes A/I/O/T  CPUs A/I/O/T   Run Pend ... |
+| v100-galvani   ███░░░░░░░  31% 3/0/1/4        60/132/64/256   8   1       |
+| cpu-galvani    █░░░░░░░░░  14% 2/0/0/2        9/55/0/64       6   3       |
+| a100-galvani   █████░░░░░  53% 24/1/1/26      1152/1024/64/…  81  32      |
++------------------------- Jobs on v100-galvani (9) ------------------------+
+| Job ID   User    Name        State    Time      Limit      N CPUs GRES    |
+| ▸2735316 you     train_v3    RUNNING  14:28:36  2-06:00:00 1 8    gpu:1   |
+|  2734106 pba870  debug       RUNNING  21:46:40  3-00:00:00 1 4            |
+|  2735270 pba175  vsv100      PENDING  0:00      3-00:00:00 1 8    gpu:1   |
++---------------------------------------------------------------------------+
+```
+
+**Partition table** — `A/I/O/T` is Slurm's allocated / idle / other / total counter, given
+for both nodes and CPUs. "Other" is down, drained, or reserved capacity. The **Load** bar
+is allocated CPUs over *usable* CPUs (allocated + idle), so drained nodes don't make a
+saturated partition look half empty; it turns yellow past 60% and red past 90%. `Run` and
+`Pend` are job counts across all users, and a pending job that names several partitions
+counts in each. Partitions that are `down` are shown struck-through instead of with a bar,
+rather than hidden.
+
+**Job table** — every user's jobs on the highlighted partition, running first then pending,
+newest first. Your own jobs are marked `▸` and highlighted. For pending jobs the last
+column shows Slurm's reason (`(Resources)`, `(QOSMaxGRESPerUser)`, `(Dependency)`, …)
+instead of a node list.
+
+| Key | Action |
+|-----|--------|
+| `Up`/`Down` | Move between partitions; the job table follows the highlighted one |
+| `Tab` | Switch focus between the partition and job tables (to scroll a long job list) |
+| `r` | Refresh now |
+| `Escape` / `p` / `q` | Back to the main view |
+
+The screen re-polls on your `--refresh` interval while it is open, and stops when you
+leave. `--partition-order` also orders this table. Note that `sinfo --summarize` reports
+one row per node *configuration*, so partitions with mixed hardware are summed into a
+single row here.
 
 ### Edit Pending Jobs
 

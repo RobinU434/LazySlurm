@@ -58,6 +58,65 @@ class CompletedJob:
 
 
 @dataclass
+class PartitionInfo:
+    """Aggregated state of one partition from `sinfo --summarize`.
+
+    Node and CPU counts follow Slurm's A/I/O/T convention: allocated, idle,
+    other (down/drained/mixed-unavailable), total.
+    """
+
+    name: str
+    avail: str = "up"
+    nodes_alloc: int = 0
+    nodes_idle: int = 0
+    nodes_other: int = 0
+    nodes_total: int = 0
+    cpus_alloc: int = 0
+    cpus_idle: int = 0
+    cpus_other: int = 0
+    cpus_total: int = 0
+    time_limit: str = ""
+    gres: str = ""
+    running: int = 0  # job counts, filled in from squeue
+    pending: int = 0
+
+    @property
+    def nodes_aiot(self) -> str:
+        return f"{self.nodes_alloc}/{self.nodes_idle}/{self.nodes_other}/{self.nodes_total}"
+
+    @property
+    def cpus_aiot(self) -> str:
+        return f"{self.cpus_alloc}/{self.cpus_idle}/{self.cpus_other}/{self.cpus_total}"
+
+    @property
+    def load(self) -> float:
+        """Fraction of usable CPUs currently allocated (0.0-1.0).
+
+        "Other" CPUs (down/drained nodes) are excluded from the denominator —
+        a partition with half its nodes drained is fully loaded when the
+        remaining half is busy, not 50% loaded.
+        """
+        usable = self.cpus_alloc + self.cpus_idle
+        return self.cpus_alloc / usable if usable else 0.0
+
+
+@dataclass
+class PartitionJob:
+    """A job on a partition, from any user (squeue without -u)."""
+
+    job_id: str
+    user: str
+    name: str
+    state: str
+    elapsed: str = ""
+    time_limit: str = ""
+    nodes: str = ""
+    cpus: str = ""
+    gres: str = ""
+    nodelist: str = ""  # node list, or the pending reason in parentheses
+
+
+@dataclass
 class JobDetail:
     """Detailed job info parsed from scontrol show job or sacct."""
 

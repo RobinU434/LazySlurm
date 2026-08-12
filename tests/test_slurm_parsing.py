@@ -453,3 +453,113 @@ def test_update_job_reports_failure(monkeypatch):
     ok, msg = asyncio.run(slurm.update_job("1234", {"partition": "nope"}))
     assert not ok
     assert "Invalid partition name" in msg
+
+
+# ---------------------------------------------------------------------------
+# Partitions (sinfo) and per-partition job lists
+# ---------------------------------------------------------------------------
+
+# Real-world shape: --summarize still emits one row per node *configuration*,
+# so a partition with mixed hardware appears more than once.
+_SINFO_OUT = "\n".join([
+    "a100*|up|19/1/1/21|778/502/64/1344|3-00:00:00|gpu:a100:8",
+    "a100|up|3/0/0/3|366/402/0/768|3-00:00:00|gpu:a100:9",
+    "cpu|up|2/0/0/2|13/51/0/64|30-00:00:00|(null)",
+    "maint|down|0/0/4/4|0/0/256/256|1:00:00|(null)",
+])
+
+
+def test_parse_sinfo_aggregates_rows_per_partition():
+    parts = {p.name: p for p in slurm.parse_sinfo(_SINFO_OUT)}
+    assert set(parts) == {"a100", "cpu", "maint"}  # trailing "*" stripped
+    a100 = parts["a100"]
+    assert a100.nodes_aiot == "22/1/1/24"
+    assert a100.cpus_aiot == "1144/904/64/2112"
+    assert a100.time_limit == "3-00:00:00"
+    assert a100.gres == "gpu:a100:8,gpu:a100:9"  # both configs listed
+    assert parts["cpu"].gres == ""  # "(null)" normalized away
+    assert parts["maint"].avail == "down"
+
+
+def test_parse_sinfo_tolerates_short_rows():
+    # The cluster bar's older 3-field format must still parse.
+    parts = slurm.parse_sinfo("gpu|up|10/5/0/15")
+    assert len(parts) == 1
+    assert parts[0].nodes_aiot == "10/5/0/15"
+    assert parts[0].cpus_aiot == "0/0/0/0"
+
+
+def test_partition_load_excludes_drained_cpus():
+    part = slurm.parse_sinfo("gpu|up|1/0/1/2|100/100/800/1000")[0]
+    # 100 allocated of 200 usable — the 800 "other" CPUs are not counted
+    assert part.load == pytest.approx(0.5)
+
+
+def test_partition_load_zero_when_nothing_usable():
+    assert slurm.parse_sinfo("gpu|up|0/0/2/2|0/0/128/128")[0].load == 0.0
+
+
+def test_order_partitions_honors_config_then_appends_rest():
+    parts = slurm.parse_sinfo(_SINFO_OUT)
+    ordered = slurm.order_partitions(parts, Config(partition_order=["cpu", "a100"]))
+    assert [p.name for p in ordered] == ["cpu", "a100", "maint"]
+
+
+def test_get_partitions_fills_job_counts(monkeypatch):
+    async def _fake(*args):
+        if args[0] == "sinfo":
+            return _SINFO_OUT, "", 0
+        return "a100|RUNNING\na100|PENDING\ncpu|RUNNING\n", "", 0
+
+    monkeypatch.setattr(slurm, "_run_cmd", _fake)
+    parts = {p.name: p for p in asyncio.run(slurm.get_partitions(Config()))}
+    assert (parts["a100"].running, parts["a100"].pending) == (1, 1)
+    assert (parts["cpu"].running, parts["cpu"].pending) == (1, 0)
+    assert (parts["maint"].running, parts["maint"].pending) == (0, 0)
+
+
+def test_get_partition_availability_keeps_only_up_partitions(monkeypatch):
+    monkeypatch.setattr(slurm, "_run_cmd", _fake_run_cmd(_SINFO_OUT))
+    info = asyncio.run(slurm.get_partition_availability(Config()))
+    assert info == ["a100:22/1/1/24", "cpu:2/0/0/2"]  # aggregated, maint dropped
+
+
+def test_parse_partition_job_counts_multi_partition_pending():
+    counts = slurm.parse_partition_job_counts("\n".join([
+        "gpu|RUNNING",
+        "gpu|RUNNING",
+        "gpu,gpu-long|PENDING",   # counts towards both
+        "cpu|COMPLETING",         # neither running nor pending
+    ]))
+    assert counts == {"gpu": (2, 1), "gpu-long": (0, 1), "cpu": (0, 0)}
+
+
+def test_parse_partition_jobs():
+    jobs = slurm.parse_partition_jobs(
+        "2735316|rvy895|train|RUNNING|14:28:36|2-06:00:00|1|8|gres/gpu:1|galvani-cn059\n"
+        "2735270|pba175|vsv100|PENDING|0:00|3-00:00:00|1|8|N/A|(Dependency)\n"
+    )
+    assert [j.job_id for j in jobs] == ["2735316", "2735270"]
+    assert jobs[0].user == "rvy895"
+    assert jobs[0].gres == "gres/gpu:1"
+    assert jobs[1].gres == ""  # "N/A" normalized away
+    assert jobs[1].nodelist == "(Dependency)"  # pending reason
+
+
+def test_get_partition_jobs_sorts_running_first_then_newest(monkeypatch):
+    rows = "\n".join([
+        "100|a|j1|PENDING|0:00|1:00|1|1|N/A|(Priority)",
+        "200|b|j2|RUNNING|1:00|1:00|1|1|N/A|node1",
+        "300|c|j3|PENDING|0:00|1:00|1|1|N/A|(Priority)",
+        "150|d|j4|RUNNING|1:00|1:00|1|1|N/A|node2",
+    ])
+    monkeypatch.setattr(slurm, "_run_cmd", _fake_run_cmd(rows))
+    jobs = asyncio.run(slurm.get_partition_jobs("gpu", Config()))
+    assert [j.job_id for j in jobs] == ["200", "150", "300", "100"]
+
+
+def test_get_partition_jobs_without_partition_skips_squeue(monkeypatch):
+    fake, calls = _capture_run_cmd()
+    monkeypatch.setattr(slurm, "_run_cmd", fake)
+    assert asyncio.run(slurm.get_partition_jobs("", Config())) == []
+    assert "args" not in calls

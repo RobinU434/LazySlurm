@@ -97,6 +97,35 @@
     border-title-color: $accent;
 }
 
+/* Partition monitor screen */
+#partition-bar {
+    dock: top;
+    height: 1;
+    background: transparent;
+    color: $text-muted;
+    padding: 0 1;
+}
+
+#partition-table {
+    height: 2fr;
+    border: round $secondary-background-lighten-2;
+    border-title-color: $text-muted;
+    border-title-align: center;
+}
+
+#partition-jobs {
+    height: 3fr;
+    border: round $secondary-background-lighten-2;
+    border-title-color: $text-muted;
+    border-title-align: center;
+}
+
+#partition-table:focus-within,
+#partition-jobs:focus-within {
+    border: round $accent;
+    border-title-color: $accent;
+}
+
 /* Minimal tab styling */
 TabbedContent {
     height: 1fr;

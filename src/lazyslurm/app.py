@@ -12,7 +12,7 @@ from pathlib import Path
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.screen import ModalScreen
+from textual.screen import ModalScreen, Screen
 from textual.widgets import DataTable, Footer, Input, RichLog, Static
 
 from lazyslurm import slurm
@@ -20,6 +20,7 @@ from lazyslurm.models import Config
 from lazyslurm.widgets.detail_view import DetailView, parse_mem_bytes
 from lazyslurm.widgets.job_table import ActiveJobTable, CompletedJobTable, JobSelected, set_partition_colors, set_display_config
 from lazyslurm.widgets.metadata_view import MetadataView
+from lazyslurm.widgets.partition_view import PartitionJobTable, PartitionSelected, PartitionTable
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +69,7 @@ class HelpScreen(ModalScreen[None]):
                 "  [bold cyan]Ctrl+V[/]          Toggle multi-select mode (vim-visual)\n"
                 "  [bold cyan]s[/]               Resubmit terminated job (with confirmation)\n"
                 "  [bold cyan]u[/]               Edit pending job(s): runtime, partition, nodes, CPUs, memory\n"
+                "  [bold cyan]p[/]               Partition monitor: load, A/I/O/T, all users' jobs\n"
                 "  [bold cyan]b[/]               View job's sbatch script (read-only, cached)\n"
                 "  [bold cyan]e[/]               Open stdout in editor (vim/nano, set in config)\n"
                 "  [bold cyan]Shift+E[/]         Open stderr in editor\n"
@@ -199,22 +201,31 @@ class EditJobScreen(ModalScreen[dict]):
         align: center middle;
     }
     EditJobScreen > Vertical {
-        width: 60;
+        width: 42;
         height: auto;
         border: round $accent;
         background: $surface;
-        padding: 1 2;
+        padding: 0 1;
     }
     EditJobScreen .field {
-        height: auto;
-        margin-bottom: 1;
+        height: 1;
     }
     EditJobScreen .field-label {
-        width: 14;
-        padding-top: 1;
+        width: 12;
+        color: $text-muted;
     }
     EditJobScreen Input {
         width: 1fr;
+        height: 1;
+        border: none;
+        padding: 0;
+        background: $surface;
+    }
+    EditJobScreen Input:focus {
+        background: $boost;
+    }
+    EditJobScreen .hint {
+        color: $text-muted;
     }
     """
 
@@ -226,26 +237,18 @@ class EditJobScreen(ModalScreen[dict]):
     def compose(self) -> ComposeResult:
         with Vertical():
             if len(self.job_ids) == 1:
-                yield Static(f"[bold]Edit pending job {self.job_ids[0]}[/]\n")
+                title = f"edit {self.job_ids[0]}"
             else:
-                preview = ", ".join(self.job_ids[:5])
-                if len(self.job_ids) > 5:
-                    preview += f", ... ({len(self.job_ids)} total)"
-                yield Static(
-                    f"[bold]Edit {len(self.job_ids)} pending jobs[/]\n"
-                    f"[dim]{preview}[/]\n"
-                    "[dim]Blank fields are left unchanged.[/]\n"
-                )
+                title = f"edit {len(self.job_ids)} jobs"
+            yield Static(f"[bold]{title}[/]", classes="hint")
             for key, label, _scontrol_key, _attr in slurm.EDITABLE_FIELDS:
                 with Horizontal(classes="field"):
-                    yield Static(f"{label}:", classes="field-label")
+                    yield Static(label, classes="field-label")
                     yield Input(
                         value=self.current.get(key, ""),
                         id=f"edit-{key}",
                     )
-            yield Static(
-                "\n[dim]Ctrl+S apply · Escape cancel · Tab next field[/]"
-            )
+            yield Static("[dim]^S apply  esc cancel[/]", classes="hint")
 
     def on_mount(self) -> None:
         first = slurm.EDITABLE_FIELDS[0][0]
@@ -264,6 +267,88 @@ class EditJobScreen(ModalScreen[dict]):
 
     def action_cancel(self) -> None:
         self.dismiss({})
+
+
+class PartitionScreen(Screen):
+    """Full-screen partition monitor.
+
+    Top: every partition with node/CPU allocated-idle-other-total counts and a
+    load bar. Bottom: the jobs on the highlighted partition, from *all* users
+    (the main job tables are filtered to you).
+    """
+
+    BINDINGS = [
+        Binding("escape", "close", "Back"),
+        Binding("p", "close", "Back"),
+        Binding("q", "close", "Back"),
+        Binding("r", "refresh_now", "Refresh"),
+        Binding("tab", "focus_other", "Switch Panel", show=False),
+        Binding("shift+tab", "focus_other", show=False),
+    ]
+
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        self.config = config
+        self._selected_partition: str | None = None
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="partition-bar")
+        yield PartitionTable(id="partition-table")
+        yield PartitionJobTable(
+            id="partition-jobs",
+            user=self.config.user or slurm.USER,
+        )
+        yield Footer()
+
+    async def on_mount(self) -> None:
+        self.query_one("#partition-table").border_title = "Partitions"
+        self.query_one("#partition-jobs").border_title = "Jobs on partition"
+        self.query_one("#partition-table", PartitionTable).focus()
+        await self._refresh_partitions()
+        if self.config.refresh > 0:
+            self.set_interval(self.config.refresh, self._refresh_partitions)
+
+    async def _refresh_partitions(self) -> None:
+        table = self.query_one("#partition-table", PartitionTable)
+        partitions = await slurm.get_partitions(self.config)
+        table.update_partitions(partitions)
+
+        total_nodes = sum(p.nodes_total for p in partitions)
+        alloc_nodes = sum(p.nodes_alloc for p in partitions)
+        running = sum(p.running for p in partitions)
+        pending = sum(p.pending for p in partitions)
+        self.query_one("#partition-bar", Static).update(
+            f"[bold]{len(partitions)}[/] partitions   "
+            f"[green]{alloc_nodes}[/]/{total_nodes} nodes allocated   "
+            f"[green]{running}[/] running   [yellow]{pending}[/] pending   "
+            "[dim](all users)[/]"
+        )
+
+        selected = table.get_selected_partition()
+        if selected:
+            await self._refresh_jobs(selected)
+
+    async def _refresh_jobs(self, partition: str) -> None:
+        self._selected_partition = partition
+        jobs = await slurm.get_partition_jobs(partition, self.config)
+        job_table = self.query_one("#partition-jobs", PartitionJobTable)
+        job_table.update_jobs(jobs)
+        job_table.border_title = f"Jobs on {partition} ({len(jobs)})"
+
+    async def on_partition_selected(self, event: PartitionSelected) -> None:
+        if event.partition != self._selected_partition:
+            await self._refresh_jobs(event.partition)
+
+    async def action_refresh_now(self) -> None:
+        await self._refresh_partitions()
+
+    def action_focus_other(self) -> None:
+        table = self.query_one("#partition-table", PartitionTable)
+        jobs = self.query_one("#partition-jobs", PartitionJobTable)
+        (jobs if table.has_focus else table).focus()
+
+    def action_close(self) -> None:
+        self.app.pop_screen()
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +375,7 @@ class LazySlurmApp(App):
         Binding("ctrl+v", "toggle_multiselect", "Multi-select", show=True),
         Binding("s", "resubmit_job", "Resubmit", show=True),
         Binding("u", "edit_job", "Edit Job", show=True),
+        Binding("p", "partitions", "Partitions", show=True),
         Binding("b", "view_batch_script", "Script", show=True),
         Binding("o", "ssh_to_node", "SSH", show=True),
         Binding("e", "edit_stdout", "Edit Out", show=True),
@@ -788,6 +874,14 @@ class LazySlurmApp(App):
             self._log("cancel", msg)
         self._exit_multiselect()
         await self._poll_jobs()
+
+    # ------------------------------------------------------------------
+    # Partition monitor
+    # ------------------------------------------------------------------
+
+    def action_partitions(self) -> None:
+        """Open the partition monitor screen (Escape or p returns)."""
+        self.push_screen(PartitionScreen(self.config))
 
     # ------------------------------------------------------------------
     # Edit job properties (scontrol update)

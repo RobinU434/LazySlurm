@@ -9,7 +9,15 @@ from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from lazyslurm.models import CompletedJob, Config, JobDetail, JobStats, RunningJob
+from lazyslurm.models import (
+    CompletedJob,
+    Config,
+    JobDetail,
+    JobStats,
+    PartitionInfo,
+    PartitionJob,
+    RunningJob,
+)
 
 USER = os.environ.get("USER", os.environ.get("LOGNAME", ""))
 
@@ -751,42 +759,209 @@ async def archive_batch_script(job_id: str, force: bool = False) -> Path | None:
 
 
 # ---------------------------------------------------------------------------
-# Cluster summary (sinfo + squeue counts)
+# Partitions (sinfo) — cluster summary bar and the partition monitor screen
 # ---------------------------------------------------------------------------
+
+# partition|avail|nodes A/I/O/T|cpus A/I/O/T|time limit|gres
+_SINFO_FORMAT = "%P|%a|%F|%C|%l|%G"
+
+
+def _aiot(field: str) -> tuple[int, int, int, int]:
+    """Parse Slurm's "allocated/idle/other/total" counter string."""
+    parts = field.split("/")
+    if len(parts) != 4:
+        return (0, 0, 0, 0)
+    out = []
+    for p in parts:
+        try:
+            out.append(int(p.strip()))
+        except ValueError:
+            out.append(0)
+    return tuple(out)  # type: ignore[return-value]
+
+
+def parse_sinfo(stdout: str) -> list[PartitionInfo]:
+    """Parse `sinfo --summarize --format=_SINFO_FORMAT` into PartitionInfo.
+
+    `--summarize` still emits one row per *node configuration*, so a partition
+    with mixed hardware (different memory or GRES) appears several times — the
+    rows are summed here so each partition shows up exactly once. Trailing
+    fields are optional, which keeps the cluster bar working against the
+    shorter `%P|%a|%F` output too.
+    """
+    by_name: dict[str, PartitionInfo] = {}
+    for line in stdout.strip().splitlines():
+        fields = [f.strip() for f in line.split("|")]
+        if len(fields) < 3:
+            continue
+        name = fields[0].rstrip("*")
+        n_a, n_i, n_o, n_t = _aiot(fields[2])
+        c_a, c_i, c_o, c_t = _aiot(fields[3]) if len(fields) > 3 else (0, 0, 0, 0)
+        gres = fields[5] if len(fields) > 5 else ""
+        if gres in ("(null)", "N/A"):
+            gres = ""
+
+        part = by_name.get(name)
+        if part is None:
+            part = PartitionInfo(
+                name=name,
+                avail=fields[1],
+                time_limit=fields[4] if len(fields) > 4 else "",
+                gres=gres,
+            )
+            by_name[name] = part
+        elif gres and gres not in part.gres:
+            part.gres = f"{part.gres},{gres}" if part.gres else gres
+        part.nodes_alloc += n_a
+        part.nodes_idle += n_i
+        part.nodes_other += n_o
+        part.nodes_total += n_t
+        part.cpus_alloc += c_a
+        part.cpus_idle += c_i
+        part.cpus_other += c_o
+        part.cpus_total += c_t
+    return list(by_name.values())
+
+
+def order_partitions(parts: list[PartitionInfo], config: Config | None = None) -> list[PartitionInfo]:
+    """Apply cfg.partition_order, appending anything not named in it."""
+    cfg = config or _config
+    if not cfg.partition_order:
+        return parts
+    by_name = {p.name: p for p in parts}
+    ordered = [by_name[n] for n in cfg.partition_order if n in by_name]
+    ordered += [p for p in parts if p.name not in cfg.partition_order]
+    return ordered
+
+
+def parse_partition_job_counts(stdout: str) -> dict[str, tuple[int, int]]:
+    """Count running/pending jobs per partition from `squeue %P|%T` output.
+
+    A pending job may list several partitions ("gpu,gpu-long"); it counts
+    towards each, since it could start on any of them.
+    """
+    counts: dict[str, list[int]] = {}
+    for line in stdout.strip().splitlines():
+        fields = line.split("|")
+        if len(fields) < 2:
+            continue
+        state = fields[1].strip()
+        for name in fields[0].strip().split(","):
+            name = name.strip().rstrip("*")
+            if not name:
+                continue
+            entry = counts.setdefault(name, [0, 0])
+            if state == "RUNNING":
+                entry[0] += 1
+            elif state == "PENDING":
+                entry[1] += 1
+    return {name: (run, pend) for name, (run, pend) in counts.items()}
+
+
+async def get_partition_job_counts() -> dict[str, tuple[int, int]]:
+    """Running/pending job counts per partition, across all users."""
+    stdout, _, rc = await _run_cmd(
+        "squeue", "--noheader", "--format=%P|%T", "--states=RUNNING,PENDING",
+    )
+    if rc != 0 or not stdout.strip():
+        return {}
+    return parse_partition_job_counts(stdout)
+
+
+async def get_partitions(config: Config | None = None) -> list[PartitionInfo]:
+    """Fetch every partition's node/CPU state from `sinfo`.
+
+    Unlike the cluster bar this keeps unavailable ("down") partitions — the
+    monitor screen shows them greyed out rather than hiding them.
+    """
+    cfg = config or _config
+    stdout, counts = await asyncio.gather(
+        _run_cmd("sinfo", "--noheader", "--summarize", f"--format={_SINFO_FORMAT}"),
+        get_partition_job_counts(),
+    )
+    out, _, rc = stdout
+    if rc != 0 or not out.strip():
+        return []
+    parts = parse_sinfo(out)
+    for part in parts:
+        part.running, part.pending = counts.get(part.name, (0, 0))
+    return order_partitions(parts, cfg)
 
 
 async def get_partition_availability(config: Config | None = None) -> list[str]:
     """Return per-partition node availability strings from `sinfo`.
 
     Each entry looks like "gpu:10/5/0/15" (allocated/idle/other/total).
-    Honors cfg.partition_order for display ordering.
+    Honors cfg.partition_order for display ordering; down partitions are
+    dropped.
     """
     cfg = config or _config
-    stdout_si, _, _ = await _run_cmd(
-        "sinfo", "--noheader", "--summarize", "--format=%P|%a|%F",
+    stdout, _, _ = await _run_cmd(
+        "sinfo", "--noheader", "--summarize", f"--format={_SINFO_FORMAT}",
     )
-    if not stdout_si.strip():
+    if not stdout.strip():
         return []
+    parts = [p for p in parse_sinfo(stdout) if p.avail == "up"]
+    return [f"{p.name}:{p.nodes_aiot}" for p in order_partitions(parts, cfg)]
 
-    # Parse sinfo: partition|availability|allocated/idle/other/total
-    part_dict: dict[str, str] = {}
-    for line in stdout_si.strip().splitlines():
-        fields = line.split("|")
-        if len(fields) >= 3:
-            pname = fields[0].strip().rstrip("*")
-            avail = fields[1].strip()
-            nodes = fields[2].strip()  # e.g. "10/5/0/15"
-            if avail == "up":
-                part_dict[pname] = f"{pname}:{nodes}"
 
-    if cfg.partition_order:
-        ordered = [part_dict[p] for p in cfg.partition_order if p in part_dict]
-        # Append remaining partitions not in the order list
-        for p in part_dict:
-            if p not in cfg.partition_order:
-                ordered.append(part_dict[p])
-        return ordered
-    return list(part_dict.values())
+# ---------------------------------------------------------------------------
+# Jobs on a partition, across all users (squeue without -u)
+# ---------------------------------------------------------------------------
+
+# jobid|user|name|state|elapsed|time limit|nodes|cpus|tres-per-node|nodelist(reason)
+_PARTITION_JOB_FORMAT = "%i|%u|%j|%T|%M|%l|%D|%C|%b|%R"
+
+
+def parse_partition_jobs(stdout: str) -> list[PartitionJob]:
+    """Parse the partition squeue output into PartitionJob rows."""
+    jobs: list[PartitionJob] = []
+    for line in stdout.strip().splitlines():
+        fields = [f.strip() for f in line.split("|")]
+        if len(fields) < 10:
+            continue
+        gres = fields[8]
+        if gres in ("N/A", "(null)"):
+            gres = ""
+        jobs.append(PartitionJob(
+            job_id=fields[0],
+            user=fields[1],
+            name=fields[2],
+            state=fields[3],
+            elapsed=fields[4],
+            time_limit=fields[5],
+            nodes=fields[6],
+            cpus=fields[7],
+            gres=gres,
+            nodelist=fields[9],
+        ))
+    return jobs
+
+
+async def get_partition_jobs(
+    partition: str,
+    config: Config | None = None,
+    states: str = "RUNNING,PENDING",
+) -> list[PartitionJob]:
+    """Fetch all users' jobs on `partition`, running first, newest first."""
+    if not partition:
+        return []
+    stdout, _, rc = await _run_cmd(
+        "squeue", "-p", partition,
+        "--noheader",
+        f"--format={_PARTITION_JOB_FORMAT}",
+        f"--states={states}",
+    )
+    if rc != 0 or not stdout.strip():
+        return []
+    jobs = parse_partition_jobs(stdout)
+    jobs.sort(
+        key=lambda j: (
+            j.state != "RUNNING",
+            -(int(j.job_id.split("_")[0]) if j.job_id.split("_")[0].isnumeric() else 0),
+        )
+    )
+    return jobs
 
 
 def format_cluster_summary(

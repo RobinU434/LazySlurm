@@ -7,6 +7,7 @@ import pytest
 from lazyslurm.models import JobDetail, RunningJob
 from lazyslurm.widgets.detail_view import parse_mem_bytes, sparkline
 from lazyslurm.widgets import job_table
+from lazyslurm.widgets.partition_view import load_bar
 from lazyslurm import config as cfg
 
 
@@ -330,3 +331,26 @@ def test_get_job_returns_dataclass_or_none():
     assert table.get_job("2") is jobs[1]
     assert table.get_job("2").time_limit == "1:00:00"
     assert table.get_job("999") is None
+
+
+# ---------------------------------------------------------------------------
+# Partition load bar
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "fraction,expected_bar,expected_style",
+    [
+        (0.0, "░" * 10, "green"),
+        (0.5, "█" * 5 + "░" * 5, "green"),
+        (0.75, "█" * 8 + "░" * 2, "yellow"),
+        (1.0, "█" * 10, "red"),
+        (1.5, "█" * 10, "red"),   # clamped
+        (-0.5, "░" * 10, "green"),  # clamped
+    ],
+)
+def test_load_bar(fraction, expected_bar, expected_style):
+    text = load_bar(fraction)
+    assert text.plain.startswith(expected_bar)
+    assert text.plain.endswith("%")
+    assert text.spans[0].style == expected_style
