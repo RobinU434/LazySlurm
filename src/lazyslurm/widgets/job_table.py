@@ -15,6 +15,7 @@ from lazyslurm.models import (
     RunningJob,
     array_index_span,
     array_task_count,
+    gres_count,
 )
 
 # Color mapping for terminated job states
