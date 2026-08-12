@@ -10,7 +10,7 @@ from textual.message import Message
 from textual.widgets import DataTable
 from rich.text import Text
 
-from lazyslurm.models import PartitionInfo, PartitionJob
+from lazyslurm.models import NodeInfo, PartitionInfo, PartitionJob
 from lazyslurm.widgets.job_table import _partition_style, _truncate
 
 # Load bar rendering
@@ -102,6 +102,114 @@ class PartitionTable(DataTable):
             part.time_limit,
             _truncate(part.gres, 24),
         )
+
+
+_NODE_STATE_STYLES: dict[str, str] = {
+    "idle": "green",
+    "mixed": "yellow",
+    "allocated": "dark_orange",
+    "completing": "cyan",
+    "reserved": "blue",
+    "drained": "red dim",
+    "draining": "red dim",
+    "down": "red bold",
+    "fail": "red bold",
+    "failing": "red",
+    "maint": "magenta dim",
+    "unknown": "dim",
+}
+
+
+class NodeTable(DataTable):
+    """Top panel of the node screen: one row per node of a partition."""
+
+    COLUMNS = (
+        "Node", "State", "CPUs A/I/O/T", "Load", "Memory", "GPUs", "Reason",
+    )
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # NB: not `_nodes` — Textual's DOMNode uses that for its children.
+        self._node_infos: list[NodeInfo] = []
+
+    def on_mount(self) -> None:
+        for col in self.COLUMNS:
+            self.add_column(col, key=col)
+        self.cursor_type = "row"
+        self.zebra_stripes = True
+
+    def update_nodes(self, nodes: list[NodeInfo]) -> None:
+        """Rebuild, keeping the cursor on the same node."""
+        self._node_infos = nodes
+        selected = self.get_selected_node()
+        self.clear()
+        for node in nodes:
+            self.add_row(*self._row_for(node), key=node.name)
+        if selected:
+            for index, node in enumerate(nodes):
+                if node.name == selected:
+                    self.move_cursor(row=index)
+                    break
+
+    def get_node(self, name: str) -> NodeInfo | None:
+        return next((n for n in self._node_infos if n.name == name), None)
+
+    def get_selected_node(self) -> str | None:
+        if self.row_count == 0:
+            return None
+        try:
+            row_key, _ = self.coordinate_to_cell_key(self.cursor_coordinate)
+            return str(row_key.value)
+        except Exception:
+            return None
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        name = str(event.row_key.value) if event.row_key else self.get_selected_node()
+        if name:
+            self.post_message(NodeSelected(name))
+
+    def _row_for(self, node: NodeInfo) -> tuple:
+        style = _NODE_STATE_STYLES.get(node.base_state, "")
+        state = Text(node.state, style=style)
+
+        if node.gpus_total:
+            free = node.gpus_free
+            gpus = Text(
+                f"{node.gpus_used}/{node.gpus_total}",
+                style="green" if free else "red",
+            )
+        else:
+            gpus = Text("—", style="dim")
+
+        # A drained node's counters say nothing useful; its reason does.
+        if node.base_state in ("down", "drained", "draining", "fail", "maint"):
+            load = Text("—", style="dim")
+        else:
+            load = load_bar(node.load, width=6)
+
+        mem = Text.assemble(
+            (f"{node.mem_used_mb / 1024:5.0f}", "" if node.mem_used < 0.9 else "red"),
+            ("/", "dim"),
+            f"{node.memory_mb / 1024:.0f}G",
+        ) if node.memory_mb else Text("—", style="dim")
+
+        return (
+            Text(node.name, style="bold" if node.unresponsive else ""),
+            state,
+            node.cpus_aiot,
+            load,
+            mem,
+            gpus,
+            Text(_truncate(node.reason, 28), style="red dim") if node.reason else "",
+        )
+
+
+class NodeSelected(Message):
+    """Posted when the cursor moves to a different node."""
+
+    def __init__(self, node: str) -> None:
+        super().__init__()
+        self.node = node
 
 
 class PartitionJobTable(DataTable):

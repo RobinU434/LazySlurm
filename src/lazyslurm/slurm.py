@@ -14,6 +14,7 @@ from lazyslurm.models import (
     Config,
     JobDetail,
     JobStats,
+    NodeInfo,
     PartitionInfo,
     PartitionJob,
     RunningJob,
@@ -1007,6 +1008,111 @@ async def get_partition_availability(config: Config | None = None) -> list[str]:
         return []
     parts = [p for p in parse_sinfo(stdout) if p.avail == "up"]
     return [f"{p.name}:{p.nodes_aiot}" for p in order_partitions(parts, cfg)]
+
+
+# ---------------------------------------------------------------------------
+# Nodes of a partition (sinfo -N)
+# ---------------------------------------------------------------------------
+
+# The long form is the only one that can report GresUsed — how many GPUs of a
+# node are actually taken, which is the question worth asking on a GPU cluster.
+# ":|" makes sinfo pad each field with "|" instead of spaces.
+_SINFO_NODE_FIELDS = (
+    "NodeHost:|,StateLong:|,CPUsState:|,Memory:|,FreeMem:|,"
+    "CPUsLoad:|,Gres:|,GresUsed:|,Reason:|"
+)
+# Fallback for Slurm versions without those -O field names; no GresUsed.
+_SINFO_NODE_FORMAT = "%N|%T|%C|%m|%e|%O|%G||%E"
+
+
+def _as_int(value: str) -> int:
+    try:
+        return int(float(value.strip()))
+    except (ValueError, AttributeError):
+        return 0
+
+
+def _as_float(value: str) -> float:
+    try:
+        return float(value.strip())
+    except (ValueError, AttributeError):
+        return 0.0
+
+
+def parse_sinfo_nodes(stdout: str) -> list[NodeInfo]:
+    """Parse per-node sinfo output into NodeInfo, one entry per node."""
+    nodes: dict[str, NodeInfo] = {}
+    for line in stdout.strip().splitlines():
+        fields = [f.strip() for f in line.split("|")]
+        if len(fields) < 3 or not fields[0]:
+            continue
+        name = fields[0]
+        if name in nodes:  # a node listed in several partitions
+            continue
+
+        def field(index: int) -> str:
+            return fields[index] if len(fields) > index else ""
+
+        c_a, c_i, c_o, c_t = _aiot(field(2))
+        reason = field(8)
+        if reason in ("none", "(null)", "N/A"):
+            reason = ""
+        gres = field(6)
+        if gres in ("(null)", "N/A"):
+            gres = ""
+        gres_used = field(7)
+        if gres_used in ("(null)", "N/A"):
+            gres_used = ""
+        load_raw = field(5)
+        nodes[name] = NodeInfo(
+            name=name,
+            state=field(1),
+            cpus_alloc=c_a, cpus_idle=c_i, cpus_other=c_o, cpus_total=c_t,
+            memory_mb=_as_int(field(3)),
+            free_mem_mb=_as_int(field(4)),
+            cpu_load=_as_float(load_raw),
+            gres=gres,
+            gres_used=gres_used,
+            reason=reason,
+        )
+    return list(nodes.values())
+
+
+async def get_partition_nodes(
+    partition: str, config: Config | None = None
+) -> list[NodeInfo]:
+    """Fetch every node of `partition` with its state, load, memory and GPUs."""
+    if not partition:
+        return []
+    stdout, _, rc = await _run_cmd(
+        "sinfo", "-N", "-p", partition, "--noheader", "-O", _SINFO_NODE_FIELDS,
+    )
+    if rc != 0 or not stdout.strip():
+        # Older Slurm: retry with the short format (loses GresUsed).
+        stdout, _, rc = await _run_cmd(
+            "sinfo", "-N", "-p", partition, "--noheader",
+            f"--format={_SINFO_NODE_FORMAT}",
+        )
+        if rc != 0 or not stdout.strip():
+            return []
+    nodes = parse_sinfo_nodes(stdout)
+    nodes.sort(key=lambda n: n.name)
+    return nodes
+
+
+async def get_node_jobs(node: str, config: Config | None = None) -> list[PartitionJob]:
+    """All users' jobs currently running on one node."""
+    if not node:
+        return []
+    stdout, _, rc = await _run_cmd(
+        "squeue", "-w", node, "--noheader",
+        f"--format={_PARTITION_JOB_FORMAT}", "--states=RUNNING",
+    )
+    if rc != 0 or not stdout.strip():
+        return []
+    jobs = parse_partition_jobs(stdout)
+    jobs.sort(key=lambda j: job_sort_key(j.job_id), reverse=True)
+    return jobs
 
 
 # ---------------------------------------------------------------------------

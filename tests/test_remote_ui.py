@@ -176,3 +176,37 @@ def test_pager_without_a_log_path_does_nothing(monkeypatch):
     calls = _capture_system(monkeypatch, app)
     _run(app._page_file(None, "stdout"))
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# Node screen (Enter on a partition)
+# ---------------------------------------------------------------------------
+
+
+def test_node_table_does_not_shadow_textuals_children():
+    """Regression: naming the cache `_nodes` clobbers DOMNode's child list.
+
+    It only blows up on teardown ("'NodeInfo' object has no attribute
+    'post_message'"), so a plain render test would not have caught it.
+    """
+    from lazyslurm.models import NodeInfo
+    from lazyslurm.widgets.partition_view import NodeTable
+
+    async def scenario():
+        app = _Harness()
+        async with app.run_test(size=(120, 20)) as pilot:
+            table = NodeTable(id="node-table")
+            await app.mount(table)
+            await pilot.pause()
+            table.update_nodes([
+                NodeInfo("gpu-node01", "idle", 0, 64, 0, 64, 1000, 900, 0.5),
+                NodeInfo("gpu-node02", "drained*", 0, 0, 64, 64, 1000, 1000,
+                         reason="bad GPU"),
+            ])
+            await pilot.pause()
+            assert table.row_count == 2
+            assert table.get_node("gpu-node02").reason == "bad GPU"
+            # The DOM child list must still be Textual's, not our data.
+            assert all(hasattr(child, "post_message") for child in table.children)
+
+    _run(scenario())

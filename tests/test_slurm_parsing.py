@@ -729,3 +729,111 @@ def test_get_partition_jobs_orders_arrays_after_running_first(monkeypatch):
     monkeypatch.setattr(slurm, "_run_cmd", _fake_run_cmd(rows))
     jobs = asyncio.run(slurm.get_partition_jobs("gpu", Config()))
     assert [j.job_id for j in jobs] == ["600", "500_1", "500_2", "500_11"]
+
+
+# ---------------------------------------------------------------------------
+# Nodes of a partition (sinfo -N)
+# ---------------------------------------------------------------------------
+
+_SINFO_NODES = "\n".join([
+    "gpu-node01|mixed|58/6/0/64|948865|324779|16.02|gpu:a100:8(S:0-1)|gpu:a100:5(IDX:0-4)|none|",
+    "gpu-node02|allocated|64/0/0/64|948863|499782|11.52|gpu:a100:8(S:0-1)|gpu:a100:8(IDX:0-7)|none|",
+    "gpu-node03|drained*|0/0/64/64|948863|1025717|0.01|gpu:a100:8(S:0-1)|gpu:a100:0(IDX:N/A)|kernel patch|",
+    "gpu-node01|mixed|58/6/0/64|948865|324779|16.02|gpu:a100:8(S:0-1)|gpu:a100:5(IDX:0-4)|none|",
+])
+
+
+@pytest.mark.parametrize(
+    "spec,expected",
+    [
+        ("gpu:a100:8(S:0-1)", 8),
+        ("gpu:a100:7(IDX:0-6)", 7),
+        ("gpu:2", 2),
+        ("gpu:a100:4,gpu:v100:2", 6),
+        ("gpu:a100:0(IDX:N/A)", 0),
+        ("(null)", 0),
+        ("", 0),
+        ("garbage", 0),
+    ],
+)
+def test_gres_count(spec, expected):
+    from lazyslurm.models import gres_count
+    assert gres_count(spec) == expected
+
+
+def test_parse_sinfo_nodes():
+    nodes = slurm.parse_sinfo_nodes(_SINFO_NODES)
+    assert [n.name for n in nodes] == ["gpu-node01", "gpu-node02", "gpu-node03"]  # deduped
+
+    first = nodes[0]
+    assert first.state == "mixed"
+    assert first.cpus_aiot == "58/6/0/64"
+    assert first.cpu_load == pytest.approx(16.02)      # float, not truncated
+    assert first.load == pytest.approx(16.02 / 64)
+    assert first.mem_used_mb == 948865 - 324779
+    assert (first.gpus_used, first.gpus_total, first.gpus_free) == (5, 8, 3)
+    assert first.reason == ""                          # "none" normalized away
+
+    drained = nodes[2]
+    assert drained.base_state == "drained"             # trailing flag stripped
+    assert drained.unresponsive                        # the "*"
+    assert drained.reason == "kernel patch"
+    assert drained.gpus_used == 0
+
+
+def test_parse_sinfo_nodes_short_fallback_format():
+    """The %-format fallback has an empty GresUsed column; everything else works."""
+    nodes = slurm.parse_sinfo_nodes(
+        "cpu-node01|idle|0/64/0/64|128000|127000|0.05|(null)||none"
+    )
+    assert len(nodes) == 1
+    node = nodes[0]
+    assert node.base_state == "idle"
+    assert node.gres == "" and node.gpus_total == 0
+    assert node.cpus_idle == 64
+
+
+def test_get_partition_nodes_falls_back_to_the_short_format(monkeypatch):
+    calls = []
+
+    async def _fake(*args):
+        calls.append(args)
+        if "-O" in args:                    # pretend this Slurm has no -O fields
+            return "", "invalid field", 1
+        return "cpu-node01|idle|0/64/0/64|128000|127000|0.05|(null)||none", "", 0
+
+    monkeypatch.setattr(slurm, "_run_cmd", _fake)
+    nodes = asyncio.run(slurm.get_partition_nodes("cpu", Config()))
+    assert [n.name for n in nodes] == ["cpu-node01"]
+    assert len(calls) == 2                  # long form first, then the fallback
+    assert "--format=" + slurm._SINFO_NODE_FORMAT in calls[1]
+
+
+def test_get_partition_nodes_sorted_and_guarded(monkeypatch):
+    rows = "\n".join([
+        "gpu-node03|idle|0/64/0/64|1000|900|0.1|||none|",
+        "gpu-node01|idle|0/64/0/64|1000|900|0.1|||none|",
+    ])
+    monkeypatch.setattr(slurm, "_run_cmd", _fake_run_cmd(rows))
+    nodes = asyncio.run(slurm.get_partition_nodes("gpu", Config()))
+    assert [n.name for n in nodes] == ["gpu-node01", "gpu-node03"]
+    # No partition, no command.
+    fake, calls = _capture_run_cmd()
+    monkeypatch.setattr(slurm, "_run_cmd", fake)
+    assert asyncio.run(slurm.get_partition_nodes("", Config())) == []
+    assert "args" not in calls
+
+
+def test_get_node_jobs_asks_for_running_jobs_on_that_node(monkeypatch):
+    captured = {}
+
+    async def _fake(*args):
+        captured["args"] = args
+        return "500_1|u|j|RUNNING|1:00|2:00|1|4|gres/gpu:1|gpu-node01", "", 0
+
+    monkeypatch.setattr(slurm, "_run_cmd", _fake)
+    jobs = asyncio.run(slurm.get_node_jobs("gpu-node01", Config()))
+    assert [j.job_id for j in jobs] == ["500_1"]
+    assert "-w" in captured["args"] and "gpu-node01" in captured["args"]
+    assert "--states=RUNNING" in captured["args"]
+    assert "-u" not in captured["args"]  # everyone's jobs, not just ours

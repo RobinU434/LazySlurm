@@ -293,6 +293,7 @@ instead of a node list.
 
 | Key | Action |
 |-----|--------|
+| `Enter` | Open the [node view](#node-view) for the highlighted partition |
 | `Up`/`Down` | Move between partitions; the job table follows the highlighted one |
 | `Tab` | Switch focus between the partition and job tables (to scroll a long job list) |
 | `r` | Refresh now |
@@ -302,6 +303,32 @@ The screen re-polls on your `--refresh` interval while it is open, and stops whe
 leave. `--partition-order` also orders this table. Note that `sinfo --summarize` reports
 one row per node *configuration*, so partitions with mixed hardware are summed into a
 single row here.
+
+### Node View
+
+Press `Enter` on a partition to see its individual nodes:
+
+<img src="https://raw.githubusercontent.com/RobinU434/LazySlurm/main/img/nodes.png" alt="Nodes of a partition" width="100%">
+
+| Column | Meaning |
+|--------|---------|
+| State | Slurm's node state — `idle`, `mixed`, `allocated`, `drained`, `down`, … A trailing `*` means the node is not responding, and the node name is bolded |
+| CPUs A/I/O/T | allocated / idle / other / total cores on that node |
+| Load | the node's load average over its core count — this is *actual* CPU usage, unlike the allocation counters next to it |
+| Memory | in use (configured minus free) over configured, red past 90% |
+| GPUs | GRES in use over GRES configured, from `GresUsed`; green while any are free, red when the node is full |
+| Reason | why Slurm drained or downed the node (`kernel patch`, `Faulty GPU #7`, …) |
+
+Nodes without GRES show `—` in the GPU column, and a drained node's load is shown as `—`
+because its counters say nothing useful — the reason does.
+
+The bar at the top counts the partition's nodes by state and totals GPUs in use.
+The lower panel lists **all users'** jobs running on the highlighted node, so you can see
+who you would be sharing it with. `Up`/`Down` moves between nodes and the job list follows,
+`Tab` switches panels, `r` refreshes, `Escape` or `q` goes back to the partition list.
+
+Older Slurm versions that do not support the `GresUsed` output field fall back
+automatically to a shorter query; everything except the GPU column still works.
 
 ### Edit Pending Jobs
 

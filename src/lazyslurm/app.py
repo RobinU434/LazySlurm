@@ -20,7 +20,13 @@ from lazyslurm.models import Config
 from lazyslurm.widgets.detail_view import DetailView, parse_mem_bytes
 from lazyslurm.widgets.job_table import ActiveJobTable, CompletedJobTable, JobSelected, set_partition_colors, set_display_config
 from lazyslurm.widgets.metadata_view import MetadataView
-from lazyslurm.widgets.partition_view import PartitionJobTable, PartitionSelected, PartitionTable
+from lazyslurm.widgets.partition_view import (
+    NodeSelected,
+    NodeTable,
+    PartitionJobTable,
+    PartitionSelected,
+    PartitionTable,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +76,7 @@ class HelpScreen(ModalScreen[None]):
                 "  [bold cyan]s[/]               Resubmit terminated job (with confirmation)\n"
                 "  [bold cyan]u[/]               Edit pending job(s): runtime, partition, nodes, CPUs, memory\n"
                 "  [bold cyan]p[/]               Partition monitor: load, A/I/O/T, all users' jobs\n"
+                "  [bold cyan]Enter[/]           (in the partition monitor) nodes of that partition\n"
                 "  [bold cyan]b[/]               View job's sbatch script (read-only, cached)\n"
                 "  [bold cyan]l[/]               Page the active log tab (less: / search, F follow, q quit)\n"
                 "  [bold cyan]e[/]               Open stdout in editor (vim/nano, set in config)\n"
@@ -376,6 +383,94 @@ class SSHPromptScreen(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+class NodeScreen(Screen):
+    """The nodes of one partition, and what is running on the highlighted one.
+
+    Reached with Enter from the partition monitor. Top: every node with its
+    state, CPU allocation and load, memory in use, GPUs taken, and the drain
+    reason when Slurm has one. Bottom: the jobs on the highlighted node, from
+    all users.
+    """
+
+    BINDINGS = [
+        Binding("escape", "close", "Back"),
+        Binding("q", "close", "Back"),
+        Binding("r", "refresh_now", "Refresh"),
+        Binding("tab", "focus_other", "Switch Panel", show=False),
+        Binding("shift+tab", "focus_other", show=False),
+    ]
+
+    def __init__(self, partition: str, config: Config) -> None:
+        super().__init__()
+        self.partition = partition
+        self.config = config
+        self._selected_node: str | None = None
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="node-bar")
+        yield NodeTable(id="node-table")
+        yield PartitionJobTable(
+            id="node-jobs",
+            user=self.config.user or slurm.USER,
+        )
+        yield Footer()
+
+    async def on_mount(self) -> None:
+        self.query_one("#node-table").border_title = f"Nodes of {self.partition}"
+        self.query_one("#node-jobs").border_title = "Jobs on node"
+        self.query_one("#node-table", NodeTable).focus()
+        await self._refresh_nodes()
+        if self.config.refresh > 0:
+            self.set_interval(self.config.refresh, self._refresh_nodes)
+
+    async def _refresh_nodes(self) -> None:
+        table = self.query_one("#node-table", NodeTable)
+        nodes = await slurm.get_partition_nodes(self.partition, self.config)
+        table.update_nodes(nodes)
+
+        idle = sum(1 for n in nodes if n.base_state == "idle")
+        mixed = sum(1 for n in nodes if n.base_state == "mixed")
+        busy = sum(1 for n in nodes if n.base_state == "allocated")
+        out = sum(1 for n in nodes if n.base_state in
+                  ("down", "drained", "draining", "fail", "failing", "maint"))
+        gpus_used = sum(n.gpus_used for n in nodes)
+        gpus_total = sum(n.gpus_total for n in nodes)
+        summary = (
+            f"[bold]{self.partition}[/]   {len(nodes)} nodes   "
+            f"[green]{idle}[/] idle  [yellow]{mixed}[/] mixed  "
+            f"[dark_orange]{busy}[/] full  [red]{out}[/] down/drained"
+        )
+        if gpus_total:
+            summary += f"   GPUs [bold]{gpus_used}[/]/{gpus_total} in use"
+        self.query_one("#node-bar", Static).update(summary + "   [dim](all users)[/]")
+
+        selected = table.get_selected_node()
+        if selected:
+            await self._refresh_jobs(selected)
+
+    async def _refresh_jobs(self, node: str) -> None:
+        self._selected_node = node
+        jobs = await slurm.get_node_jobs(node, self.config)
+        job_table = self.query_one("#node-jobs", PartitionJobTable)
+        job_table.update_jobs(jobs)
+        job_table.border_title = f"Jobs on {node} ({len(jobs)})"
+
+    async def on_node_selected(self, event: NodeSelected) -> None:
+        if event.node != self._selected_node:
+            await self._refresh_jobs(event.node)
+
+    async def action_refresh_now(self) -> None:
+        await self._refresh_nodes()
+
+    def action_focus_other(self) -> None:
+        table = self.query_one("#node-table", NodeTable)
+        jobs = self.query_one("#node-jobs", PartitionJobTable)
+        (jobs if table.has_focus else table).focus()
+
+    def action_close(self) -> None:
+        self.app.pop_screen()
+
+
 class PartitionScreen(Screen):
     """Full-screen partition monitor.
 
@@ -388,6 +483,7 @@ class PartitionScreen(Screen):
         Binding("escape", "close", "Back"),
         Binding("p", "close", "Back"),
         Binding("q", "close", "Back"),
+        Binding("enter", "show_nodes", "Nodes"),
         Binding("r", "refresh_now", "Refresh"),
         Binding("tab", "focus_other", "Switch Panel", show=False),
         Binding("shift+tab", "focus_other", show=False),
@@ -445,6 +541,20 @@ class PartitionScreen(Screen):
     async def on_partition_selected(self, event: PartitionSelected) -> None:
         if event.partition != self._selected_partition:
             await self._refresh_jobs(event.partition)
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Enter on a partition row. DataTable claims the key for its own
+        select action, so this message — not the binding — is what fires."""
+        if event.data_table.id == "partition-table":
+            self.action_show_nodes()
+
+    def action_show_nodes(self) -> None:
+        """Drill into the highlighted partition's nodes."""
+        table = self.query_one("#partition-table", PartitionTable)
+        partition = table.get_selected_partition()
+        if not partition:
+            return
+        self.app.push_screen(NodeScreen(partition, self.config))
 
     async def action_refresh_now(self) -> None:
         await self._refresh_partitions()

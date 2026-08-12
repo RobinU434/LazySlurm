@@ -23,6 +23,7 @@ from lazyslurm.models import (
     Config,
     JobDetail,
     JobStats,
+    NodeInfo,
     PartitionInfo,
     PartitionJob,
     RunningJob,
@@ -126,6 +127,30 @@ PARTITIONS = [
                   "1:00:00", "", running=0, pending=0),
 ]
 
+NODES = [
+    NodeInfo("gpu-node01", "mixed", 58, 6, 0, 64, 948865, 324779, 16.02,
+             "gpu:a100:8(S:0-1)", "gpu:a100:5(IDX:0-4)"),
+    NodeInfo("gpu-node02", "allocated", 64, 0, 0, 64, 948863, 128400, 51.4,
+             "gpu:a100:8(S:0-1)", "gpu:a100:8(IDX:0-7)"),
+    NodeInfo("gpu-node03", "mixed", 40, 24, 0, 64, 948863, 669673, 22.8,
+             "gpu:a100:8(S:0-1)", "gpu:a100:6(IDX:0-5)"),
+    NodeInfo("gpu-node04", "idle", 0, 64, 0, 64, 948863, 940120, 0.04,
+             "gpu:a100:8(S:0-1)", "gpu:a100:0(IDX:N/A)"),
+    NodeInfo("gpu-node05", "drained*", 0, 0, 64, 64, 948863, 942200, 0.01,
+             "gpu:a100:8(S:0-1)", "gpu:a100:0(IDX:N/A)", reason="Faulty GPU #7"),
+    NodeInfo("gpu-node06", "mixed", 52, 12, 0, 64, 948863, 96539, 44.6,
+             "gpu:a100:8(S:0-1)", "gpu:a100:7(IDX:0-6)"),
+]
+
+NODE_JOBS = [
+    PartitionJob("4815162", "jdoe", "train-resnet50", "RUNNING", "6:42:11",
+                 "1-00:00:00", "1", "8", "gres/gpu:2", "gpu-node01"),
+    PartitionJob("4815155", "asmith", "diffusion-ft", "RUNNING", "11:02:39",
+                 "1-00:00:00", "2", "16", "gres/gpu:8", "gpu-node01"),
+    PartitionJob("4815120", "cwang", "eval-sweep", "RUNNING", "3:11:47",
+                 "6:00:00", "1", "4", "gres/gpu:1", "gpu-node01"),
+]
+
 PARTITION_JOBS = [
     PartitionJob("4815162", "jdoe", "train-resnet50", "RUNNING", "6:42:11",
                  "1-00:00:00", "1", "8", "gres/gpu:2", "gpu-node07"),
@@ -178,6 +203,12 @@ def install_fakes() -> None:
     async def _archive(*a, **k):
         return None
 
+    async def _nodes(partition, *a, **k):
+        return NODES
+
+    async def _node_jobs(node, *a, **k):
+        return NODE_JOBS if node == "gpu-node01" else []
+
     slurm.get_running_jobs = _running
     slurm.get_completed_jobs = _completed
     slurm.get_partition_availability = _availability
@@ -186,6 +217,8 @@ def install_fakes() -> None:
     slurm.read_log_file = _log
     slurm.get_partitions = _partitions
     slurm.get_partition_jobs = _partition_jobs
+    slurm.get_partition_nodes = _nodes
+    slurm.get_node_jobs = _node_jobs
     slurm.archive_batch_script = _archive
     slurm.USER = "jdoe"
     # The app warns when the hostname contains "login"; keep the real machine
@@ -250,6 +283,14 @@ async def main() -> None:
         await pilot.pause()
         await pilot.pause()
         save(app, "partitions")
+
+        # Node view: Enter on the highlighted partition
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        save(app, "nodes")
+        await pilot.press("escape")
+        await pilot.pause()
         await pilot.press("escape")
         await pilot.pause()
 

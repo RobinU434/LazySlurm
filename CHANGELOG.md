@@ -4,6 +4,20 @@ All notable changes to LazySlurm are documented here. The distribution is
 published on PyPI as [`lazyslurm-py`](https://pypi.org/project/lazyslurm-py/);
 the command, the import package and the config directory are all `lazyslurm`.
 
+## Unreleased
+
+### Added
+
+- **Node view** — press `Enter` on a partition in the monitor (`p`) to see its individual
+  nodes: state, CPU allocation and actual load average, memory in use, GPUs taken over
+  GPUs configured, and Slurm's drain reason where there is one. The panel below lists all
+  users' jobs running on the highlighted node, so you can see who you would be sharing it
+  with. `Up`/`Down` moves between nodes, `Tab` switches panels, `r` refreshes, `Escape`
+  returns.
+
+  GPU occupancy comes from `sinfo -O GresUsed`; Slurm builds without that output field
+  fall back to a shorter query automatically and lose only the GPU column.
+
 ## 0.2.0 — 2026-08-12
 
 The project is now `lazyslurm` throughout, and this release adds job editing, a

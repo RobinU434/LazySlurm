@@ -101,6 +101,84 @@ class PartitionInfo:
         return self.cpus_alloc / usable if usable else 0.0
 
 
+def gres_count(spec: str) -> int:
+    """Total device count in a GRES string.
+
+    ``gpu:a100:8(S:0-1)`` -> 8, ``gpu:a100:7(IDX:0-6)`` -> 7, ``gpu:2`` -> 2,
+    and ``(null)`` / ``""`` -> 0. Comma-separated entries are summed.
+    """
+    spec = (spec or "").strip()
+    if not spec or spec in ("(null)", "N/A", "None"):
+        return 0
+    total = 0
+    for entry in spec.split(","):
+        head = entry.split("(", 1)[0]          # drop "(S:0-1)" / "(IDX:0-7)"
+        parts = [p for p in head.split(":") if p]
+        if len(parts) < 2:
+            continue
+        try:
+            total += int(parts[-1])
+        except ValueError:
+            continue
+    return total
+
+
+@dataclass
+class NodeInfo:
+    """One compute node of a partition, from `sinfo -N`."""
+
+    name: str
+    state: str = ""  # "idle", "mixed", "allocated", "drained*", ...
+    cpus_alloc: int = 0
+    cpus_idle: int = 0
+    cpus_other: int = 0
+    cpus_total: int = 0
+    memory_mb: int = 0  # configured
+    free_mem_mb: int = 0
+    cpu_load: float = 0.0  # absolute load average, as Slurm reports it
+    gres: str = ""  # configured
+    gres_used: str = ""
+    reason: str = ""  # why it is down / drained
+
+    @property
+    def base_state(self) -> str:
+        """State without Slurm's trailing flags (`*` unresponsive, `$` reserved)."""
+        return self.state.rstrip("*$~#!%@^-")
+
+    @property
+    def unresponsive(self) -> bool:
+        return self.state.endswith("*")
+
+    @property
+    def cpus_aiot(self) -> str:
+        return f"{self.cpus_alloc}/{self.cpus_idle}/{self.cpus_other}/{self.cpus_total}"
+
+    @property
+    def load(self) -> float:
+        """Load average over total CPUs (0.0-1.0+, can exceed 1 when oversubscribed)."""
+        return self.cpu_load / self.cpus_total if self.cpus_total else 0.0
+
+    @property
+    def mem_used_mb(self) -> int:
+        return max(self.memory_mb - self.free_mem_mb, 0)
+
+    @property
+    def mem_used(self) -> float:
+        return self.mem_used_mb / self.memory_mb if self.memory_mb else 0.0
+
+    @property
+    def gpus_total(self) -> int:
+        return gres_count(self.gres)
+
+    @property
+    def gpus_used(self) -> int:
+        return gres_count(self.gres_used)
+
+    @property
+    def gpus_free(self) -> int:
+        return max(self.gpus_total - self.gpus_used, 0)
+
+
 @dataclass
 class PartitionJob:
     """A job on a partition, from any user (squeue without -u)."""
