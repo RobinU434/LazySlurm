@@ -160,6 +160,37 @@ async def _ssh_cmd(node: str, remote_cmd: str) -> tuple[str, int]:
 
 
 # ---------------------------------------------------------------------------
+# Job ordering
+# ---------------------------------------------------------------------------
+
+
+def job_sort_key(job_id: str) -> tuple[int, int]:
+    """Sort key for a Slurm job id, used with ``reverse=True``.
+
+    Array tasks carry a suffix (``2736118_11``, or ``2736118_[12-40]`` while
+    the array is still pending), so a plain int() of the id fails and every
+    array task used to collapse to the same key — scattering them through the
+    table. Sorting on (base id, -task index) keeps each array together in the
+    right place by submission order, with its tasks reading 0, 1, 2, ... down
+    the block. Heterogeneous ids (``123+0``) and steps (``123.batch``) use the
+    same split; anything unparseable sorts last.
+    """
+    head = job_id.strip()
+    task = 0
+    for sep in ("_", "+", "."):
+        if sep in head:
+            head, _, suffix = head.partition(sep)
+            digits = "".join(c for c in suffix if c.isdigit() or c == "-")
+            first = digits.split("-", 1)[0] if digits else ""
+            task = int(first) if first.isdigit() else 0
+            break
+    if not head.isdigit():
+        return (-1, 0)
+    # Negated so that, under reverse=True, tasks within one array stay ascending.
+    return (int(head), -task)
+
+
+# ---------------------------------------------------------------------------
 # squeue – running / pending jobs
 # ---------------------------------------------------------------------------
 
@@ -201,7 +232,7 @@ async def get_running_jobs(config: Config | None = None) -> list[RunningJob]:
             gres=parts[9].strip() or "None",
             work_dir=parts[10].strip(),
         ))
-    jobs.sort(key=lambda j: int(j.job_id) if j.job_id.isnumeric() else 0, reverse=True)
+    jobs.sort(key=lambda j: job_sort_key(j.job_id), reverse=True)
     return jobs
 
 
@@ -254,7 +285,7 @@ async def get_completed_jobs(config: Config | None = None) -> list[CompletedJob]
             elapsed=parts[6].strip(),
             partition=parts[7].strip(),
         ))
-    jobs.sort(key=lambda j: int(j.job_id) if j.job_id.isnumeric() else 0, reverse=True)
+    jobs.sort(key=lambda j: job_sort_key(j.job_id), reverse=True)
     return jobs
 
 
@@ -1028,12 +1059,8 @@ async def get_partition_jobs(
     if rc != 0 or not stdout.strip():
         return []
     jobs = parse_partition_jobs(stdout)
-    jobs.sort(
-        key=lambda j: (
-            j.state != "RUNNING",
-            -(int(j.job_id.split("_")[0]) if j.job_id.split("_")[0].isnumeric() else 0),
-        )
-    )
+    # Running first, then newest first — array tasks ordered like everywhere else.
+    jobs.sort(key=lambda j: (j.state != "RUNNING", tuple(-k for k in job_sort_key(j.job_id))))
     return jobs
 
 

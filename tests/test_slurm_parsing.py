@@ -665,3 +665,67 @@ def test_read_log_file_reports_unreadable_files(tmp_path, monkeypatch):
     finally:
         log.chmod(0o644)
     assert "could not read" in out.lower()
+
+
+# ---------------------------------------------------------------------------
+# Job ordering with array tasks
+# ---------------------------------------------------------------------------
+
+
+def test_job_sort_key_orders_arrays_within_their_base_id():
+    ids = [
+        "2736118_11", "2736118_2", "2736118_0", "2736200", "2736117",
+        "2736118_[12-40]", "2736119_9",
+    ]
+    assert sorted(ids, key=slurm.job_sort_key, reverse=True) == [
+        "2736200",           # newest base id first
+        "2736119_9",
+        "2736118_0",         # the array stays together...
+        "2736118_2",         # ...with its tasks in ascending order
+        "2736118_11",        # (not string order: 11 after 2)
+        "2736118_[12-40]",   # a still-pending range keys on its first task
+        "2736117",
+    ]
+
+
+def test_job_sort_key_handles_het_jobs_steps_and_junk():
+    assert slurm.job_sort_key("123") == (123, 0)
+    assert slurm.job_sort_key("123_4") == (123, -4)
+    assert slurm.job_sort_key("123+0") == (123, 0)     # heterogeneous component
+    assert slurm.job_sort_key("123.batch") == (123, 0)  # sacct step
+    assert slurm.job_sort_key("123_[7-9]") == (123, -7)
+    assert slurm.job_sort_key("not-a-job") == (-1, 0)   # sorts last under reverse
+    assert slurm.job_sort_key("  456_1  ") == (456, -1)
+
+
+def test_get_running_jobs_keeps_array_tasks_together(monkeypatch):
+    """Regression: array ids are not ints, so they all used to key to 0."""
+    rows = "\n".join([
+        f"{jid}|arr|0:10|gpu|PENDING|1:00|1|2|4G|None|/work"
+        for jid in ["500_3", "600", "500_11", "499", "500_1"]
+    ])
+    monkeypatch.setattr(slurm, "_run_cmd", _fake_run_cmd(rows))
+    jobs = asyncio.run(slurm.get_running_jobs(Config()))
+    assert [j.job_id for j in jobs] == ["600", "500_1", "500_3", "500_11", "499"]
+
+
+def test_get_completed_jobs_keeps_array_tasks_together(monkeypatch):
+    rows = "\n".join([
+        f"{jid}|arr|COMPLETED|0:0|s|e|1:00|gpu"
+        for jid in ["500_3", "600", "500_11", "499", "500_1"]
+    ])
+    monkeypatch.setattr(slurm, "_run_cmd", _fake_run_cmd(rows))
+    jobs = asyncio.run(slurm.get_completed_jobs(Config()))
+    assert [j.job_id for j in jobs] == ["600", "500_1", "500_3", "500_11", "499"]
+
+
+def test_get_partition_jobs_orders_arrays_after_running_first(monkeypatch):
+    rows = "\n".join([
+        "500_11|u|j|PENDING|0:00|1:00|1|1|N/A|(Priority)",
+        "500_2|u|j|PENDING|0:00|1:00|1|1|N/A|(Priority)",
+        "600|u|j|RUNNING|1:00|1:00|1|1|N/A|node1",
+        "500_1|u|j|RUNNING|1:00|1:00|1|1|N/A|node2",
+    ])
+    monkeypatch.setattr(slurm, "_run_cmd", _fake_run_cmd(rows))
+    jobs = asyncio.run(slurm.get_partition_jobs("gpu", Config()))
+    assert [j.job_id for j in jobs] == ["600", "500_1", "500_2", "500_11"]
