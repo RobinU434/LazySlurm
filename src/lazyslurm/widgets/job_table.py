@@ -467,7 +467,7 @@ class _BaseJobTable(DataTable):
         _apply_diff(self, new_data, force=force)
 
     def _update_title(self, matched: int) -> None:
-        """Border title carries the active filter and how much it matched."""
+        """Border title carries match count when a filter is active."""
         if not self._terms:
             self.border_title = self.TITLE
             return
