@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import shlex
+from typing import NamedTuple
+
 from textual.message import Message
 from textual.widgets import DataTable
 from rich.text import Text
@@ -109,6 +112,75 @@ def _styled_state(state: str) -> Text:
     style = _STATE_STYLES.get(base_state, "")
     display = _STATE_ABBREV.get(base_state, state) if _abbreviate_states else state
     return Text(display, style=style)
+
+
+# Search terms: `state:pending`, `part:gpu`, `gpu:>0`, or a bare word. Aliases keep
+# the short forms people actually type working.
+_QUERY_KEYS: dict[str, str] = {
+    "state": "state", "st": "state", "s": "state",
+    "part": "partition", "partition": "partition", "p": "partition",
+    "name": "name", "n": "name",
+    "id": "id", "job": "id",
+    "gpu": "gpu", "gpus": "gpu", "gres": "gpu",
+}
+
+_COMPARISONS: tuple[str, ...] = (">=", "<=", "!=", ">", "<", "=")
+
+# Row key for the "nothing matched" line; never a real job id.
+_PLACEHOLDER_KEY = "__no_match__"
+
+
+class Term(NamedTuple):
+    """One parsed search term. `field` is None for a bare substring."""
+
+    field: str | None
+    op: str
+    value: str
+
+
+def parse_query(text: str) -> list[Term]:
+    """Split a search string into terms, to be ANDed together.
+
+    ``train state:run gpu:>0`` becomes a substring term plus two field terms.
+    A `key:` prefix that is not a known field stays a plain substring, so
+    nothing a user types can break the filter — ``foo:bar`` just searches for
+    "foo:bar".
+    """
+    try:
+        tokens = shlex.split(text)
+    except ValueError:  # unbalanced quote while still typing
+        tokens = text.split()
+
+    terms: list[Term] = []
+    for token in tokens:
+        if not token:
+            continue
+        key, sep, value = token.partition(":")
+        field = _QUERY_KEYS.get(key.lower()) if sep else None
+        if field is None:
+            terms.append(Term(None, "~", token.lower()))
+            continue
+        op = "~"
+        for candidate in _COMPARISONS:
+            if value.startswith(candidate):
+                op, value = candidate, value[len(candidate):]
+                break
+        terms.append(Term(field, op, value.strip().lower()))
+    return terms
+
+
+def _compare(actual: float, op: str, expected: float) -> bool:
+    if op == ">":
+        return actual > expected
+    if op == ">=":
+        return actual >= expected
+    if op == "<":
+        return actual < expected
+    if op == "<=":
+        return actual <= expected
+    if op == "!=":
+        return actual != expected
+    return actual == expected
 
 
 def elapsed_seconds(text: str) -> int:
@@ -225,6 +297,7 @@ class _BaseJobTable(DataTable):
 
     COLUMNS: tuple[str, ...] = ()
     SOURCE: str = ""
+    TITLE: str = ""
     SHOW_CURSOR_INITIAL: bool = True
 
     def __init__(self, *args, **kwargs) -> None:
@@ -239,6 +312,7 @@ class _BaseJobTable(DataTable):
         # group the user expanded.
         self._expanded: set[str] = set()
         self._groups: dict[str, list] = {}
+        self._terms: list[Term] = []
 
     def on_mount(self) -> None:
         for col in self.COLUMNS:
@@ -246,6 +320,7 @@ class _BaseJobTable(DataTable):
         self.cursor_type = "row"
         self.zebra_stripes = True
         self.show_cursor = self.SHOW_CURSOR_INITIAL
+        self.border_title = self.TITLE
 
     def watch_has_focus(self, focused: bool) -> None:
         self.show_cursor = focused
@@ -259,7 +334,8 @@ class _BaseJobTable(DataTable):
         self._rebuild()
 
     def apply_filter(self, text: str) -> None:
-        self._filter_text = text.lower()
+        self._filter_text = text.strip()
+        self._terms = parse_query(self._filter_text)
         self._rebuild()
 
     def set_bookmarks(self, ids: set[str]) -> None:
@@ -277,7 +353,7 @@ class _BaseJobTable(DataTable):
 
     def get_row_order(self) -> list[str]:
         """Return current row order (job IDs) as they appear in the table."""
-        return _row_keys(self)
+        return [key for key in _row_keys(self) if key != _PLACEHOLDER_KEY]
 
     def get_job(self, job_id: str):
         """Return the job dataclass for `job_id` from the last poll, or None."""
@@ -288,9 +364,10 @@ class _BaseJobTable(DataTable):
             return None
         try:
             row_key, _ = self.coordinate_to_cell_key(self.cursor_coordinate)
-            return str(row_key.value)
         except Exception:
             return None
+        key = str(row_key.value)
+        return None if key == _PLACEHOLDER_KEY else key
 
     def get_selected_job_id(self) -> str | None:
         """The job id the detail panels should show.
@@ -348,8 +425,8 @@ class _BaseJobTable(DataTable):
     def _rebuild(self) -> None:
         """Rebuild from _all_jobs: filter, group arrays, pin bookmarks to top."""
         filtered = self._all_jobs
-        if self._filter_text:
-            filtered = [j for j in filtered if self._filter_match(j, self._filter_text)]
+        if self._terms:
+            filtered = [j for j in filtered if self._filter_match(j, self._terms)]
 
         if _collapse_arrays:
             groups = group_jobs(filtered)
@@ -384,9 +461,56 @@ class _BaseJobTable(DataTable):
                         job, indent="└ " if last else "├ "
                     )
 
+        if not new_data and self._terms:
+            # An empty table with an active filter looks like a bug; say so.
+            new_data[_PLACEHOLDER_KEY] = self._placeholder_row()
+
+        self._update_title(len(filtered))
+
         force = self._force_next
         self._force_next = False
         _apply_diff(self, new_data, force=force)
+
+    def _update_title(self, matched: int) -> None:
+        """Border title carries match count when a filter is active."""
+        if not self._terms:
+            self.border_title = self.TITLE
+            return
+        self.border_title = f"{self.TITLE} — {matched}/{len(self._all_jobs)} match"
+
+    def _placeholder_row(self) -> tuple:
+        cells = [Text("no jobs match", style="dim")]
+        cells += [""] * (len(self.COLUMNS) - 1)
+        return tuple(cells)
+
+    def _filter_match(self, job, terms: list[Term]) -> bool:
+        """Every term must match (AND). Bare terms search the whole row."""
+        return all(self._match_term(job, term) for term in terms)
+
+    def _match_term(self, job, term: Term) -> bool:
+        if term.field is None:
+            return any(term.value in field.lower() for field in self._search_fields(job))
+        if term.field == "state":
+            # Prefix match, so "fail" finds FAILED and "pend" finds PENDING.
+            return getattr(job, "state", "").lower().startswith(term.value)
+        if term.field == "partition":
+            return term.value in getattr(job, "partition", "").lower()
+        if term.field == "name":
+            return term.value in getattr(job, "name", "").lower()
+        if term.field == "id":
+            return term.value in job.job_id.lower()
+        if term.field == "gpu":
+            # Only squeue rows carry GRES; sacct rows have none, so a gpu:
+            # filter simply matches nothing in the terminated table.
+            gres = getattr(job, "gres", None)
+            if gres is None:
+                return False
+            try:
+                wanted = float(term.value) if term.value else 0.0
+            except ValueError:
+                return False
+            return _compare(float(gres_count(gres)), term.op, wanted)
+        return False
 
     def _group_label(self, base: str, members: list, expanded: bool) -> Text:
         """`▸ 123_[0-11] ×12` — the collapsed row's Job ID cell."""
@@ -410,7 +534,8 @@ class _BaseJobTable(DataTable):
         return text
 
     # --- subclass hooks ---
-    def _filter_match(self, job, text: str) -> bool:
+    def _search_fields(self, job) -> tuple[str, ...]:
+        """Fields a bare (non `key:`) search term looks through."""
         raise NotImplementedError
 
     def _row_for(self, job, indent: str = "") -> tuple:
@@ -430,13 +555,10 @@ class ActiveJobTable(_BaseJobTable):
 
     COLUMNS = ("Job ID", "Name", "Elapsed", "Partition")
     SOURCE = "active"
+    TITLE = "Active Jobs"
 
-    def _filter_match(self, job: RunningJob, text: str) -> bool:
-        return (
-            text in job.job_id.lower()
-            or text in job.name.lower()
-            or text in job.partition.lower()
-        )
+    def _search_fields(self, job: RunningJob) -> tuple[str, ...]:
+        return (job.job_id, job.name, job.partition)
 
     def _row_for(self, job: RunningJob, indent: str = "") -> tuple:
         name = _truncate(
@@ -482,15 +604,11 @@ class CompletedJobTable(_BaseJobTable):
 
     COLUMNS = ("Job ID", "Name", "State", "Partition", "Elapsed")
     SOURCE = "completed"
+    TITLE = "Terminated Jobs"
     SHOW_CURSOR_INITIAL = False
 
-    def _filter_match(self, job: CompletedJob, text: str) -> bool:
-        return (
-            text in job.job_id.lower()
-            or text in job.name.lower()
-            or text in job.partition.lower()
-            or text in job.state.lower()
-        )
+    def _search_fields(self, job: CompletedJob) -> tuple[str, ...]:
+        return (job.job_id, job.name, job.partition, job.state)
 
     def _row_for(self, job: CompletedJob, indent: str = "") -> tuple:
         name = _truncate(

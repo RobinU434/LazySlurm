@@ -68,7 +68,7 @@ class HelpScreen(ModalScreen[None]):
                 "  [bold cyan]( / )[/]           Switch Job Metadata tabs\n"
                 "  [bold cyan]Escape[/]          Close search bar\n\n"
                 "[bold]Actions[/]\n"
-                "  [bold cyan]/[/]               Search / filter jobs by ID, name, or partition\n"
+                "  [bold cyan]/[/]               Filter jobs: plain text, or state:/part:/name:/id:/gpu: terms\n"
                 "  [bold cyan]m[/]               Bookmark / unbookmark job (★ pinned to top)\n"
                 "  [bold cyan]Enter[/]           Expand / collapse a job array (▸ row)\n"
                 "  [bold cyan]c[/]               Cancel selected job(s) (with confirmation)\n"
@@ -656,7 +656,7 @@ class LazySlurmApp(App):
         with Horizontal(id="main-container"):
             with Vertical(id="left-column"):
                 yield Input(
-                    placeholder="Filter by ID, name, partition...",
+                    placeholder="Filter: text · state:pend · part:gpu · name:train · gpu:>0",
                     id="search-input",
                 )
                 yield ActiveJobTable(id="active-jobs")
@@ -684,8 +684,6 @@ class LazySlurmApp(App):
         persistent_config.set_script_cache_dir(self.config.script_cache_dir)
         persistent_config.prune_script_cache(max_age_days=self.config.cache_max_age_days)
 
-        self.query_one("#active-jobs").border_title = "Active Jobs"
-        self.query_one("#completed-jobs").border_title = "Terminated Jobs"
         self.query_one("#detail-view").border_title = "Job Details"
         self.query_one("#metadata-view").border_title = "Job Metadata"
         self.query_one("#command-log").border_title = "Command Log"
