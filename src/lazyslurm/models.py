@@ -23,8 +23,35 @@ class Config:
     max_name_width: int = 16  # max characters for job name column
     max_partition_width: int = 16  # max characters for partition column
     abbreviate_states: bool = False  # show abbreviated state names in terminated jobs
+    collapse_arrays: bool = True  # fold a job array's tasks into one expandable row
     cache_max_age_days: int | None = 30  # prune cache entries older than this (None = never)
     script_cache_dir: str = ""  # where to archive sbatch scripts ("" = <config_dir>/scripts)
+
+
+def array_task_count(job_id: str) -> int:
+    """How many array tasks one squeue/sacct row stands for.
+
+    A pending array arrives as a single row covering a range — ``123_[12-40]``
+    is 29 tasks, ``123_[1,3,5]`` is 3, ``123_[1-4%2]`` is 4 (the ``%`` only
+    throttles how many run at once). Running tasks arrive one row each, so
+    anything without a range is 1.
+    """
+    _, _, suffix = job_id.partition("_")
+    if not suffix.startswith("["):
+        return 1
+    spec = suffix[1:].split("]", 1)[0].split("%", 1)[0]
+    total = 0
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            lo, _, hi = part.partition("-")
+            if lo.strip().isdigit() and hi.strip().isdigit():
+                total += int(hi) - int(lo) + 1
+                continue
+        total += 1
+    return total or 1
 
 
 @dataclass

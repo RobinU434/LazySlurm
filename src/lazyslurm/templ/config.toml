@@ -18,6 +18,7 @@
 # max_name_width = 16        # max characters for job name column (0 = unlimited)
 # max_partition_width = 16   # max characters for partition column (0 = unlimited)
 # abbreviate_states = false  # use short state names: COMP, FAIL, TIME, CAN, OOM, ...
+# collapse_arrays = true     # fold a job array into one row; Enter expands it
 
 # Cache settings
 # cache_max_age_days = 30    # auto-delete cached job info older than N days (null = never)

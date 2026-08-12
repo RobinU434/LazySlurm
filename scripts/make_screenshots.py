@@ -18,6 +18,7 @@ from textual.widgets import Footer
 
 from lazyslurm import slurm
 from lazyslurm.app import EditJobScreen, HelpScreen, LazySlurmApp, SSHPromptScreen
+from lazyslurm.widgets.job_table import ActiveJobTable
 from lazyslurm.models import (
     CompletedJob,
     Config,
@@ -47,13 +48,13 @@ RUNNING = [
     RunningJob("4815094", "preprocess", "1:03:47", "cpu", "RUNNING",
                time_limit="4:00:00", nodes="1", cpus="16", memory="16G",
                gres="None", work_dir="/scratch/jdoe/data"),
-    RunningJob("4815201_0", "sweep-lr", "0:00", "gpu", "PENDING",
+    RunningJob("4815201_0", "sweep-lr", "12:31", "gpu", "RUNNING",
                time_limit="6:00:00", nodes="1", cpus="4", memory="24G",
                gres="gres/gpu:1", work_dir="/scratch/jdoe/sweeps"),
-    RunningJob("4815201_1", "sweep-lr", "0:00", "gpu", "PENDING",
+    RunningJob("4815201_1", "sweep-lr", "12:28", "gpu", "RUNNING",
                time_limit="6:00:00", nodes="1", cpus="4", memory="24G",
                gres="gres/gpu:1", work_dir="/scratch/jdoe/sweeps"),
-    RunningJob("4815201_2", "sweep-lr", "0:00", "gpu", "PENDING",
+    RunningJob("4815201_[2-11]", "sweep-lr", "0:00", "gpu", "PENDING",
                time_limit="6:00:00", nodes="1", cpus="4", memory="24G",
                gres="gres/gpu:1", work_dir="/scratch/jdoe/sweeps"),
 ]
@@ -271,6 +272,13 @@ async def main() -> None:
         app._selected_job_id = "4815162"
         await pilot.pause()
         save(app, "main")
+
+        # Same table with the job array expanded
+        app.query_one("#active-jobs", ActiveJobTable).toggle_expand("4815201")
+        await pilot.pause()
+        save(app, "job-array")
+        app.query_one("#active-jobs", ActiveJobTable).toggle_expand("4815201")
+        await pilot.pause()
 
         # Job details, stats tab
         await app._load_job_details("4815162")

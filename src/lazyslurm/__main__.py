@@ -161,6 +161,7 @@ def main() -> None:
     max_name_width = int(saved.get("max_name_width", 16))
     max_partition_width = int(saved.get("max_partition_width", 16))
     abbreviate_states = bool(saved.get("abbreviate_states", False))
+    collapse_arrays = bool(saved.get("collapse_arrays", True))
     raw_cache_age = saved.get("cache_max_age_days", 30)
     cache_max_age_days = None if raw_cache_age is None else int(raw_cache_age)
     script_cache_dir = os.path.expanduser(str(saved.get("script_cache_dir", "")))
@@ -180,6 +181,7 @@ def main() -> None:
         max_name_width=max_name_width,
         max_partition_width=max_partition_width,
         abbreviate_states=abbreviate_states,
+        collapse_arrays=collapse_arrays,
         cache_max_age_days=cache_max_age_days,
         script_cache_dir=script_cache_dir,
     )

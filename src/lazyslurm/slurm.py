@@ -11,6 +11,7 @@ from pathlib import Path
 from lazyslurm.ssh import PromptCallback, SSHSession, quote_argv
 from lazyslurm.models import (
     CompletedJob,
+    array_task_count,
     Config,
     JobDetail,
     JobStats,
@@ -1182,8 +1183,10 @@ def format_cluster_summary(
     """
     cfg = config or _config
     user = cfg.user or USER
-    running = sum(1 for j in running_jobs if j.state == "RUNNING")
-    pending = sum(1 for j in running_jobs if j.state == "PENDING")
+    # Count array *tasks*, not squeue rows: a single pending "123_[3-11]" row
+    # stands for nine jobs, and the tables now say so too.
+    running = sum(array_task_count(j.job_id) for j in running_jobs if j.state == "RUNNING")
+    pending = sum(array_task_count(j.job_id) for j in running_jobs if j.state == "PENDING")
 
     parts: list[str] = [
         f"[bold]{user}[/]",

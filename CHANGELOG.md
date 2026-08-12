@@ -4,6 +4,22 @@ All notable changes to LazySlurm are documented here. The distribution is
 published on PyPI as [`lazyslurm-py`](https://pypi.org/project/lazyslurm-py/);
 the command, the import package and the config directory are all `lazyslurm`.
 
+## Unreleased
+
+### Added
+
+- **Job arrays collapse into one row** ([#7](https://github.com/RobinU434/LazySlurm/issues/7)).
+  A 40-task array no longer fills the table: its tasks fold into a single
+  `▸ 123_[0-39] ×40` row carrying the id range, the shared name and a state tally.
+  `Enter` expands and collapses it, and the expansion survives refreshes and filter
+  changes. `c` cancels the whole array with one `scancel`, `u` edits every pending task
+  in it, `m` bookmarks the group. Switch off with `collapse_arrays = false`.
+
+### Changed
+
+- The cluster bar counts array *tasks* rather than squeue rows, so a pending
+  `123_[3-11]` row contributes nine pending jobs — matching what the table now shows.
+
 ## 0.2.1 — 2026-08-12
 
 ### Added

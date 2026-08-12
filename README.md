@@ -119,6 +119,7 @@ Press `?` at any time for this list inside the app:
 | Key | Action |
 |-----|--------|
 | `/` | Open search bar — filter jobs by ID, name, or partition. Press `Escape` to close and clear |
+| `Enter` | Expand / collapse a [job array](#job-arrays) row |
 | `m` | Bookmark / unbookmark the selected job. Bookmarked jobs show a ★ prefix and are pinned to the top of their table |
 | `c` | Cancel the selected job (with confirmation prompt) |
 | `Shift+C` | **Force cancel** — sends SIGKILL immediately, no confirmation |
@@ -264,6 +265,34 @@ Partition format is `name:A/I/O/T`:
 | **I** | Idle — nodes available for new jobs |
 | **O** | Other — nodes that are down, drained, or in maintenance |
 | **T** | Total — total nodes in the partition |
+
+### Job Arrays
+
+A 40-task array would otherwise fill the table with 40 near-identical rows, so tasks of
+one array are folded into a single row:
+
+```
+▸ 4815201_[0-11] ×12   sweep-lr   2run 10pend   gpu
+```
+
+The Job ID cell shows the task-index range and the total task count; `×12` counts *tasks*,
+not rows, so a pending `4815201_[3-11]` block counts as the nine tasks it stands for. The
+Elapsed column carries a state tally instead of a time, which means little across a dozen
+tasks that started at different moments. In the Terminated table the tally sits in the
+State column and Elapsed shows the longest run of the array.
+
+<img src="https://raw.githubusercontent.com/RobinU434/LazySlurm/main/img/job-array.png" alt="An expanded job array" width="100%">
+
+`Enter` expands the row into its tasks (`├`/`└` prefixed) and collapses it again.
+Expansion survives refreshes and filter changes, so a group you opened stays open.
+
+Actions on a collapsed row act on the **whole array**: `c` cancels it with a single
+`scancel <base id>`, `u` edits every pending task in it, `m` bookmarks the group so it
+pins to the top as a unit. On an expanded task, everything behaves per task as usual.
+The detail panels always show a real task (the first one) — Slurm cannot describe a bare
+base id.
+
+Turn it off with `collapse_arrays = false` in `config.toml` to get one row per task again.
 
 ### Bookmarks
 
@@ -589,6 +618,7 @@ pager = "less"           # pager for browsing whole logs with 'l' ("less", "more
 max_name_width = 16      # max characters for job name column (0 = unlimited)
 max_partition_width = 16 # max characters for partition column (0 = unlimited)
 abbreviate_states = false # use short state names: COMP, FAIL, TIME, CAN, OOM, ...
+collapse_arrays = true   # fold a job array into one row; Enter expands it
 
 # Cache settings
 # cache_max_age_days = 30  # auto-delete cached job info older than N days
