@@ -4,7 +4,7 @@ All notable changes to LazySlurm are documented here. The distribution is
 published on PyPI as [`lazyslurm-py`](https://pypi.org/project/lazyslurm-py/);
 the command, the import package and the config directory are all `lazyslurm`.
 
-## Unreleased
+## 0.2.1 — 2026-08-12
 
 ### Added
 
