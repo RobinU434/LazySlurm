@@ -118,7 +118,7 @@ Press `?` at any time for this list inside the app:
 
 | Key | Action |
 |-----|--------|
-| `/` | Open search bar — filter jobs by ID, name, or partition. Press `Escape` to close and clear |
+| `/` | Open the [filter bar](#filtering) — plain text or `state:`/`part:`/`name:`/`id:`/`gpu:` terms. `Escape` closes and clears |
 | `Enter` | Expand / collapse a [job array](#job-arrays) row |
 | `m` | Bookmark / unbookmark the selected job. Bookmarked jobs show a ★ prefix and are pinned to the top of their table |
 | `c` | Cancel the selected job (with confirmation prompt) |
@@ -265,6 +265,35 @@ Partition format is `name:A/I/O/T`:
 | **I** | Idle — nodes available for new jobs |
 | **O** | Other — nodes that are down, drained, or in maintenance |
 | **T** | Total — total nodes in the partition |
+
+### Filtering
+
+`/` opens the filter bar. Plain words search the job id, name and partition (and state,
+in the Terminated table) as before, and `key:value` terms narrow by field. Terms are
+ANDed:
+
+```
+state:pend part:gpu        pending jobs on the gpu partition
+train state:run            running jobs whose row mentions "train"
+gpu:>0                     jobs that asked for at least one GPU
+name:sweep id:4815         both must match
+```
+
+| Term | Matches | Aliases |
+|------|---------|---------|
+| `state:pend` | job state, **prefix** match, case-insensitive (`fail` finds FAILED, `out` finds OUT_OF_MEMORY) | `st:`, `s:` |
+| `part:gpu` | partition, substring | `partition:`, `p:` |
+| `name:train` | job name, substring | `n:` |
+| `id:4815` | job id, substring | `job:` |
+| `gpu:>0` | GPUs requested; `>`, `>=`, `<`, `<=`, `=`, `!=` | `gpus:`, `gres:` |
+
+Quote values containing spaces: `name:"my long job"`. An unknown key is treated as plain
+text — `foo:bar` just searches for the string `foo:bar`, so nothing you type can break the
+filter. The panel border shows how much matched (`Active Jobs — 2/4 match`), and a filter
+that matches nothing says **no jobs match** instead of showing an empty table.
+
+`gpu:` only applies to the Active table: sacct rows carry no GRES, so the term matches
+nothing among terminated jobs.
 
 ### Job Arrays
 
