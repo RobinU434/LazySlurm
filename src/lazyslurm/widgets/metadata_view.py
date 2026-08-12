@@ -6,7 +6,7 @@ from textual.app import ComposeResult
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Static, TabbedContent, TabPane
 
-from slurmtop.models import JobDetail
+from lazyslurm.models import JobDetail
 
 
 class MetadataView(Vertical):

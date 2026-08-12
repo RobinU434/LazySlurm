@@ -1,4 +1,4 @@
-"""Tests for pure parsing/formatting logic in slurmtop.
+"""Tests for pure parsing/formatting logic in lazyslurm.
 
 These cover the code paths that do not require a live Slurm cluster:
 CLI-output parsing, node-spec handling, and the resubmit argument builder.
@@ -12,8 +12,8 @@ import asyncio
 
 import pytest
 
-from slurmtop import slurm
-from slurmtop.models import Config, RunningJob
+from lazyslurm import slurm
+from lazyslurm.models import Config, RunningJob
 
 
 # ---------------------------------------------------------------------------
@@ -74,7 +74,7 @@ def test_parse_scontrol_captures_submitline_with_spaces():
 
 def test_submit_line_from_scontrol_survives_into_resubmit(monkeypatch):
     # End-to-end (no cluster): scontrol detail -> submit_line -> resubmit args.
-    from slurmtop.models import JobDetail
+    from lazyslurm.models import JobDetail
 
     raw = slurm._parse_scontrol(
         "JobId=9 WorkDir=/w Command=/w/j.sh SubmitLine=sbatch --array=1-4 j.sh"
@@ -239,7 +239,7 @@ def test_get_batch_script_failure_rc_zero(monkeypatch):
 
 
 def test_archive_batch_script_writes_cache(tmp_path, monkeypatch):
-    from slurmtop import config as cfg
+    from lazyslurm import config as cfg
 
     monkeypatch.setattr(cfg, "CONFIG_DIR", tmp_path)
     monkeypatch.setattr(cfg, "SCRIPT_CACHE_DIR", tmp_path / "scripts")
@@ -254,7 +254,7 @@ def test_archive_batch_script_writes_cache(tmp_path, monkeypatch):
 
 
 def test_archive_batch_script_uses_cache(tmp_path, monkeypatch):
-    from slurmtop import config as cfg
+    from lazyslurm import config as cfg
 
     monkeypatch.setattr(cfg, "CONFIG_DIR", tmp_path)
     monkeypatch.setattr(cfg, "SCRIPT_CACHE_DIR", tmp_path / "scripts")
@@ -270,7 +270,7 @@ def test_archive_batch_script_uses_cache(tmp_path, monkeypatch):
 
 
 def test_archive_batch_script_unavailable(tmp_path, monkeypatch):
-    from slurmtop import config as cfg
+    from lazyslurm import config as cfg
 
     monkeypatch.setattr(cfg, "CONFIG_DIR", tmp_path)
     monkeypatch.setattr(cfg, "SCRIPT_CACHE_DIR", tmp_path / "scripts")
@@ -288,7 +288,7 @@ def test_archive_batch_script_unavailable(tmp_path, monkeypatch):
 
 
 def test_resubmit_falls_back_to_archive(tmp_path, monkeypatch):
-    from slurmtop import config as cfg
+    from lazyslurm import config as cfg
 
     monkeypatch.setattr(cfg, "CONFIG_DIR", tmp_path)
     monkeypatch.setattr(cfg, "SCRIPT_CACHE_DIR", tmp_path / "scripts")
@@ -310,7 +310,7 @@ def test_resubmit_falls_back_to_archive(tmp_path, monkeypatch):
 
 
 def test_resubmit_prefers_existing_original(tmp_path, monkeypatch):
-    from slurmtop import config as cfg
+    from lazyslurm import config as cfg
 
     monkeypatch.setattr(cfg, "CONFIG_DIR", tmp_path)
     monkeypatch.setattr(cfg, "SCRIPT_CACHE_DIR", tmp_path / "scripts")
@@ -331,7 +331,7 @@ def test_resubmit_prefers_existing_original(tmp_path, monkeypatch):
 
 
 def test_resubmit_missing_script_no_archive(tmp_path, monkeypatch):
-    from slurmtop import config as cfg
+    from lazyslurm import config as cfg
 
     monkeypatch.setattr(cfg, "CONFIG_DIR", tmp_path)
     monkeypatch.setattr(cfg, "SCRIPT_CACHE_DIR", tmp_path / "scripts")

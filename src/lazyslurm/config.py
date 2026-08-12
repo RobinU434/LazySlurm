@@ -1,4 +1,4 @@
-"""Persistent configuration file for SlurmTop (~/.config/slurmtop/config.toml)."""
+"""Persistent configuration file for LazySlurm (~/.config/lazyslurm/config.toml)."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ try:
 except ImportError:
     import tomli as tomllib  # type: ignore[no-redef]
 
-CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "slurmtop"
+CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "lazyslurm"
 CONFIG_FILE = CONFIG_DIR / "config.toml"
 LOG_CACHE_FILE = CONFIG_DIR / "log_cache.json"
 SCRIPT_CACHE_DIR = CONFIG_DIR / "scripts"

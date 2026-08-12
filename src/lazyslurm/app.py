@@ -1,4 +1,4 @@
-"""Main SlurmTop Textual application."""
+"""Main LazySlurm Textual application."""
 
 from __future__ import annotations
 
@@ -15,11 +15,11 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Input, RichLog, Static
 
-from slurmtop import slurm
-from slurmtop.models import Config
-from slurmtop.widgets.detail_view import DetailView, parse_mem_bytes
-from slurmtop.widgets.job_table import ActiveJobTable, CompletedJobTable, JobSelected, set_partition_colors, set_display_config
-from slurmtop.widgets.metadata_view import MetadataView
+from lazyslurm import slurm
+from lazyslurm.models import Config
+from lazyslurm.widgets.detail_view import DetailView, parse_mem_bytes
+from lazyslurm.widgets.job_table import ActiveJobTable, CompletedJobTable, JobSelected, set_partition_colors, set_display_config
+from lazyslurm.widgets.metadata_view import MetadataView
 
 
 # ---------------------------------------------------------------------------
@@ -52,7 +52,7 @@ class HelpScreen(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Static(
-                "[bold underline]SlurmTop Help[/]\n\n"
+                "[bold underline]LazySlurm Help[/]\n\n"
                 "[bold]Navigation[/]\n"
                 "  [bold cyan]Up / Down[/]       Navigate job list (wraps between panels)\n"
                 "  [bold cyan]Tab / Shift+Tab[/] Switch right panel focus\n"
@@ -71,7 +71,7 @@ class HelpScreen(ModalScreen[None]):
                 "  [bold cyan]e[/]               Open stdout in editor (vim/nano, set in config)\n"
                 "  [bold cyan]Shift+E[/]         Open stderr in editor\n"
                 "  [bold cyan]o[/]               SSH to job's compute node (suspends TUI)\n"
-                "  [bold cyan],[/]               Edit config file (~/.config/slurmtop/config.toml)\n"
+                "  [bold cyan],[/]               Edit config file (~/.config/lazyslurm/config.toml)\n"
                 "  [bold cyan]r[/]               Force refresh all data\n"
                 "  [bold cyan]?[/]               Toggle this help screen\n"
                 "  [bold cyan]q[/]               Quit\n\n"
@@ -187,11 +187,11 @@ class ConfirmResubmitScreen(ModalScreen[bool]):
 _MAX_HISTORY = 60  # max sparkline samples per job
 
 
-class SlurmTopApp(App):
-    """SlurmTop — a TUI for monitoring Slurm jobs."""
+class LazySlurmApp(App):
+    """LazySlurm — a TUI for monitoring Slurm jobs."""
 
-    TITLE = "SlurmTop"
-    CSS_PATH = "slurmtop.tcss"
+    TITLE = "LazySlurm"
+    CSS_PATH = "lazyslurm.tcss"
 
     BINDINGS = [
         Binding("q", "quit", "Quit", show=True),
@@ -281,7 +281,7 @@ class SlurmTopApp(App):
 
         # Prune old cache entries. Point the script cache at the configured
         # directory first, so we prune the one we will actually be using.
-        from slurmtop import config as persistent_config
+        from lazyslurm import config as persistent_config
         persistent_config.prune_log_cache(max_age_days=self.config.cache_max_age_days)
         persistent_config.set_script_cache_dir(self.config.script_cache_dir)
         persistent_config.prune_script_cache(max_age_days=self.config.cache_max_age_days)
@@ -296,7 +296,7 @@ class SlurmTopApp(App):
         self.query_one("#search-input").display = False
 
         if self.config.remote:
-            self.title = f"SlurmTop [{self.config.remote}]"
+            self.title = f"LazySlurm [{self.config.remote}]"
 
         self.query_one("#active-jobs", ActiveJobTable).focus()
 
@@ -391,7 +391,7 @@ class SlurmTopApp(App):
         self.bell()
         # Try desktop notification (non-blocking, silent failure)
         asyncio.create_task(self._try_desktop_notify(
-            "SlurmTop", f"Job {job_id} {state}",
+            "LazySlurm", f"Job {job_id} {state}",
         ))
 
     @staticmethod
@@ -795,8 +795,8 @@ class SlurmTopApp(App):
             os.system("clear")
             job_info = f" (job {self._selected_job_id})" if self._selected_job_id else ""
             via = f" via {self.config.remote}" if self.config.remote else ""
-            print(f"SlurmTop — connecting to {node}{via}{job_info}")
-            print(f"Type 'exit' to return to SlurmTop.\n")
+            print(f"LazySlurm — connecting to {node}{via}{job_info}")
+            print(f"Type 'exit' to return to LazySlurm.\n")
             os.system(cmd_str)
         self._log("ssh", f"session to {node} closed")
 
@@ -810,7 +810,7 @@ class SlurmTopApp(App):
             return
 
         job_id = self._selected_job_id
-        from slurmtop import config as persistent_config
+        from lazyslurm import config as persistent_config
 
         was_cached = persistent_config.get_cached_script(job_id) is not None
         if not was_cached:
@@ -836,12 +836,12 @@ class SlurmTopApp(App):
         await self._open_in_editor(self._stderr_path, "stderr")
 
     async def action_edit_config(self) -> None:
-        from slurmtop.config import CONFIG_FILE, CONFIG_DIR
+        from lazyslurm.config import CONFIG_FILE, CONFIG_DIR
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         if not CONFIG_FILE.exists():
             import shutil as _shutil
             from importlib.resources import files
-            template = files("slurmtop").joinpath("templ", "config.toml")
+            template = files("lazyslurm").joinpath("templ", "config.toml")
             _shutil.copy2(str(template), str(CONFIG_FILE))
         editor = self.config.editor
         if shutil.which(editor) is None:
@@ -854,7 +854,7 @@ class SlurmTopApp(App):
 
     def _reload_config(self) -> None:
         """Reload config from disk and apply changes live."""
-        from slurmtop import config as persistent_config
+        from lazyslurm import config as persistent_config
 
         saved = persistent_config.load()
         old = self.config
@@ -931,7 +931,7 @@ class SlurmTopApp(App):
             self._log(f"edit {label}", f"fetching {path} from {self.config.remote}...")
             tmp = tempfile.NamedTemporaryFile(
                 suffix=f"_{os.path.basename(path)}",
-                prefix="slurmtop_",
+                prefix="lazyslurm_",
                 delete=False,
             )
             tmp.close()

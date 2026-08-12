@@ -1,1 +1,0 @@
-"""SlurmTop widgets."""

@@ -6,7 +6,7 @@ from textual.app import ComposeResult
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Static, TabbedContent, TabPane, RichLog
 
-from slurmtop.models import JobStats
+from lazyslurm.models import JobStats
 
 _SPARK_CHARS = "▁▂▃▄▅▆▇█"
 

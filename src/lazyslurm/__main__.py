@@ -1,4 +1,4 @@
-"""Entry point for `python -m slurmtop` and the `slurmtop` CLI command."""
+"""Entry point for `python -m lazyslurm` and the `lazyslurm` CLI command."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import argparse
 import os
 import sys
 
-from slurmtop.models import Config
+from lazyslurm.models import Config
 
 
 # Map from config file key → (CLI dest, type converter)
@@ -23,13 +23,13 @@ _CONFIG_KEYS = {
 
 
 def main() -> None:
-    from slurmtop import config as persistent_config
+    from lazyslurm import config as persistent_config
 
     # Load saved config for defaults
     saved = persistent_config.load()
 
     parser = argparse.ArgumentParser(
-        prog="slurmtop",
+        prog="lazyslurm",
         description="A TUI for monitoring Slurm HPC jobs.",
     )
     parser.add_argument(
@@ -182,8 +182,8 @@ def main() -> None:
         script_cache_dir=script_cache_dir,
     )
 
-    from slurmtop.app import SlurmTopApp
-    app = SlurmTopApp(config=config, config_overrides=overrides)
+    from lazyslurm.app import LazySlurmApp
+    app = LazySlurmApp(config=config, config_overrides=overrides)
     app.run()
 
 

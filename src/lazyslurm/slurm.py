@@ -9,7 +9,7 @@ from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from slurmtop.models import CompletedJob, Config, JobDetail, JobStats, RunningJob
+from lazyslurm.models import CompletedJob, Config, JobDetail, JobStats, RunningJob
 
 USER = os.environ.get("USER", os.environ.get("LOGNAME", ""))
 
@@ -19,7 +19,7 @@ _config: Config = Config()
 # Multiplex SSH connections: the first command opens a master connection and
 # subsequent commands reuse it (ControlPersist keeps it warm), turning many
 # TCP+auth handshakes per poll into one. Biggest latency win for --remote mode.
-_SSH_CONTROL_DIR = os.path.join(os.path.expanduser("~"), ".ssh", "cm-slurmtop")
+_SSH_CONTROL_DIR = os.path.join(os.path.expanduser("~"), ".ssh", "cm-lazyslurm")
 try:
     os.makedirs(_SSH_CONTROL_DIR, mode=0o700, exist_ok=True)
 except OSError:
@@ -244,7 +244,7 @@ def _parse_scontrol(output: str) -> dict[str, str]:
 
 async def get_job_detail(job_id: str) -> JobDetail | None:
     """Get detailed info for a job. Tries scontrol first, falls back to sacct."""
-    from slurmtop import config as persistent_config
+    from lazyslurm import config as persistent_config
 
     stdout, _, rc = await _run_cmd("scontrol", "show", "job", job_id)
     if rc == 0 and stdout.strip() and "Invalid job id" not in stdout:
@@ -332,7 +332,7 @@ async def _get_job_detail_sacct(job_id: str) -> JobDetail | None:
         job_name = raw["JobName"]
 
         # Check the persistent cache (paths saved while job was running)
-        from slurmtop import config as persistent_config
+        from lazyslurm import config as persistent_config
         cached_out, cached_err = persistent_config.get_cached_log_paths(job_id)
         if cached_out or cached_err:
             stdout_path = cached_out
@@ -598,7 +598,7 @@ async def resubmit_job(
     archived copy of the script (see archive_batch_script) so a job whose script
     was moved or deleted can still be resubmitted.
     """
-    from slurmtop import config as persistent_config
+    from lazyslurm import config as persistent_config
 
     tokens = shlex.split(command) if command else []
     if not tokens:
@@ -666,7 +666,7 @@ async def archive_batch_script(job_id: str, force: bool = False) -> Path | None:
     job id), otherwise fetches from Slurm and archives the text. Returns None
     when the script is neither cached nor still retrievable.
     """
-    from slurmtop import config as persistent_config
+    from lazyslurm import config as persistent_config
 
     if not force:
         cached = persistent_config.get_cached_script(job_id)

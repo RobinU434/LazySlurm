@@ -1,5 +1,5 @@
 [project]
-name = "slurmtop"
+name = "lazyslurm-py"
 version = "0.1.0"
 description = "A TUI for monitoring Slurm HPC jobs"
 readme = "README.md"
@@ -27,11 +27,11 @@ dev = [
 ]
 
 [project.scripts]
-slurmtop = "slurmtop.__main__:main"
+lazyslurm = "lazyslurm.__main__:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/slurmtop"]
+packages = ["src/lazyslurm"]

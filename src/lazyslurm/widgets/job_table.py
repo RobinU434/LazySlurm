@@ -6,7 +6,7 @@ from textual.message import Message
 from textual.widgets import DataTable
 from rich.text import Text
 
-from slurmtop.models import CompletedJob, RunningJob
+from lazyslurm.models import CompletedJob, RunningJob
 
 # Color mapping for terminated job states
 _STATE_STYLES: dict[str, str] = {

@@ -3,12 +3,12 @@
 This test actually submits jobs, so it is guarded twice:
 
   1. The Slurm client binaries (sbatch/squeue/scontrol/scancel) must be present.
-  2. The opt-in env var ``SLURMTOP_LIVE_TESTS=1`` must be set.
+  2. The opt-in env var ``LAZYSLURM_LIVE_TESTS=1`` must be set.
 
 The second guard exists so a plain ``pytest`` run — e.g. on a login node or in
 CI — never submits jobs by accident. To run it deliberately:
 
-    SLURMTOP_LIVE_TESTS=1 uv run --with pytest python -m pytest tests/test_live_resubmit.py -v
+    LAZYSLURM_LIVE_TESTS=1 uv run --with pytest python -m pytest tests/test_live_resubmit.py -v
 
 All submitted jobs use ``--hold`` so they stay PENDING and consume **no**
 compute, and every job created is cancelled in a ``finally`` block regardless
@@ -25,16 +25,16 @@ import subprocess
 
 import pytest
 
-from slurmtop import slurm
-from slurmtop.models import Config
+from lazyslurm import slurm
+from lazyslurm.models import Config
 
 _BINS = ("sbatch", "squeue", "scontrol", "scancel")
 _HAVE_SLURM = all(shutil.which(b) for b in _BINS)
-_OPTED_IN = os.environ.get("SLURMTOP_LIVE_TESTS") == "1"
+_OPTED_IN = os.environ.get("LAZYSLURM_LIVE_TESTS") == "1"
 
 pytestmark = pytest.mark.skipif(
     not (_HAVE_SLURM and _OPTED_IN),
-    reason="requires a Slurm cluster and SLURMTOP_LIVE_TESTS=1 (submits real jobs)",
+    reason="requires a Slurm cluster and LAZYSLURM_LIVE_TESTS=1 (submits real jobs)",
 )
 
 _SUBMITTED_RE = re.compile(r"Submitted batch job (\d+)")
@@ -61,7 +61,7 @@ def _local_config():
 def test_resubmit_roundtrip_live(tmp_path):
     """Submit a held job, read its detail, resubmit from that detail, verify."""
     script = tmp_path / "resubmit_test.sh"
-    script.write_text("#!/bin/bash\n#SBATCH --job-name=slurmtop_test\ntrue\n")
+    script.write_text("#!/bin/bash\n#SBATCH --job-name=lazyslurm_test\ntrue\n")
     script.chmod(0o755)
 
     created: list[str] = []

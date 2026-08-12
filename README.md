@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="img/SlurmTop-Logo.png" alt="SlurmTop Logo" width="200">
+  <img src="img/LazySlurm-Logo.png" alt="LazySlurm Logo" width="200">
 </p>
 
 <h1 align="center"></h1>
@@ -8,7 +8,7 @@
   A terminal UI for monitoring Slurm HPC jobs — like <code>htop</code> for your cluster.
 </p>
 
-SlurmTop gives you a live overview of your running and past jobs, lets you read
+LazySlurm gives you a live overview of your running and past jobs, lets you read
 stdout/stderr logs, inspect resource usage, monitor CPU and GPU activity on compute
 nodes, cancel or resubmit jobs, and more — all from a single terminal.
 
@@ -31,9 +31,19 @@ nodes, cancel or resubmit jobs, and more — all from a single terminal.
 Requires Python 3.10+ and access to Slurm CLI tools (`squeue`, `sacct`, `scontrol`).
 
 ```bash
+# Install from PyPI (the distribution is named lazyslurm-py, the command is lazyslurm)
+pip install lazyslurm-py
+
+# Or with uv
+uv tool install lazyslurm-py
+```
+
+From source:
+
+```bash
 # Clone the repository
-git clone https://github.com/your-org/slurmtop.git
-cd slurmtop
+git clone https://github.com/RobinU434/LazySlurm.git
+cd LazySlurm
 
 # Install with uv (recommended)
 uv pip install -e .
@@ -46,28 +56,28 @@ You can also install the repository directly from remote via:
 
 ```bash
 # Install via pip into local python environment
-pip install git+ssh://git@github.com/RobinU434/SlurmTop.git
+pip install git+ssh://git@github.com/RobinU434/LazySlurm.git
 ```
 
 ## Quick Start
 
 ```bash
 # Run on a cluster login node
-slurmtop
+lazyslurm
 
 # Run from your local machine, monitoring a remote cluster
-slurmtop --remote user@login.hpc.edu
+lazyslurm --remote user@login.hpc.edu
 
 # Customize refresh rate and time window
-slurmtop --refresh 3 --days 14
+lazyslurm --refresh 3 --days 14
 
 # Disable auto-refresh (manual refresh only with 'r')
-slurmtop --refresh off
+lazyslurm --refresh off
 ```
 
 ## Layout
 
-SlurmTop has a four-panel layout:
+LazySlurm has a four-panel layout:
 
 | Panel | Position | Content |
 |-------|----------|---------|
@@ -107,7 +117,7 @@ availability.
 | `e` | Open the job's **stdout** log in an external editor (suspends TUI) |
 | `Shift+E` | Open the job's **stderr** log in an external editor |
 | `o` | SSH to the selected job's compute node. Suspends the TUI; type `exit` to return |
-| `,` | Edit config file (`~/.config/slurmtop/config.toml`) in your editor |
+| `,` | Edit config file (`~/.config/lazyslurm/config.toml`) in your editor |
 | `r` | Force refresh all job data |
 | `?` | Toggle the help screen (also closes with `Escape`) |
 | `q` | Quit |
@@ -118,7 +128,7 @@ Select a job in either table (Up/Down) and use `[` / `]` to switch between these
 
 ### stdout / stderr
 
-Displays the tail of the job's standard output and error log files. SlurmTop finds log
+Displays the tail of the job's standard output and error log files. LazySlurm finds log
 files by reading `StdOut` / `StdErr` from `scontrol show job`. For older jobs no longer
 in Slurm's memory, it checks the **log path cache** first (see
 [Log Path Cache](#log-path-cache)), then falls back to searching the working directory
@@ -259,7 +269,7 @@ select a job that Slurm still knows about, and on demand when you press `b`. Arr
 share one script: `123_11`, `123_[1-40]`, and `123` all resolve to the same file.
 
 **Slurm only keeps a job's script until `MinJobAge` seconds after it ends** — often just
-300. A job that finished before SlurmTop ever saw it has no archived copy and Slurm can no
+300. A job that finished before LazySlurm ever saw it has no archived copy and Slurm can no
 longer produce one; pressing `b` reports that the script is unavailable. See
 [Job Cache](#job-cache) for the cache location and `script_cache_dir`.
 
@@ -283,7 +293,7 @@ Log (e.g., `editor 'code' not found — set 'editor' in config.toml`).
 
 ### Job Completion Notifications
 
-When a running job finishes (completes, fails, times out, etc.), SlurmTop:
+When a running job finishes (completes, fails, times out, etc.), LazySlurm:
 - Rings the terminal bell
 - Attempts a desktop notification via `notify-send` (Linux)
 - Logs the event in the Command Log panel
@@ -309,7 +319,7 @@ Slurm forgets a job shortly after it ends — `MinJobAge` seconds, often just 30
 then, `scontrol` can tell you the job's exact `StdOut`/`StdErr` paths and hand you its
 sbatch script; afterwards both are gone and only `sacct` remains, which knows neither.
 
-SlurmTop caches both while a job is still live, so they survive the job.
+LazySlurm caches both while a job is still live, so they survive the job.
 
 Check your cluster's window with:
 
@@ -325,36 +335,36 @@ Archived as text under the base job ID, so all tasks of an array share one file.
 ### Log paths
 
 Log paths are cached the same way, into `log_cache.json`, whenever you select a job that
-Slurm still knows about. For older jobs SlurmTop falls back to guessing from filename
+Slurm still knows about. For older jobs LazySlurm falls back to guessing from filename
 patterns (`slurm-JOBID.out`, `JOBNAME-JOBID.out`, `logs/` subdirectories), which can fail
 if you use custom `--output`/`--error` names.
 
 ### Resubmit fallback
 
 Resubmit (**`s`**) runs the job's original sbatch command. If the script file it names no
-longer exists, SlurmTop substitutes the archived copy and says so in the Command Log. Not
+longer exists, LazySlurm substitutes the archived copy and says so in the Command Log. Not
 available in remote mode, where the archive is local but `sbatch` runs on the login node.
 
 ### Cache files
 
 | File | Purpose |
 |------|---------|
-| `~/.config/slurmtop/log_cache.json` | Cached `StdOut`/`StdErr` paths, work dir, and submit command per job ID |
-| `~/.config/slurmtop/scripts/<job_id>.sh` | Archived sbatch scripts, mode `600` (they often contain tokens and private paths) |
+| `~/.config/lazyslurm/log_cache.json` | Cached `StdOut`/`StdErr` paths, work dir, and submit command per job ID |
+| `~/.config/lazyslurm/scripts/<job_id>.sh` | Archived sbatch scripts, mode `600` (they often contain tokens and private paths) |
 
 Both are pruned on startup using `cache_max_age_days` (default 30, `null` to never prune).
 Set `script_cache_dir` in `config.toml` to archive scripts somewhere else.
 
-> Earlier versions shipped a `slurmtop-daemon` that polled for log paths in the background.
+> Earlier versions shipped a `lazyslurm-daemon` that polled for log paths in the background.
 > It has been removed — caching now happens inline. A leftover
-> `~/.config/slurmtop/daemon.pid` is inert and can be deleted.
+> `~/.config/lazyslurm/daemon.pid` is inert and can be deleted.
 
 ## Remote Mode
 
-Run SlurmTop on your local machine while monitoring a remote cluster:
+Run LazySlurm on your local machine while monitoring a remote cluster:
 
 ```bash
-slurmtop --remote user@login.hpc.edu
+lazyslurm --remote user@login.hpc.edu
 ```
 
 All Slurm commands (`squeue`, `sacct`, `scontrol`, `sstat`, `scancel`, `sbatch`) are
@@ -365,7 +375,7 @@ the login node via ProxyJump.
 When using `--remote user@host`, the username is automatically used as the default
 `--user` for Slurm queries (no need to specify both).
 
-**Login node warning**: If the local or remote hostname contains "login", SlurmTop shows
+**Login node warning**: If the local or remote hostname contains "login", LazySlurm shows
 a warning popup reminding you to be mindful of resource usage on shared login nodes.
 
 For best performance, configure SSH connection multiplexing in `~/.ssh/config`:
@@ -379,7 +389,7 @@ Host login.hpc.edu
 
 ## Configuration
 
-SlurmTop stores persistent settings in `~/.config/slurmtop/config.toml` (respects
+LazySlurm stores persistent settings in `~/.config/lazyslurm/config.toml` (respects
 `$XDG_CONFIG_HOME`). The file is created automatically when you use `--partition-order`,
 or you can create it by hand.
 
@@ -408,11 +418,11 @@ abbreviate_states = false # use short state names: DONE, FAIL, TIME, CAN, OOM, .
 # cache_max_age_days = 30  # auto-delete cached job info older than N days
                            # set to null to never delete (keep forever)
 # script_cache_dir = ""    # where archived sbatch scripts live
-                           # (default: ~/.config/slurmtop/scripts)
+                           # (default: ~/.config/lazyslurm/scripts)
 
 # Partition display order in the cluster bar.
 # Partitions not listed appear after these in their default order.
-# Set via CLI: slurmtop --partition-order gpu,cpu,fat
+# Set via CLI: lazyslurm --partition-order gpu,cpu,fat
 partition_order = ["gpu", "cpu", "fat"]
 
 # Custom partition colors in the job tables.
@@ -442,15 +452,15 @@ To set a custom partition order for the cluster bar:
 
 ```bash
 # Set once — automatically saved for future sessions
-slurmtop --partition-order gpu,cpu,fat
+lazyslurm --partition-order gpu,cpu,fat
 ```
 
 ## CLI Reference
 
-### slurmtop
+### lazyslurm
 
 ```
-slurmtop [-h] [-r SEC] [-d N] [-u USER] [-p PARTITION]
+lazyslurm [-h] [-r SEC] [-d N] [-u USER] [-p PARTITION]
          [--no-gpu] [--no-live] [--partition-order P1,P2,...] [-H HOST]
 ```
 

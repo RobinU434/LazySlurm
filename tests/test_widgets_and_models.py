@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import pytest
 
-from slurmtop.models import JobDetail
-from slurmtop.widgets.detail_view import parse_mem_bytes, sparkline
-from slurmtop.widgets import job_table
-from slurmtop import config as cfg
+from lazyslurm.models import JobDetail
+from lazyslurm.widgets.detail_view import parse_mem_bytes, sparkline
+from lazyslurm.widgets import job_table
+from lazyslurm import config as cfg
 
 
 # ---------------------------------------------------------------------------

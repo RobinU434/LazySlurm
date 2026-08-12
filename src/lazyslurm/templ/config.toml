@@ -1,4 +1,4 @@
-# SlurmTop configuration
+# LazySlurm configuration
 # Uncomment and modify values as needed. See README for full documentation.
 #
 # All CLI arguments can be set here as defaults.
@@ -24,7 +24,7 @@
 
 # Partition display order in the cluster bar.
 # Partitions not listed appear after these in their default order.
-# Can also be set via: slurmtop --partition-order gpu,cpu,fat
+# Can also be set via: lazyslurm --partition-order gpu,cpu,fat
 # partition_order = ["gpu", "cpu", "fat"]
 
 # Custom partition colors in the job tables.
