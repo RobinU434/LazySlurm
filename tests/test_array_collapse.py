@@ -337,6 +337,8 @@ def test_edit_on_a_collapsed_array_targets_its_pending_tasks(monkeypatch):
         ("123_[1-4%10]", (1, 4)),   # %10 throttles concurrency; it is not an index
         ("123_[12-40]", (12, 40)),
         ("123_[1,3,5]", (1, 5)),
+        ("123_[0-9:2]", (0, 9)),    # ":2" is a stride, not an index either
+        ("123_[1-4,20-21%10]", (1, 21)),  # the throttle terminates the whole spec
         ("123_[5]", (5, 5)),
         ("123_7", (7, 7)),
         ("123", None),              # not an array
@@ -368,5 +370,39 @@ def test_throttled_array_label_shows_the_real_index_range():
             assert "700_[0-4]" in label
             assert "×5" in label          # task 0 plus tasks 1-4
             assert "10" not in label      # the throttle never reaches the label
+
+    _run(scenario())
+
+
+@pytest.mark.parametrize(
+    "job_id,count",
+    [
+        ("123_[1-4%10]", 4),        # throttle does not change how many tasks exist
+        ("123_[0-9:2]", 5),         # 0, 2, 4, 6, 8
+        ("123_[0-9:3]", 4),         # 0, 3, 6, 9
+        ("123_[0-9]", 10),
+        ("123_[1-4,20-21%10]", 6),
+        ("123_5", 1),
+    ],
+)
+def test_array_task_count_ignores_decorations(job_id, count):
+    from lazyslurm.models import array_task_count
+    assert array_task_count(job_id) == count
+
+
+def test_strided_array_label_counts_only_real_tasks():
+    """`[1-9:2]` is five tasks spanning 1-9 — the stride is not an index."""
+    async def scenario():
+        app = _Harness()
+        async with app.run_test(size=(120, 24)) as pilot:
+            table = await _table(app, ActiveJobTable, [
+                RunningJob("800_0", "strided", "1:00", "gpu", "RUNNING"),
+                RunningJob("800_[1-9:2]", "strided", "0:00", "gpu", "PENDING"),
+            ])
+            await pilot.pause()
+            label = str(table.get_cell("800", "Job ID"))
+            assert "800_[0-9]" in label
+            assert "×6" in label      # task 0, plus 1, 3, 5, 7, 9
+            assert "×10" not in label  # the span is not the task count
 
     _run(scenario())

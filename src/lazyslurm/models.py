@@ -28,32 +28,37 @@ class Config:
     script_cache_dir: str = ""  # where to archive sbatch scripts ("" = <config_dir>/scripts)
 
 
-def _array_ranges(job_id: str) -> list[tuple[int, int]]:
-    """The task-index ranges a job id covers, as ``[(lo, hi)]``.
+def _array_ranges(job_id: str) -> list[tuple[int, int, int]]:
+    """The task-index ranges a job id covers, as ``[(lo, hi, step)]``.
 
-    ``123_[12-40]`` -> ``[(12, 40)]``, ``123_[1,3,5]`` -> three single ranges,
-    ``123_4`` -> ``[(4, 4)]``, a non-array id -> ``[]``.
+    ``123_[12-40]`` -> ``[(12, 40, 1)]``, ``123_[1,3,5]`` -> three single
+    ranges, ``123_4`` -> ``[(4, 4, 1)]``, a non-array id -> ``[]``.
 
-    The spec is parsed explicitly rather than by scraping digits: ``%`` starts a
-    concurrency throttle (``[1-4%10]`` runs tasks 1-4, ten at a time) whose
-    number is not an index, and any future decoration Slurm adds would be picked
-    up the same wrong way.
+    The spec is parsed explicitly rather than by scraping digits, because not
+    every number in it is a task index:
+
+    - ``%`` starts a concurrency throttle — ``[1-4%10]`` runs tasks 1-4, ten at
+      a time — and it always terminates the spec, so everything after it goes.
+    - ``:`` starts a stride — ``[0-9:2]`` is tasks 0, 2, 4, 6, 8 — so the step
+      bounds the range but is not itself an index.
     """
     _, sep, suffix = job_id.partition("_")
     if not sep or not suffix:
         return []
     if not suffix.startswith("["):
-        return [(int(suffix), int(suffix))] if suffix.isdigit() else []
+        return [(int(suffix), int(suffix), 1)] if suffix.isdigit() else []
 
     spec = suffix[1:].split("]", 1)[0].split("%", 1)[0]
-    ranges: list[tuple[int, int]] = []
+    ranges: list[tuple[int, int, int]] = []
     for part in spec.split(","):
-        lo, _, hi = part.strip().partition("-")
+        bounds, _, stride = part.strip().partition(":")
+        step = int(stride) if stride.strip().isdigit() and int(stride) > 0 else 1
+        lo, _, hi = bounds.strip().partition("-")
         lo, hi = lo.strip(), hi.strip()
         if lo.isdigit() and hi.isdigit():
-            ranges.append((int(lo), int(hi)))
+            ranges.append((int(lo), int(hi), step))
         elif lo.isdigit() and not hi:
-            ranges.append((int(lo), int(lo)))
+            ranges.append((int(lo), int(lo), 1))
     return ranges
 
 
@@ -67,7 +72,7 @@ def array_task_count(job_id: str) -> int:
     ranges = _array_ranges(job_id)
     if not ranges:
         return 1
-    return sum(hi - lo + 1 for lo, hi in ranges) or 1
+    return sum((hi - lo) // step + 1 for lo, hi, step in ranges) or 1
 
 
 def array_index_span(job_ids) -> tuple[int, int] | None:
@@ -75,7 +80,7 @@ def array_index_span(job_ids) -> tuple[int, int] | None:
     ranges = [r for job_id in job_ids for r in _array_ranges(job_id)]
     if not ranges:
         return None
-    return min(lo for lo, _ in ranges), max(hi for _, hi in ranges)
+    return min(lo for lo, _, _ in ranges), max(hi for _, hi, _ in ranges)
 
 
 @dataclass
