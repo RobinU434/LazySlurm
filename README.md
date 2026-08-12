@@ -1,8 +1,6 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/RobinU434/LazySlurm/main/img/LazySlurm-Logo.png" alt="LazySlurm Logo" width="200">
+  <img src="https://raw.githubusercontent.com/RobinU434/LazySlurm/main/img/Logo-LazySlurm.png" alt="LazySlurm" width="260">
 </p>
-
-<h1 align="center"></h1>
 
 <p align="center">
   A terminal UI for monitoring Slurm HPC jobs — like <code>htop</code> for your cluster.
