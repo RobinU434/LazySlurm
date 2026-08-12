@@ -163,7 +163,30 @@ is automatically restricted to the job's allocation. The header shows
 
 ### stats
 
-Accounting statistics from `sstat` (running jobs) and `sacct`:
+Accounting statistics from `sstat` (running jobs) and `sacct`, starting with what the job
+used against what it reserved:
+
+```
+Efficiency
+  CPU            <0.1 / 8 cores    <1% ▁▁▁▁▁▁▁▁  ← over-requested
+  Memory         2.6G / 64G         4% ▁▁▁▁▁▁▁▁  ← over-requested
+  GPU               1 / 1 allocated      — utilisation is not recorded by Slurm
+  Walltime      17:02 / 12:00:00    2% ▁▁▁▁▁▁▁▁
+  next time try --mem=4G --cpus-per-task=1 --time=00:25:00
+```
+
+- **CPU** is `TotalCPU / (cores × elapsed)`, the same definition `seff` uses
+- **Memory** compares the peak RSS of one task against the request **per node**, so a
+  multi-node job is not credited with memory it never touched on any single node. At 100%
+  or above the row turns red — the next run risks being killed for exceeding its request
+- **Walltime** is `elapsed / time limit`
+- Green above 60%, yellow 25-60%, red below. A fraction of a percent shows as `<1%` rather
+  than rounding up to 1%
+- The last line suggests a request about a third larger than what was actually used, and
+  only appears when something was clearly over-provisioned
+- Array tasks are measured per task; a job too old for `sacct` reads `unavailable`
+
+Then the raw accounting fields:
 
 - **CPU** — average CPU time, total CPU, frequency, wall time
 - **Memory** — requested, max/average RSS, max/average VM size, peak node/task

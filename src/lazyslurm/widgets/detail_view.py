@@ -6,7 +6,40 @@ from textual.app import ComposeResult
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Static, TabbedContent, TabPane, RichLog
 
-from lazyslurm.models import JobStats
+from lazyslurm.models import (
+    Efficiency,
+    JobStats,
+    format_bytes,
+    format_duration,
+    parse_mem_bytes,
+    sizing_hint,
+)
+
+# Efficiency colouring: green when the request was about right, red when the
+# job used almost none of what it reserved.
+_EFF_GOOD, _EFF_FAIR = 0.60, 0.25
+
+__all__ = ["DetailView", "parse_mem_bytes", "sparkline", "efficiency_bar"]
+
+
+def efficiency_style(ratio: float | None) -> str:
+    if ratio is None:
+        return "dim"
+    if ratio >= 1.0:
+        return "red bold"      # used everything it asked for — may be capped
+    if ratio >= _EFF_GOOD:
+        return "green"
+    if ratio >= _EFF_FAIR:
+        return "yellow"
+    return "red"
+
+
+def efficiency_bar(ratio: float | None, width: int = 8) -> str:
+    """`▆▆▆▁▁▁▁▁` — a compact eighth-block gauge of one ratio."""
+    if ratio is None:
+        return " " * width
+    filled = min(width, max(0, round(min(ratio, 1.0) * width)))
+    return "▆" * filled + "▁" * (width - filled)
 
 _SPARK_CHARS = "▁▂▃▄▅▆▇█"
 
@@ -19,23 +52,6 @@ def sparkline(values: list[float]) -> str:
     if mx == 0:
         return "▁" * len(values)
     return "".join(_SPARK_CHARS[min(int(v / mx * 7), 7)] for v in values)
-
-
-def parse_mem_bytes(s: str) -> float | None:
-    """Parse a memory string like '1234K', '512M', '2.5G' to bytes."""
-    if not s or s == "N/A":
-        return None
-    s = s.strip()
-    multipliers = {"K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
-    if s[-1].upper() in multipliers:
-        try:
-            return float(s[:-1]) * multipliers[s[-1].upper()]
-        except ValueError:
-            return None
-    try:
-        return float(s)
-    except ValueError:
-        return None
 
 
 class DetailView(Vertical):
@@ -95,6 +111,63 @@ class DetailView(Vertical):
         except Exception:
             pass  # GPU tab not present
 
+    @staticmethod
+    def _efficiency_section(stats: JobStats) -> str:
+        """The Efficiency block: used / requested, a gauge, and a sizing hint."""
+        eff = stats.efficiency
+        lines = ["[bold underline]Efficiency[/]"]
+
+        if not eff.has_any:
+            lines.append("  [dim]unavailable — Slurm no longer has accounting "
+                         "data for this job[/]")
+            return "\n".join(lines)
+
+        def row(label: str, ratio: float | None, used: str, asked: str, note: str = "") -> str:
+            style = efficiency_style(ratio)
+            gauge = efficiency_bar(ratio)
+            if ratio is None:
+                return f"  {label:<9} [dim]{used:>9} / {asked:<9}      —[/]"
+            # Never round a fraction of a percent up to "1%": a job that used
+            # half a percent of its request should read as having used none.
+            pct = "<1%" if 0 < ratio < 0.01 else f"{ratio * 100:.0f}%"
+            return (
+                f"  {label:<9} {used:>9} / {asked:<9} "
+                f"[{style}]{pct:>4}[/] [{style}]{gauge}[/]{note}"
+            )
+
+        if eff.cpu is not None:
+            lines.append(row(
+                "CPU", eff.cpu,
+                "<0.1" if 0 < eff.cpu_used < 0.1 else f"{eff.cpu_used:.1f}",
+                f"{eff.cpu_alloc} cores",
+                "  [dim]← over-requested[/]" if eff.cpu < _EFF_FAIR else "",
+            ))
+        if eff.memory is not None:
+            note = ""
+            if eff.oom_risk:
+                note = "  [red]← at the limit, risks OOM[/]"
+            elif eff.memory < _EFF_FAIR:
+                note = "  [dim]← over-requested[/]"
+            per_node = "/node" if eff.nnodes > 1 else ""
+            lines.append(row(
+                "Memory", eff.memory,
+                format_bytes(eff.mem_used), format_bytes(eff.mem_request) + per_node,
+                note,
+            ))
+        if eff.gpus:
+            lines.append(f"  {'GPU':<9} {eff.gpus:>9} / {eff.gpus} allocated"
+                         f"      [dim]— utilisation is not recorded by Slurm[/]")
+        if eff.walltime is not None:
+            lines.append(row(
+                "Walltime", eff.walltime,
+                format_duration(eff.elapsed), format_duration(eff.time_limit),
+            ))
+
+        hint = sizing_hint(eff)
+        if hint:
+            lines.append(f"  [dim]{hint}[/]")
+        return "\n".join(lines)
+
     def load_stats(
         self,
         stats: JobStats | None,
@@ -106,6 +179,12 @@ class DetailView(Vertical):
             return
 
         sections: list[str] = []
+
+        # Efficiency — what the job used against what it reserved. First,
+        # because it is the only part that answers "was this sized right?".
+        efficiency = self._efficiency_section(stats)
+        if efficiency:
+            sections.append(efficiency)
 
         # CPU section
         cpu_lines = ["[bold underline]CPU[/]"]
