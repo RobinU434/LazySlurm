@@ -126,6 +126,7 @@ Press `?` at any time for this list inside the app:
 | `Ctrl+V` | Toggle multi-select mode (vim-visual style). Use Up/Down to extend the selection range from an anchor row, then press `c` or `Shift+C` to cancel all selected jobs. Press `Ctrl+V` again to exit. Detail panels freeze on the last single-selected job. |
 | `s` | Resubmit a terminated job using its original sbatch script (with confirmation) |
 | `u` | Edit a **pending** job's properties: runtime, partition, nodes, CPUs, memory. Works on a multi-selection too |
+| `Shift+U` | Open the [account usage panel](#account-usage) — CPU-hours and your fairshare |
 | `p` | Open the [partition monitor](#partition-monitor) — per-partition load and every user's jobs. `Escape` or `p` returns |
 | `b` | View the job's sbatch script, read-only, in your editor |
 | `l` | Open the active log tab (stdout or stderr) in a **pager** — the way to read a huge log |
@@ -134,7 +135,7 @@ Press `?` at any time for this list inside the app:
 | `o` | SSH to the selected job's compute node. Suspends the TUI; type `exit` to return |
 | `,` | Edit config file (`~/.config/lazyslurm/config.toml`) in your editor |
 | `r` | Force refresh all job data |
-| `?` | Toggle the help screen (also closes with `Escape`) |
+| `?` | Help for **the panel you are in** — job tables, Job Details, Job Metadata, partition monitor, node view or account usage. Other panels are listed at the bottom (also closes with `Escape`) |
 | `q` | Quit |
 
 ## Detail Tabs
@@ -350,6 +351,38 @@ Turn it off with `collapse_arrays = false` in `config.toml` to get one row per t
 
 Press `m` to bookmark any job. Bookmarked jobs are pinned to the top of their table with
 a ★ prefix. Bookmarks persist for the duration of the session.
+
+### Account Usage
+
+Press `Shift+U` for what the allocation has cost so far and what it is doing to your
+priority:
+
+```
+this month   8 200 CPU-hours used by you   account total 12 500  66% of it yours   (w cycles window)
++------------------------------- Fair share -------------------------------+
+| physics  factor 0.437  entitled 1.68%  used 5.64%                        |
+|   over your share — your jobs get reduced priority (using 3.3x your share)|
++------------------------------ Account usage -----------------------------+
+| User      Name        CPU hours  Share              %                    |
+| ▸ jdoe    Jane Doe        8 200  ████████████░░░░  66.1%                 |
+|   asmith  A Smith        3 100   ████░░░░░░░░░░░░  25.0%                 |
+|   bpatel  B Patel        1 200   ██░░░░░░░░░░░░░░   9.7%                 |
++--------------------------------------------------------------------------+
+```
+
+- **Hours** come from `sreport cluster AccountUtilizationByUser`, per user in your account,
+  biggest consumer first, your own row marked `▸`.
+- **Fair share** comes from `sshare` — this is what actually drives queue priority.
+  `entitled` is your slice of the cluster, `used` is the slice you have consumed, and the
+  factor is Slurm's verdict: above 0.5 you are under-consuming and get boosted, below it
+  you are over-consuming and get pushed back. The sentence underneath says which.
+- `w` cycles the window: **this month → last 30 days → this year**. `r` refetches,
+  `Escape` / `Shift+U` / `q` returns.
+
+`sreport` can take seconds on a busy accounting database, so the screen opens immediately
+with `loading usage...` and fills in when the data arrives. Nothing here runs in the poll
+loop — it is fetched on open, on `r`, and when the window changes. On a cluster without
+Slurm accounting the panel says so rather than showing an empty table.
 
 ### Partition Monitor
 
@@ -737,6 +770,8 @@ lazyslurm [-h] [-r SEC] [-d N] [-u USER] [-p PARTITION]
 
 - Python 3.10+
 - Slurm CLI tools: `squeue`, `sacct`, `sinfo`, `scontrol`, `sstat`, `scancel`, `sbatch`
+- Optional: `sprio` for the pending-job priority breakdown, `sreport`/`sshare` for the
+  account usage panel — each degrades to a message where it is unavailable
 - [Textual](https://textual.textualize.io/) (installed automatically)
 - For GPU monitoring: `nvidia-smi` on compute nodes, `srun --overlap` support
 - For remote mode: SSH access to the cluster login node

@@ -11,15 +11,17 @@ from pathlib import Path
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widgets import DataTable, Footer, Input, RichLog, Static
 
+from lazyslurm import help as help_topics
 from lazyslurm import slurm
 from lazyslurm.models import Config, PriorityInfo
 from lazyslurm.widgets.detail_view import DetailView, parse_mem_bytes
 from lazyslurm.widgets.job_table import ActiveJobTable, CompletedJobTable, JobSelected, set_partition_colors, set_display_config
 from lazyslurm.widgets.metadata_view import MetadataView
+from lazyslurm.widgets.usage_view import UsageTable, format_hours
 from lazyslurm.widgets.partition_view import (
     NodeSelected,
     NodeTable,
@@ -35,7 +37,11 @@ from lazyslurm.widgets.partition_view import (
 
 
 class HelpScreen(ModalScreen[None]):
-    """Overlay showing key bindings."""
+    """Key bindings for the panel the user is actually in.
+
+    The content comes from `lazyslurm.help`, which a test cross-checks against
+    the real BINDINGS so this cannot drift out of date again.
+    """
 
     BINDINGS = [
         Binding("escape", "dismiss", "Close"),
@@ -47,60 +53,26 @@ class HelpScreen(ModalScreen[None]):
         align: center middle;
     }
     HelpScreen > Vertical {
-        width: 72;
+        width: 78;
         height: auto;
-        max-height: 80%;
+        max-height: 90%;
         border: round $accent;
         background: $surface;
         padding: 1 2;
     }
+    HelpScreen VerticalScroll {
+        height: auto;
+        max-height: 100%;
+    }
     """
+
+    def __init__(self, context: str = help_topics.JOBS) -> None:
+        super().__init__()
+        self.context = context
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield Static(
-                "[bold underline]LazySlurm Help[/]\n\n"
-                "[bold]Navigation[/]\n"
-                "  [bold cyan]Up / Down[/]       Navigate job list (wraps between panels)\n"
-                "  [bold cyan]Tab / Shift+Tab[/] Switch right panel focus\n"
-                "  [bold cyan]Left / Right[/]    Switch right panel focus\n"
-                "  [bold cyan]\\[ / \\][/]          Switch Job Details tabs\n"
-                "  [bold cyan]( / )[/]           Switch Job Metadata tabs\n"
-                "  [bold cyan]Escape[/]          Close search bar\n\n"
-                "[bold]Actions[/]\n"
-                "  [bold cyan]/[/]               Filter jobs: plain text, or state:/part:/name:/id:/gpu: terms\n"
-                "  [bold cyan]m[/]               Bookmark / unbookmark job (★ pinned to top)\n"
-                "  [bold cyan]Enter[/]           Expand / collapse a job array (▸ row)\n"
-                "  [bold cyan]c[/]               Cancel selected job(s) (with confirmation)\n"
-                "  [bold cyan]Shift+C[/]         Force cancel job(s) (SIGKILL, no confirmation)\n"
-                "  [bold cyan]Ctrl+V[/]          Toggle multi-select mode (vim-visual)\n"
-                "  [bold cyan]s[/]               Resubmit terminated job (with confirmation)\n"
-                "  [bold cyan]u[/]               Edit pending job(s): runtime, partition, nodes, CPUs, memory\n"
-                "  [bold cyan]p[/]               Partition monitor: load, A/I/O/T, all users' jobs\n"
-                "  [bold cyan]Enter[/]           (in the partition monitor) nodes of that partition\n"
-                "  [bold cyan]b[/]               View job's sbatch script (read-only, cached)\n"
-                "  [bold cyan]l[/]               Page the active log tab (less: / search, F follow, q quit)\n"
-                "  [bold cyan]e[/]               Open stdout in editor (vim/nano, set in config)\n"
-                "  [bold cyan]Shift+E[/]         Open stderr in editor\n"
-                "  [bold cyan]o[/]               SSH to job's compute node (suspends TUI)\n"
-                "  [bold cyan],[/]               Edit config file (~/.config/lazyslurm/config.toml)\n"
-                "  [bold cyan]r[/]               Force refresh all data\n"
-                "  [bold cyan]?[/]               Toggle this help screen\n"
-                "  [bold cyan]q[/]               Quit\n\n"
-                "[bold]Detail Tabs[/]\n"
-                "  [bold cyan]stdout[/]  Job standard output log\n"
-                "  [bold cyan]stderr[/]  Job standard error log\n"
-                "  [bold cyan]cpu[/]     Live process list from node (auto-refreshes)\n"
-                "  [bold cyan]gpu[/]     Live nvidia-smi from node (auto-refreshes)\n"
-                "  [bold cyan]stats[/]   CPU, memory, GPU, disk I/O + sparkline history\n\n"
-                "[bold]Cluster Bar (top line)[/]\n"
-                "  Shows your running/pending job counts and partition status.\n"
-                "  Partition format: [bold]name[/]:[bold]A[/]/[bold]I[/]/[bold]O[/]/[bold]T[/]\n"
-                "    [bold]A[/]=allocated  [bold]I[/]=idle  [bold]O[/]=other  [bold]T[/]=total nodes\n\n"
-                "[bold]Notifications[/]\n"
-                "  Terminal bell + desktop notification when a running job completes.\n\n"
-                "Press [bold]?[/] or [bold]Escape[/] to close."
-            )
+            yield VerticalScroll(Static(help_topics.render(self.context)))
 
 
 class ConfirmCancelScreen(ModalScreen[bool]):
@@ -569,6 +541,100 @@ class PartitionScreen(Screen):
         self.app.pop_screen()
 
 
+class UsageScreen(Screen):
+    """Account usage and fairshare — where the allocation went, and what it costs you.
+
+    sreport can take seconds on a busy accounting database, so the screen opens
+    immediately with a placeholder and fills in when the data lands. Nothing
+    here touches the poll loop: it is fetched on open, on `r`, and when the
+    window changes.
+    """
+
+    BINDINGS = [
+        Binding("escape", "close", "Back"),
+        Binding("U", "close", "Back"),
+        Binding("q", "close", "Back"),
+        Binding("r", "reload", "Refresh"),
+        Binding("w", "cycle_window", "Window"),
+    ]
+
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        self.config = config
+        self.window = "month"
+        self.user = config.user or slurm.USER
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="usage-bar")
+        yield Static(id="usage-fairshare")
+        yield UsageTable(id="usage-table", user=self.user)
+        yield Footer()
+
+    async def on_mount(self) -> None:
+        self.query_one("#usage-table").border_title = "Account usage"
+        self.query_one("#usage-fairshare").border_title = "Fair share"
+        self.query_one("#usage-bar", Static).update("[dim]loading usage...[/]")
+        self.query_one("#usage-fairshare", Static).update("[dim]loading...[/]")
+        self.query_one("#usage-table", UsageTable).focus()
+        self.run_worker(self._load(), exclusive=True)
+
+    async def _load(self) -> None:
+        _, _, label = slurm.usage_window(self.window)
+        rows, shares = await asyncio.gather(
+            slurm.get_account_usage(self.window),
+            slurm.get_fairshare(self.user),
+        )
+
+        table = self.query_one("#usage-table", UsageTable)
+        table.update_rows(rows)
+
+        if not rows and not shares:
+            reason = ("this cluster has no Slurm accounting enabled"
+                      if not slurm.accounting_available()
+                      else "no accounting data for you in this window")
+            self.query_one("#usage-bar", Static).update(
+                f"[dim]{label} — {reason}[/]"
+            )
+            self.query_one("#usage-fairshare", Static).update("")
+            return
+
+        total = table.total_hours
+        mine = table.my_hours
+        share = f"  [bold]{mine / total * 100:.0f}%[/] of it yours" if total else ""
+        self.query_one("#usage-bar", Static).update(
+            f"[bold]{label}[/]   {format_hours(mine)} CPU-hours used by you   "
+            f"[dim]account total {format_hours(total)}[/]{share}"
+            f"   [dim](w cycles window)[/]"
+        )
+        self.query_one("#usage-fairshare", Static).update(self._fairshare_text(shares))
+
+    def _fairshare_text(self, shares: list) -> str:
+        mine = [s for s in shares if s.user] or shares
+        if not mine:
+            return "[dim]sshare reported no association for you[/]"
+        lines = []
+        for share in mine[:3]:
+            factor = "n/a" if share.fairshare is None else f"{share.fairshare:.3f}"
+            lines.append(
+                f"[bold]{share.account}[/]  factor [bold]{factor}[/]  "
+                f"entitled {share.norm_shares * 100:.2f}%  "
+                f"used {share.effective_usage * 100:.2f}%"
+            )
+            lines.append(f"  [dim]{share.reading}[/]")
+        return "\n".join(lines)
+
+    async def action_reload(self) -> None:
+        self.query_one("#usage-bar", Static).update("[dim]loading usage...[/]")
+        self.run_worker(self._load(), exclusive=True)
+
+    async def action_cycle_window(self) -> None:
+        self.window = slurm.next_usage_window(self.window)
+        await self.action_reload()
+
+    def action_close(self) -> None:
+        self.app.pop_screen()
+
+
 # ---------------------------------------------------------------------------
 # Main app
 # ---------------------------------------------------------------------------
@@ -598,6 +664,7 @@ class LazySlurmApp(App):
         Binding("s", "resubmit_job", "Resubmit", show=False),
         Binding("u", "edit_job", "Edit Job", show=False),
         Binding("p", "partitions", "Partitions", show=False),
+        Binding("U", "usage", "Usage", show=False),
         Binding("b", "view_batch_script", "Script", show=False),
         Binding("o", "ssh_to_node", "SSH", show=False),
         Binding("l", "page_log", "Pager", show=False),
@@ -1101,13 +1168,36 @@ class LazySlurmApp(App):
     # Actions
     # ------------------------------------------------------------------
 
+    def _help_context(self) -> str:
+        """Which panel the user is in, for the help screen."""
+        screen = self.screen
+        if isinstance(screen, PartitionScreen):
+            return help_topics.PARTITIONS
+        if isinstance(screen, NodeScreen):
+            return help_topics.NODES
+        if isinstance(screen, UsageScreen):
+            return help_topics.USAGE
+
+        focused = self.focused
+        if focused is not None:
+            if focused.id == "search-input":
+                return help_topics.JOBS   # the filter keys are documented there
+            for node in (focused, *focused.ancestors):
+                if getattr(node, "id", None) == "detail-view":
+                    return help_topics.DETAIL
+                if getattr(node, "id", None) == "metadata-view":
+                    return help_topics.METADATA
+        return help_topics.JOBS
+
     def action_help(self) -> None:
         if self._help_open:
             self.app.pop_screen()
             self._help_open = False
         else:
             self._help_open = True
-            self.push_screen(HelpScreen(), callback=self._on_help_dismissed)
+            self.push_screen(
+                HelpScreen(self._help_context()), callback=self._on_help_dismissed
+            )
 
     def _on_help_dismissed(self, _result: None) -> None:
         self._help_open = False
@@ -1197,6 +1287,10 @@ class LazySlurmApp(App):
     def action_partitions(self) -> None:
         """Open the partition monitor screen (Escape or p returns)."""
         self.push_screen(PartitionScreen(self.config))
+
+    def action_usage(self) -> None:
+        """Open the account usage screen (Escape or U returns)."""
+        self.push_screen(UsageScreen(self.config))
 
     # ------------------------------------------------------------------
     # Edit job properties (scontrol update)
