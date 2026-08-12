@@ -191,9 +191,15 @@ class EditJobScreen(ModalScreen[dict]):
     to all selected jobs.
     """
 
+    # Up/Down move between lines like in an editor, so they must be handled
+    # before the focused Input sees them (priority=True).
     BINDINGS = [
-        Binding("ctrl+s", "submit", "Apply"),
-        Binding("escape", "cancel", "Cancel"),
+        Binding("ctrl+s", "submit", "Write"),
+        Binding("escape", "cancel", "Quit"),
+        Binding("up", "prev_field", "Up", show=False, priority=True),
+        Binding("down", "next_field", "Down", show=False, priority=True),
+        Binding("tab", "next_field", "Next", show=False, priority=True),
+        Binding("shift+tab", "prev_field", "Prev", show=False, priority=True),
     ]
 
     DEFAULT_CSS = """
@@ -201,18 +207,28 @@ class EditJobScreen(ModalScreen[dict]):
         align: center middle;
     }
     EditJobScreen > Vertical {
-        width: 42;
+        width: 46;
         height: auto;
         border: round $accent;
+        border-title-color: $text-muted;
+        border-title-align: left;
+        border-subtitle-color: $text-muted;
+        border-subtitle-align: right;
         background: $surface;
         padding: 0 1;
     }
-    EditJobScreen .field {
+    EditJobScreen .line {
         height: 1;
     }
+    EditJobScreen .lineno {
+        width: 3;
+        color: $text-muted 50%;
+        text-align: right;
+    }
     EditJobScreen .field-label {
-        width: 12;
+        width: 16;
         color: $text-muted;
+        padding-left: 1;
     }
     EditJobScreen Input {
         width: 1fr;
@@ -221,11 +237,12 @@ class EditJobScreen(ModalScreen[dict]):
         padding: 0;
         background: $surface;
     }
+    /* Textual's own `Input:focus` rule re-adds a tall border, which would eat
+       both rows of a 1-line field; this outranks it and keeps the line flat. */
     EditJobScreen Input:focus {
+        border: none;
+        padding: 0;
         background: $boost;
-    }
-    EditJobScreen .hint {
-        color: $text-muted;
     }
     """
 
@@ -233,26 +250,47 @@ class EditJobScreen(ModalScreen[dict]):
         super().__init__()
         self.job_ids = list(job_ids)
         self.current = current or {}
+        self._keys = [f[0] for f in slurm.EDITABLE_FIELDS]
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            if len(self.job_ids) == 1:
-                title = f"edit {self.job_ids[0]}"
-            else:
-                title = f"edit {len(self.job_ids)} jobs"
-            yield Static(f"[bold]{title}[/]", classes="hint")
-            for key, label, _scontrol_key, _attr in slurm.EDITABLE_FIELDS:
-                with Horizontal(classes="field"):
-                    yield Static(label, classes="field-label")
+            for number, (key, _label, scontrol_key, _attr) in enumerate(slurm.EDITABLE_FIELDS, 1):
+                with Horizontal(classes="line"):
+                    yield Static(str(number), classes="lineno")
+                    yield Static(scontrol_key, classes="field-label")
                     yield Input(
                         value=self.current.get(key, ""),
                         id=f"edit-{key}",
                     )
-            yield Static("[dim]^S apply  esc cancel[/]", classes="hint")
 
     def on_mount(self) -> None:
-        first = slurm.EDITABLE_FIELDS[0][0]
-        self.query_one(f"#edit-{first}", Input).focus()
+        box = self.query_one(Vertical)
+        if len(self.job_ids) == 1:
+            box.border_title = f" job.{self.job_ids[0]} "
+        else:
+            box.border_title = f" job.{len(self.job_ids)}-selected "
+        box.border_subtitle = " ^S write  esc quit "
+        self.query_one(f"#edit-{self._keys[0]}", Input).focus()
+
+    # --- editor-style line navigation ---
+
+    def _focused_index(self) -> int:
+        focused = self.focused
+        if focused is not None and focused.id and focused.id.startswith("edit-"):
+            key = focused.id[len("edit-"):]
+            if key in self._keys:
+                return self._keys.index(key)
+        return 0
+
+    def _focus_line(self, index: int) -> None:
+        key = self._keys[index % len(self._keys)]
+        self.query_one(f"#edit-{key}", Input).focus()
+
+    def action_next_field(self) -> None:
+        self._focus_line(self._focused_index() + 1)
+
+    def action_prev_field(self) -> None:
+        self._focus_line(self._focused_index() - 1)
 
     def on_input_submitted(self, _event: Input.Submitted) -> None:
         self.action_submit()

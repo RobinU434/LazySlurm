@@ -327,8 +327,11 @@ Press `u` on a pending job to open the property editor:
 | CPUs | `NumCPUs` | |
 | Memory/node | `MinMemoryNode` | Accepts `40G`, `4000M`, or plain MB — converted to the MB integer Slurm expects |
 
-The inputs are prefilled with the job's current values. `Tab` moves between fields,
-`Ctrl+S` applies, `Escape` aborts. Only fields you actually changed are sent, as a single
+The modal reads like a small file you edit: numbered lines, the `scontrol` key as the
+label, the job id as the "filename" in the border. The values are prefilled from the job.
+`Up`/`Down` and `Tab`/`Shift+Tab` move between lines (wrapping at either end), `Left`/`Right`,
+`Home`/`End` and `Backspace` edit within a line, `Ctrl+S` writes, `Escape` quits.
+Only fields you actually changed are sent, as a single
 `scontrol update jobid=<id> Key=Value ...` per job, and every command plus Slurm's reply is
 written to the Command Log.
 
