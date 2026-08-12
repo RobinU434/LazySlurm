@@ -20,6 +20,7 @@ from lazyslurm.models import (
     PartitionJob,
     PriorityInfo,
     RunningJob,
+    parse_mem_bytes,
 )
 
 USER = os.environ.get("USER", os.environ.get("LOGNAME", ""))
@@ -695,8 +696,11 @@ _SSTAT_FORMAT = (
     "MaxRSSNode,MaxRSSTask"
 )
 
+# JobID first so step rows can be told apart from the job row: sacct puts
+# ReqMem/Timelimit only on the job row and MaxRSS only on the step rows.
 _SACCT_STATS_FORMAT = (
-    "TotalCPU,Elapsed,ReqMem,AllocTRES,ReqTRES"
+    "JobID,TotalCPU,Elapsed,ReqMem,AllocTRES,ReqTRES,"
+    "AllocCPUS,NNodes,NTasks,Timelimit,MaxRSS"
 )
 
 
@@ -716,6 +720,13 @@ async def get_job_stats(job_id: str) -> JobStats | None:
         stats.total_cpu = sacct_result.get("TotalCPU", "N/A")
         stats.elapsed = sacct_result.get("Elapsed", "N/A")
         stats.req_mem = sacct_result.get("ReqMem", "N/A")
+        stats.time_limit = sacct_result.get("Timelimit", "N/A")
+        stats.alloc_cpus = _as_int(sacct_result.get("AllocCPUS"))
+        stats.nnodes = _as_int(sacct_result.get("NNodes"))
+        stats.ntasks = _as_int(sacct_result.get("NTasks"))
+        # sstat has no MaxRSS for a finished job; sacct's steps do.
+        if stats.max_rss in ("N/A", "", None) and sacct_result.get("MaxRSS"):
+            stats.max_rss = sacct_result["MaxRSS"]
         for tres_key in ("AllocTRES", "ReqTRES"):
             tres = sacct_result.get(tres_key, "")
             if "gres/gpu" in tres.lower():
@@ -731,6 +742,13 @@ async def get_job_stats(job_id: str) -> JobStats | None:
             stats.source = "sacct"
 
     return stats
+
+
+def _as_int(value: str | None) -> int:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return 0
 
 
 async def _get_sstat(job_id: str) -> JobStats | None:
@@ -779,18 +797,50 @@ async def _get_sacct_stats(job_id: str) -> dict[str, str] | None:
     if rc != 0 or not stdout.strip():
         return None
 
+    return parse_sacct_stats(stdout)
+
+
+def parse_sacct_stats(stdout: str) -> dict[str, str] | None:
+    """Fold sacct's job row and its step rows into one set of numbers.
+
+    sacct splits what the efficiency report needs across rows: the job row
+    carries the request (ReqMem, Timelimit, AllocCPUS) but no MaxRSS, while
+    each step row carries a MaxRSS and nothing about the request. The peak
+    across steps is the job's memory high-water mark, which is what seff
+    reports and what `.batch` alone would understate.
+    """
+    fields: dict[str, str] = {}
+    peak_rss = 0.0
+    peak_text = ""
+
     for line in stdout.strip().splitlines():
-        parts = line.split("|")
-        if len(parts) < 5:
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) < 11 or not parts[0] or parts[0].upper() == "JOBID":
             continue
-        return {
-            "TotalCPU": parts[0].strip(),
-            "Elapsed": parts[1].strip(),
-            "ReqMem": parts[2].strip(),
-            "AllocTRES": parts[3].strip(),
-            "ReqTRES": parts[4].strip(),
-        }
-    return None
+        job_row = "." not in parts[0]
+
+        if job_row and not fields:
+            fields = {
+                "TotalCPU": parts[1],
+                "Elapsed": parts[2],
+                "ReqMem": parts[3],
+                "AllocTRES": parts[4],
+                "ReqTRES": parts[5],
+                "AllocCPUS": parts[6],
+                "NNodes": parts[7],
+                "NTasks": parts[8],
+                "Timelimit": parts[9],
+            }
+
+        size = parse_mem_bytes(parts[10])
+        if size is not None and size > peak_rss:
+            peak_rss, peak_text = size, parts[10]
+
+    if not fields:
+        return None
+    if peak_text:
+        fields["MaxRSS"] = peak_text
+    return fields
 
 
 # ---------------------------------------------------------------------------
