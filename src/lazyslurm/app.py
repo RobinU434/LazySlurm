@@ -16,7 +16,7 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import DataTable, Footer, Input, RichLog, Static
 
 from lazyslurm import slurm
-from lazyslurm.models import Config
+from lazyslurm.models import Config, PriorityInfo
 from lazyslurm.widgets.detail_view import DetailView, parse_mem_bytes
 from lazyslurm.widgets.job_table import ActiveJobTable, CompletedJobTable, JobSelected, set_partition_colors, set_display_config
 from lazyslurm.widgets.metadata_view import MetadataView
@@ -938,13 +938,21 @@ class LazySlurmApp(App):
         self._stdout_path = detail.stdout_path
         self._stderr_path = detail.stderr_path
 
+        # A pending job gets one extra call — sprio for the partition, which
+        # answers both "what is my priority made of" and "how far up the queue
+        # am I". Everything else the Pending tab shows (estimated start, reason,
+        # dependency) is already in the scontrol output fetched above.
+        pending = detail.state.upper().startswith("PENDING")
+
         # Load logs and stats — but NOT live CPU/GPU on selection.
         # Live monitors are loaded lazily by _refresh_live_monitors when
         # the user views those tabs, avoiding expensive SSH/srun calls.
-        stdout_content, stderr_content, stats = await asyncio.gather(
+        stdout_content, stderr_content, stats, priority = await asyncio.gather(
             slurm.read_log_file(detail.stdout_path),
             slurm.read_log_file(detail.stderr_path),
             slurm.get_job_stats(job_id),
+            slurm.get_job_priority(job_id, detail.partition) if pending
+            else asyncio.sleep(0),
         )
 
         # Check we're still on this job (user may have navigated away)
@@ -960,7 +968,11 @@ class LazySlurmApp(App):
             detail_view.load_gpu("[dim]Press \\[r] or wait for auto-refresh[/]")
         except Exception:
             pass
-        metadata_view.load_detail(detail)
+        metadata_view.load_detail(
+            detail,
+            priority if isinstance(priority, PriorityInfo) else None,
+            priority_available=slurm.sprio_available(),
+        )
 
     # ------------------------------------------------------------------
     # Live CPU/GPU auto-refresh

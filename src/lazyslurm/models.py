@@ -252,6 +252,43 @@ class PartitionJob:
 
 
 @dataclass
+class PriorityInfo:
+    """One pending job's priority, broken into the factors sprio reports.
+
+    `rank`/`queued` place the job among the other pending jobs of its
+    partition: rank 1 is next in line. Both are 0 when the queue could not be
+    read (sprio needs accounting enabled).
+    """
+
+    job_id: str
+    total: int = 0
+    age: int = 0
+    fairshare: int = 0
+    job_size: int = 0
+    partition: int = 0
+    qos: int = 0
+    rank: int = 0
+    queued: int = 0
+
+    @property
+    def factors(self) -> list[tuple[str, int]]:
+        """The non-zero contributions, largest first."""
+        named = [
+            ("Age", self.age),
+            ("Fair-share", self.fairshare),
+            ("Job size", self.job_size),
+            ("Partition", self.partition),
+            ("QOS", self.qos),
+        ]
+        return sorted([f for f in named if f[1]], key=lambda f: -f[1])
+
+    @property
+    def ahead(self) -> int:
+        """How many pending jobs of the partition outrank this one."""
+        return max(self.rank - 1, 0)
+
+
+@dataclass
 class JobDetail:
     """Detailed job info parsed from scontrol show job or sacct."""
 

@@ -18,6 +18,7 @@ from lazyslurm.models import (
     NodeInfo,
     PartitionInfo,
     PartitionJob,
+    PriorityInfo,
     RunningJob,
 )
 
@@ -485,6 +486,203 @@ async def _file_exists(path: str) -> bool:
         _, _, rc = await _run_remote(f"test -f {shlex.quote(path)}")
         return rc == 0
     return await asyncio.to_thread(os.path.isfile, path)
+
+
+# ---------------------------------------------------------------------------
+# Why is this job pending? (sprio + what scontrol already told us)
+# ---------------------------------------------------------------------------
+
+# jobid|priority|age|fairshare|jobsize|partition|qos
+_SPRIO_FORMAT = "%i|%Y|%A|%F|%J|%P|%Q"
+
+
+def parse_sprio(stdout: str, job_id: str) -> PriorityInfo | None:
+    """Pull one job's priority factors, and its rank, out of sprio output.
+
+    The command is asked for a whole partition rather than a single job, so the
+    same output yields both the breakdown and the job's position in the queue —
+    one call instead of two.
+    """
+    target = job_id.strip()
+    rows: list[tuple[str, int]] = []
+    found: PriorityInfo | None = None
+
+    for line in stdout.strip().splitlines():
+        fields = [f.strip() for f in line.split("|")]
+        if len(fields) < 7 or not fields[0] or fields[0].upper() == "JOBID":
+            continue
+
+        def _int(index: int) -> int:
+            try:
+                return int(float(fields[index]))
+            except ValueError:
+                return 0
+
+        rows.append((fields[0], _int(1)))
+        if fields[0] == target:
+            found = PriorityInfo(
+                job_id=fields[0],
+                total=_int(1),
+                age=_int(2),
+                fairshare=_int(3),
+                job_size=_int(4),
+                partition=_int(5),
+                qos=_int(6),
+            )
+
+    if found is None:
+        return None
+    found.queued = len(rows)
+    found.rank = sum(1 for _, total in rows if total > found.total) + 1
+    return found
+
+
+# Set once sprio turns out not to exist, so the UI can say *why* the breakdown
+# is missing instead of just leaving a hole.
+_sprio_missing = False
+
+
+def sprio_available() -> bool:
+    """False once sprio has been found to be missing on this cluster."""
+    return not _sprio_missing
+
+
+async def get_job_priority(job_id: str, partition: str = "") -> PriorityInfo | None:
+    """Priority factors and queue position for a pending job.
+
+    Returns None when sprio is missing, priority accounting is off, or the job
+    is no longer pending — the caller shows a plain message instead.
+    """
+    global _sprio_missing
+    if not job_id:
+        return None
+    cmd = ["sprio", "--noheader", f"--format={_SPRIO_FORMAT}"]
+    if partition and partition not in ("N/A", "None"):
+        cmd += ["-p", partition]
+    try:
+        stdout, stderr, rc = await _run_cmd(*cmd)
+    except FileNotFoundError:  # local mode, sprio not installed
+        _sprio_missing = True
+        return None
+    if rc != 0:
+        if "not found" in stderr.lower() or "no such file" in stderr.lower():
+            _sprio_missing = True
+        return None
+    if not stdout.strip():
+        return None
+    return parse_sprio(stdout, job_id)
+
+
+def format_start_estimate(raw: str, now: datetime | None = None) -> str:
+    """Turn scontrol's StartTime into "~14:20 (in 2h10m)".
+
+    Slurm fills StartTime for a pending job with its backfill estimate, so no
+    extra `squeue --start` call is needed. It says Unknown when it cannot
+    estimate — usually because the job is blocked rather than merely queued.
+    """
+    value = (raw or "").strip()
+    if not value or value in ("Unknown", "N/A", "None", "(null)"):
+        return "not estimated yet — Slurm cannot schedule it while it is blocked"
+    try:
+        start = datetime.strptime(value, "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return value
+
+    now = now or datetime.now()
+    delta = start - now
+    seconds = int(delta.total_seconds())
+    when = start.strftime("%H:%M") if start.date() == now.date() else start.strftime("%b %d %H:%M")
+    if seconds <= 0:
+        return f"~{when} (due now)"
+    return f"~{when} (in {_humanize(seconds)})"
+
+
+def _humanize(seconds: int) -> str:
+    """43870 -> "12h11m", 300 -> "5m", 200000 -> "2d7h"."""
+    days, rest = divmod(seconds, 86400)
+    hours, rest = divmod(rest, 3600)
+    minutes = rest // 60
+    if days:
+        return f"{days}d{hours}h" if hours else f"{days}d"
+    if hours:
+        return f"{hours}h{minutes:02d}m" if minutes else f"{hours}h"
+    return f"{minutes}m" if minutes else "<1m"
+
+
+# Slurm's reason codes, in words. Matched exactly first, then by prefix, so the
+# whole QOSMax*/AssocMax* family is covered without listing every variant.
+_REASON_TEXT: dict[str, str] = {
+    "Resources": "waiting for enough free nodes to become available",
+    "Priority": "other jobs are ahead of it in the queue",
+    "Dependency": "waiting for another job to finish",
+    "DependencyNeverSatisfied": "its dependency can never be satisfied — cancel it",
+    "BeginTime": "held until its requested start time",
+    "JobHeldUser": "held by you — release it with `scontrol release`",
+    "JobHeldAdmin": "held by an administrator",
+    "Licenses": "waiting for a software license",
+    "ReqNodeNotAvail": "the nodes it asked for are down, drained or reserved",
+    "PartitionDown": "its partition is down",
+    "PartitionInactive": "its partition is inactive",
+    "PartitionNodeLimit": "it asks for more nodes than the partition allows",
+    "PartitionTimeLimit": "its time limit is longer than the partition allows",
+    "NodeDown": "a node it needs is down",
+    "Cleaning": "a previous job is still being cleaned up on its nodes",
+    "None": "it should start shortly",
+}
+
+_REASON_PREFIX: list[tuple[str, str]] = [
+    ("QOSMaxGRES", "you are at your QOS limit for GPUs"),
+    ("QOSMaxCpu", "you are at your QOS limit for CPUs"),
+    ("QOSMaxNode", "you are at your QOS limit for nodes"),
+    ("QOSMaxMem", "you are at your QOS limit for memory"),
+    ("QOSMaxJobs", "you are at your QOS limit for running jobs"),
+    ("QOSMaxSubmit", "you are at your QOS limit for submitted jobs"),
+    ("QOSMaxWall", "its time limit is longer than the QOS allows"),
+    ("QOSGrp", "your QOS group is at its resource limit"),
+    ("QOSMin", "it asks for less than the QOS minimum"),
+    ("QOSNotAllowed", "that QOS is not allowed on this partition"),
+    ("QOSResourceLimit", "the QOS resource limit is reached"),
+    ("AssocMaxJobs", "you are at your account's limit for running jobs"),
+    ("AssocMaxWall", "its time limit is longer than your account allows"),
+    ("AssocGrp", "your account group is at its resource limit"),
+    ("AssocMax", "you are at an account resource limit"),
+    ("ReqNodeNotAvail", "the nodes it asked for are down, drained or reserved"),
+    ("Reservation", "waiting for its reservation to begin"),
+]
+
+
+def explain_reason(
+    reason: str,
+    raw: dict[str, str] | None = None,
+    priority: PriorityInfo | None = None,
+) -> str:
+    """Say why a job is pending, in a sentence.
+
+    Falls back to the raw code when Slurm reports something unrecognized —
+    better a code than a wrong explanation.
+    """
+    code = (reason or "").strip().split("(")[0].strip()
+    if not code or code in ("N/A", "none"):
+        return "no reason reported"
+
+    text = _REASON_TEXT.get(code)
+    if text is None:
+        for prefix, phrase in _REASON_PREFIX:
+            if code.startswith(prefix):
+                text = phrase
+                break
+    if text is None:
+        return f"Slurm says: {code}"
+
+    # Fill in the specifics Slurm hands us elsewhere.
+    if code == "Priority" and priority is not None and priority.ahead:
+        plural = "job" if priority.ahead == 1 else "jobs"
+        text = f"{priority.ahead} {plural} ahead of it in the queue"
+    elif code.startswith("Dependency") and raw:
+        dependency = (raw.get("Dependency") or "").strip()
+        if dependency and dependency not in ("(null)", "None"):
+            text = f"waiting on {dependency}"
+    return text
 
 
 # ---------------------------------------------------------------------------
