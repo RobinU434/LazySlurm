@@ -35,3 +35,16 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lazyslurm"]
+
+[tool.hatch.build.targets.sdist]
+# Ship the project, not the working directory: local tool settings and caches
+# carry absolute home paths and are of no use to anyone installing the package.
+include = [
+    "src/lazyslurm",
+    "tests",
+    "img",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "pyproject.toml",
+]

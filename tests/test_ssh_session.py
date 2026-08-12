@@ -320,9 +320,9 @@ _FAKE_SSH = r"""
 import os, sys, time
 ready = sys.argv[1]
 print("debug1: Authenticating to login:22", flush=True)
-sys.stdout.write("mot824@login's password: "); sys.stdout.flush()
+sys.stdout.write("jdoe@login's password: "); sys.stdout.flush()
 password = sys.stdin.readline().strip()
-sys.stdout.write("\nDuo two-factor login for mot824\n\nPasscode or option (1-3): ")
+sys.stdout.write("\nDuo two-factor login for jdoe\n\nPasscode or option (1-3): ")
 sys.stdout.flush()
 code = sys.stdin.readline().strip()
 if password == "hunter2" and code == "123456":
@@ -340,7 +340,7 @@ class _FakeAuthSession(SSHSession):
 
     def __init__(self, script: str, ready: str, **kwargs) -> None:
         super().__init__(
-            "mot824@login", channel_command=["/bin/sh", "-s"], **kwargs
+            "jdoe@login", channel_command=["/bin/sh", "-s"], **kwargs
         )
         self._use_master = True  # exercise the auth path with the fake master
         self._script = script

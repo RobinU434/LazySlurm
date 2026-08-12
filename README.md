@@ -259,7 +259,7 @@ override colors in the config file (see [Configuration](#configuration)).
 The top line shows a summary of your jobs and cluster partitions:
 
 ```
-mot824  5 running  2 pending    gpu:10/5/1/16  cpu:42/58/0/100
+jdoe  5 running  2 pending    gpu:10/5/1/16  cpu:42/58/0/100
 ```
 
 Partition format is `name:A/I/O/T`:
