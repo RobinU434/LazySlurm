@@ -11,10 +11,11 @@ from pathlib import Path
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widgets import DataTable, Footer, Input, RichLog, Static
 
+from lazyslurm import help as help_topics
 from lazyslurm import slurm
 from lazyslurm.models import Config, PriorityInfo
 from lazyslurm.widgets.detail_view import DetailView, parse_mem_bytes
@@ -36,7 +37,11 @@ from lazyslurm.widgets.partition_view import (
 
 
 class HelpScreen(ModalScreen[None]):
-    """Overlay showing key bindings."""
+    """Key bindings for the panel the user is actually in.
+
+    The content comes from `lazyslurm.help`, which a test cross-checks against
+    the real BINDINGS so this cannot drift out of date again.
+    """
 
     BINDINGS = [
         Binding("escape", "dismiss", "Close"),
@@ -48,61 +53,26 @@ class HelpScreen(ModalScreen[None]):
         align: center middle;
     }
     HelpScreen > Vertical {
-        width: 72;
+        width: 78;
         height: auto;
-        max-height: 80%;
+        max-height: 90%;
         border: round $accent;
         background: $surface;
         padding: 1 2;
     }
+    HelpScreen VerticalScroll {
+        height: auto;
+        max-height: 100%;
+    }
     """
+
+    def __init__(self, context: str = help_topics.JOBS) -> None:
+        super().__init__()
+        self.context = context
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield Static(
-                "[bold underline]LazySlurm Help[/]\n\n"
-                "[bold]Navigation[/]\n"
-                "  [bold cyan]Up / Down[/]       Navigate job list (wraps between panels)\n"
-                "  [bold cyan]Tab / Shift+Tab[/] Switch right panel focus\n"
-                "  [bold cyan]Left / Right[/]    Switch right panel focus\n"
-                "  [bold cyan]\\[ / \\][/]          Switch Job Details tabs\n"
-                "  [bold cyan]( / )[/]           Switch Job Metadata tabs\n"
-                "  [bold cyan]Escape[/]          Close search bar\n\n"
-                "[bold]Actions[/]\n"
-                "  [bold cyan]/[/]               Filter jobs: plain text, or state:/part:/name:/id:/gpu: terms\n"
-                "  [bold cyan]m[/]               Bookmark / unbookmark job (★ pinned to top)\n"
-                "  [bold cyan]Enter[/]           Expand / collapse a job array (▸ row)\n"
-                "  [bold cyan]c[/]               Cancel selected job(s) (with confirmation)\n"
-                "  [bold cyan]Shift+C[/]         Force cancel job(s) (SIGKILL, no confirmation)\n"
-                "  [bold cyan]Ctrl+V[/]          Toggle multi-select mode (vim-visual)\n"
-                "  [bold cyan]s[/]               Resubmit terminated job (with confirmation)\n"
-                "  [bold cyan]u[/]               Edit pending job(s): runtime, partition, nodes, CPUs, memory\n"
-                "  [bold cyan]p[/]               Partition monitor: load, A/I/O/T, all users' jobs\n"
-                "  [bold cyan]Shift+U[/]         Account usage: CPU-hours and your fairshare\n"
-                "  [bold cyan]Enter[/]           (in the partition monitor) nodes of that partition\n"
-                "  [bold cyan]b[/]               View job's sbatch script (read-only, cached)\n"
-                "  [bold cyan]l[/]               Page the active log tab (less: / search, F follow, q quit)\n"
-                "  [bold cyan]e[/]               Open stdout in editor (vim/nano, set in config)\n"
-                "  [bold cyan]Shift+E[/]         Open stderr in editor\n"
-                "  [bold cyan]o[/]               SSH to job's compute node (suspends TUI)\n"
-                "  [bold cyan],[/]               Edit config file (~/.config/lazyslurm/config.toml)\n"
-                "  [bold cyan]r[/]               Force refresh all data\n"
-                "  [bold cyan]?[/]               Toggle this help screen\n"
-                "  [bold cyan]q[/]               Quit\n\n"
-                "[bold]Detail Tabs[/]\n"
-                "  [bold cyan]stdout[/]  Job standard output log\n"
-                "  [bold cyan]stderr[/]  Job standard error log\n"
-                "  [bold cyan]cpu[/]     Live process list from node (auto-refreshes)\n"
-                "  [bold cyan]gpu[/]     Live nvidia-smi from node (auto-refreshes)\n"
-                "  [bold cyan]stats[/]   CPU, memory, GPU, disk I/O + sparkline history\n\n"
-                "[bold]Cluster Bar (top line)[/]\n"
-                "  Shows your running/pending job counts and partition status.\n"
-                "  Partition format: [bold]name[/]:[bold]A[/]/[bold]I[/]/[bold]O[/]/[bold]T[/]\n"
-                "    [bold]A[/]=allocated  [bold]I[/]=idle  [bold]O[/]=other  [bold]T[/]=total nodes\n\n"
-                "[bold]Notifications[/]\n"
-                "  Terminal bell + desktop notification when a running job completes.\n\n"
-                "Press [bold]?[/] or [bold]Escape[/] to close."
-            )
+            yield VerticalScroll(Static(help_topics.render(self.context)))
 
 
 class ConfirmCancelScreen(ModalScreen[bool]):
@@ -1198,13 +1168,36 @@ class LazySlurmApp(App):
     # Actions
     # ------------------------------------------------------------------
 
+    def _help_context(self) -> str:
+        """Which panel the user is in, for the help screen."""
+        screen = self.screen
+        if isinstance(screen, PartitionScreen):
+            return help_topics.PARTITIONS
+        if isinstance(screen, NodeScreen):
+            return help_topics.NODES
+        if isinstance(screen, UsageScreen):
+            return help_topics.USAGE
+
+        focused = self.focused
+        if focused is not None:
+            if focused.id == "search-input":
+                return help_topics.JOBS   # the filter keys are documented there
+            for node in (focused, *focused.ancestors):
+                if getattr(node, "id", None) == "detail-view":
+                    return help_topics.DETAIL
+                if getattr(node, "id", None) == "metadata-view":
+                    return help_topics.METADATA
+        return help_topics.JOBS
+
     def action_help(self) -> None:
         if self._help_open:
             self.app.pop_screen()
             self._help_open = False
         else:
             self._help_open = True
-            self.push_screen(HelpScreen(), callback=self._on_help_dismissed)
+            self.push_screen(
+                HelpScreen(self._help_context()), callback=self._on_help_dismissed
+            )
 
     def _on_help_dismissed(self, _result: None) -> None:
         self._help_open = False

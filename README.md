@@ -135,7 +135,7 @@ Press `?` at any time for this list inside the app:
 | `o` | SSH to the selected job's compute node. Suspends the TUI; type `exit` to return |
 | `,` | Edit config file (`~/.config/lazyslurm/config.toml`) in your editor |
 | `r` | Force refresh all job data |
-| `?` | Toggle the help screen (also closes with `Escape`) |
+| `?` | Help for **the panel you are in** — job tables, Job Details, Job Metadata, partition monitor, node view or account usage. Other panels are listed at the bottom (also closes with `Escape`) |
 | `q` | Quit |
 
 ## Detail Tabs
