@@ -23,7 +23,9 @@
 
 LazySlurm gives you a live overview of your running and past jobs, lets you read
 stdout/stderr logs, inspect resource usage, monitor CPU and GPU activity on compute
-nodes, cancel or resubmit jobs, and more — all from a single terminal.
+nodes, cancel, edit or resubmit jobs, and watch how busy each partition is — all from a
+single terminal. It runs against the local cluster or, with `--remote`, over a single
+background SSH connection that handles two-factor authentication once at startup.
 
 ```
 +-----------------------+------------------------------------------------+
@@ -90,7 +92,7 @@ lazyslurm --refresh off
 
 ## Layout
 
-LazySlurm has a four-panel layout:
+LazySlurm has a five-panel main view:
 
 | Panel | Position | Content |
 |-------|----------|---------|
@@ -101,7 +103,8 @@ LazySlurm has a four-panel layout:
 | **Command Log** | Bottom-right | Timestamped log of actions and responses |
 
 A **cluster overview bar** at the top shows your running/pending counts and partition
-availability.
+availability. Press `p` for the separate full-screen [partition monitor](#partition-monitor),
+and `/` to reveal the search bar above the job tables.
 
 ## Key Bindings
 
@@ -543,7 +546,7 @@ editor = "vim"           # text editor for viewing logs ("vim", "nano", "less", 
 # Column display settings
 max_name_width = 16      # max characters for job name column (0 = unlimited)
 max_partition_width = 16 # max characters for partition column (0 = unlimited)
-abbreviate_states = false # use short state names: DONE, FAIL, TIME, CAN, OOM, ...
+abbreviate_states = false # use short state names: COMP, FAIL, TIME, CAN, OOM, ...
 
 # Cache settings
 # cache_max_age_days = 30  # auto-delete cached job info older than N days
@@ -609,7 +612,7 @@ lazyslurm [-h] [-r SEC] [-d N] [-u USER] [-p PARTITION]
 ## Requirements
 
 - Python 3.10+
-- Slurm CLI tools: `squeue`, `sacct`, `scontrol`, `sstat`, `scancel`
+- Slurm CLI tools: `squeue`, `sacct`, `sinfo`, `scontrol`, `sstat`, `scancel`, `sbatch`
 - [Textual](https://textual.textualize.io/) (installed automatically)
 - For GPU monitoring: `nvidia-smi` on compute nodes, `srun --overlap` support
 - For remote mode: SSH access to the cluster login node
