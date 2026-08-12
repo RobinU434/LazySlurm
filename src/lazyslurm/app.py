@@ -70,6 +70,7 @@ class HelpScreen(ModalScreen[None]):
                 "[bold]Actions[/]\n"
                 "  [bold cyan]/[/]               Search / filter jobs by ID, name, or partition\n"
                 "  [bold cyan]m[/]               Bookmark / unbookmark job (★ pinned to top)\n"
+                "  [bold cyan]Enter[/]           Expand / collapse a job array (▸ row)\n"
                 "  [bold cyan]c[/]               Cancel selected job(s) (with confirmation)\n"
                 "  [bold cyan]Shift+C[/]         Force cancel job(s) (SIGKILL, no confirmation)\n"
                 "  [bold cyan]Ctrl+V[/]          Toggle multi-select mode (vim-visual)\n"
@@ -639,6 +640,8 @@ class LazySlurmApp(App):
         # Current job log paths (for editor)
         self._stdout_path: str | None = None
         self._stderr_path: str | None = None
+        # Job id `c` will cancel: a task, or an array's base id
+        self._cancel_target: str | None = None
         # Multi-select state
         self._multiselect_mode: bool = False
         self._multiselect_table: str = ""  # "active" or "completed"
@@ -671,6 +674,7 @@ class LazySlurmApp(App):
             max_name=self.config.max_name_width,
             max_partition=self.config.max_partition_width,
             abbreviate=self.config.abbreviate_states,
+            collapse_arrays=self.config.collapse_arrays,
         )
 
         # Prune old cache entries. Point the script cache at the configured
@@ -1050,13 +1054,32 @@ class LazySlurmApp(App):
     # Bookmarks
     # ------------------------------------------------------------------
 
+    def _focused_job_table(self):
+        """Whichever job table holds the cursor, or None."""
+        active = self.query_one("#active-jobs", ActiveJobTable)
+        completed = self.query_one("#completed-jobs", CompletedJobTable)
+        if active.has_focus:
+            return active
+        if completed.has_focus:
+            return completed
+        return active if self._selected_source == "active" else completed
+
+    def _selected_array(self) -> tuple[str, list] | None:
+        """(base id, members) when the cursor sits on a collapsed array row."""
+        table = self._focused_job_table()
+        return table.selected_group() if table is not None else None
+
     def action_toggle_bookmark(self) -> None:
-        if self._selected_job_id is None:
+        # On a collapsed array, bookmark the array itself so the whole group
+        # pins to the top rather than one arbitrary task.
+        group = self._selected_array()
+        target = group[0] if group else self._selected_job_id
+        if target is None:
             return
-        if self._selected_job_id in self._bookmarked_ids:
-            self._bookmarked_ids.discard(self._selected_job_id)
+        if target in self._bookmarked_ids:
+            self._bookmarked_ids.discard(target)
         else:
-            self._bookmarked_ids.add(self._selected_job_id)
+            self._bookmarked_ids.add(target)
         self.query_one("#active-jobs", ActiveJobTable).set_bookmarks(self._bookmarked_ids)
         self.query_one("#completed-jobs", CompletedJobTable).set_bookmarks(self._bookmarked_ids)
 
@@ -1085,9 +1108,21 @@ class LazySlurmApp(App):
             )
             return
 
+        # A collapsed array cancels as a whole: `scancel 123` takes every task.
+        group = self._selected_array()
+        if group:
+            base, members = group
+            self._cancel_target = base
+            self.push_screen(
+                ConfirmCancelScreen([f"{base} (array, {len(members)} rows)"]),
+                callback=self._on_cancel_confirmed,
+            )
+            return
+
         if self._selected_job_id is None:
             self._set_status("No job selected")
             return
+        self._cancel_target = self._selected_job_id
         self.push_screen(
             ConfirmCancelScreen(self._selected_job_id),
             callback=self._on_cancel_confirmed,
@@ -1109,20 +1144,23 @@ class LazySlurmApp(App):
             await self._poll_jobs()
             return
 
-        if self._selected_job_id is None:
+        group = self._selected_array()
+        target = group[0] if group else self._selected_job_id
+        if target is None:
             self._set_status("No job selected")
             return
-        self._log(f"scancel --signal=KILL {self._selected_job_id}")
-        success, msg = await slurm.cancel_job(self._selected_job_id, force=True)
+        self._log(f"scancel --signal=KILL {target}")
+        success, msg = await slurm.cancel_job(target, force=True)
         self._log("force cancel", msg)
         if success:
             await self._poll_jobs()
 
     async def _on_cancel_confirmed(self, confirmed: bool | None) -> None:
-        if not confirmed or self._selected_job_id is None:
+        target = self._cancel_target or self._selected_job_id
+        if not confirmed or target is None:
             return
-        self._log(f"scancel {self._selected_job_id}")
-        success, msg = await slurm.cancel_job(self._selected_job_id)
+        self._log(f"scancel {target}")
+        success, msg = await slurm.cancel_job(target)
         self._log("cancel", msg)
         if success:
             await self._poll_jobs()
@@ -1158,11 +1196,15 @@ class LazySlurmApp(App):
         """
         active = self.query_one("#active-jobs", ActiveJobTable)
 
+        group = self._selected_array()
         if self._multiselect_mode and self._multiselect_ids:
             if self._multiselect_table != "active":
                 self._set_status("Only pending jobs can be edited")
                 return
-            ids = sorted(self._multiselect_ids)
+            # A selected row may stand for a whole array; edit its tasks.
+            ids = sorted(set(active.expand_ids(self._multiselect_ids)))
+        elif group and self._selected_source == "active":
+            ids = [job.job_id for job in group[1]]
         elif self._selected_job_id and self._selected_source == "active":
             ids = [self._selected_job_id]
         else:
@@ -1389,6 +1431,7 @@ class LazySlurmApp(App):
             max_name_width=int(saved.get("max_name_width", old.max_name_width)),
             max_partition_width=int(saved.get("max_partition_width", old.max_partition_width)),
             abbreviate_states=bool(saved.get("abbreviate_states", old.abbreviate_states)),
+            collapse_arrays=bool(saved.get("collapse_arrays", old.collapse_arrays)),
             cache_max_age_days=saved.get("cache_max_age_days", old.cache_max_age_days),
             script_cache_dir=os.path.expanduser(
                 str(saved.get("script_cache_dir", old.script_cache_dir))
@@ -1403,6 +1446,7 @@ class LazySlurmApp(App):
             max_name=self.config.max_name_width,
             max_partition=self.config.max_partition_width,
             abbreviate=self.config.abbreviate_states,
+            collapse_arrays=self.config.collapse_arrays,
         )
 
         # Log what changed

@@ -837,3 +837,15 @@ def test_get_node_jobs_asks_for_running_jobs_on_that_node(monkeypatch):
     assert "-w" in captured["args"] and "gpu-node01" in captured["args"]
     assert "--states=RUNNING" in captured["args"]
     assert "-u" not in captured["args"]  # everyone's jobs, not just ours
+
+
+def test_cluster_summary_counts_array_tasks_not_rows():
+    """A pending "123_[3-11]" row is nine jobs; the bar should say so."""
+    running = [
+        _rj("100", "RUNNING"),
+        _rj("200_0", "RUNNING"),
+        _rj("200_[1-9]", "PENDING"),
+    ]
+    out = slurm.format_cluster_summary(running, [], Config(user="bob"))
+    assert "2[/] running" in out   # 100 and 200_0
+    assert "9[/] pending" in out   # the whole range
