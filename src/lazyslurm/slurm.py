@@ -9,6 +9,7 @@ from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from lazyslurm.ssh import PromptCallback, SSHSession, quote_argv
 from lazyslurm.models import (
     CompletedJob,
     Config,
@@ -24,9 +25,10 @@ USER = os.environ.get("USER", os.environ.get("LOGNAME", ""))
 # Module-level config, set once from app.py via set_config().
 _config: Config = Config()
 
-# Multiplex SSH connections: the first command opens a master connection and
-# subsequent commands reuse it (ControlPersist keeps it warm), turning many
-# TCP+auth handshakes per poll into one. Biggest latency win for --remote mode.
+# Options for local-mode SSH to compute nodes (live CPU/GPU tabs). Remote mode
+# does not use these — it runs everything through the one session in ssh.py.
+# Multiplexing still matters here: the first call opens a master connection and
+# the rest reuse it, turning many handshakes per poll into one.
 _SSH_CONTROL_DIR = os.path.join(os.path.expanduser("~"), ".ssh", "cm-lazyslurm")
 try:
     os.makedirs(_SSH_CONTROL_DIR, mode=0o700, exist_ok=True)
@@ -46,6 +48,14 @@ if _SSH_CONTROL_DIR:
     ]
 _SSH_TIMEOUT = 8  # seconds
 
+# Options for the login-node -> compute-node hop in remote mode. That inner ssh
+# runs on the cluster, so it must never prompt: BatchMode makes it fail fast.
+_NODE_SSH_OPTS = [
+    "-o", "StrictHostKeyChecking=no",
+    "-o", "ConnectTimeout=3",
+    "-o", "BatchMode=yes",
+]
+
 
 def set_config(config: Config) -> None:
     """Set the module-level config (called once at app startup)."""
@@ -58,12 +68,51 @@ def set_config(config: Config) -> None:
 # ---------------------------------------------------------------------------
 
 
+# The single background SSH session used by every remote command. Created by
+# connect_remote() at startup; None in local mode.
+_session: SSHSession | None = None
+
+
+def get_session() -> SSHSession | None:
+    """Return the active SSH session, or None in local mode."""
+    return _session
+
+
+async def connect_remote(
+    prompt_cb: PromptCallback | None = None,
+    config: Config | None = None,
+) -> tuple[bool, str]:
+    """Open the one SSH session that all remote commands then share.
+
+    `prompt_cb(prompt, is_secret)` is awaited whenever the cluster asks for a
+    password or a 2FA verification code, and returns the answer (or None to
+    abort). Called once at startup; a no-op when not in remote mode.
+    """
+    global _session
+    cfg = config or _config
+    if not cfg.remote:
+        return True, "Local mode"
+    if _session is not None:
+        await _session.close()
+    _session = SSHSession(cfg.remote, prompt_cb=prompt_cb)
+    ok, msg = await _session.connect()
+    if not ok:
+        _session = None
+    return ok, msg
+
+
+async def disconnect_remote() -> None:
+    """Tear the shared SSH session down (called when the app exits)."""
+    global _session
+    if _session is not None:
+        await _session.close()
+        _session = None
+
+
 async def _run_cmd(*args: str) -> tuple[str, str, int]:
-    """Run a command locally or via SSH if remote mode is active."""
+    """Run a command locally, or in the shared SSH session in remote mode."""
     if _config.remote:
-        # Tunnel through SSH: join args into a single shell command
-        remote_cmd = " ".join(shlex.quote(a) for a in args)
-        return await _run_ssh(_config.remote, remote_cmd)
+        return await _run_remote(quote_argv(args))
     proc = await asyncio.create_subprocess_exec(
         *args,
         stdout=asyncio.subprocess.PIPE,
@@ -77,41 +126,29 @@ async def _run_cmd(*args: str) -> tuple[str, str, int]:
     )
 
 
-async def _run_ssh(host: str, remote_cmd: str) -> tuple[str, str, int]:
-    """Run a command on a remote host via SSH."""
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "ssh", *_SSH_OPTS, host, remote_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(), timeout=_SSH_TIMEOUT,
-        )
-        return (
-            stdout.decode(errors="replace"),
-            stderr.decode(errors="replace"),
-            proc.returncode or 0,
-        )
-    except asyncio.TimeoutError:
-        return "", "SSH timeout", 1
-    except OSError as e:
-        return "", str(e), 1
+async def _run_remote(remote_cmd: str, timeout: float | None = None) -> tuple[str, str, int]:
+    """Run a shell command on the login node through the shared session."""
+    if _session is None:
+        return "", "No SSH session — remote mode is not connected", 1
+    return await _session.run(remote_cmd, timeout=timeout)
 
 
 async def _ssh_cmd(node: str, remote_cmd: str) -> tuple[str, int]:
     """Run a command on a compute node.
 
-    In local mode: SSH directly to the node.
-    In remote mode: SSH via ProxyJump through the login node.
+    Local mode: SSH straight to the node. Remote mode: the hop to the node is
+    made *from the login node*, inside the existing session, rather than with a
+    local ProxyJump — a second local connection would trigger 2FA again.
     """
+    if _config.remote:
+        hop = "ssh " + " ".join(shlex.quote(o) for o in _NODE_SSH_OPTS)
+        stdout, _, rc = await _run_remote(
+            f"{hop} {shlex.quote(node)} {shlex.quote(remote_cmd)}"
+        )
+        return stdout, rc
     try:
-        cmd = ["ssh", *_SSH_OPTS]
-        if _config.remote:
-            cmd.extend(["-J", _config.remote])
-        cmd.extend([node, remote_cmd])
         proc = await asyncio.create_subprocess_exec(
-            *cmd,
+            "ssh", *_SSH_OPTS, node, remote_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -413,7 +450,7 @@ async def _guess_log_path(
 async def _file_exists(path: str) -> bool:
     """Check if a file exists (locally or on the remote host)."""
     if _config.remote:
-        _, _, rc = await _run_ssh(_config.remote, f"test -f {shlex.quote(path)}")
+        _, _, rc = await _run_remote(f"test -f {shlex.quote(path)}")
         return rc == 0
     return await asyncio.to_thread(os.path.isfile, path)
 
@@ -541,7 +578,7 @@ async def read_log_file(path: str | None, tail_lines: int = TAIL_LINES) -> str:
     if _config.remote:
         # Read file via SSH
         cmd = f"tail -n {tail_lines} {shlex.quote(path)} 2>/dev/null || echo '(file not found: {path})'"
-        stdout, _, rc = await _run_ssh(_config.remote, cmd)
+        stdout, _, rc = await _run_remote(cmd)
         return stdout if stdout.strip() else f"(file not found: {path})"
 
     if not os.path.isfile(path):

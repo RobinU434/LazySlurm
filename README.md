@@ -455,25 +455,68 @@ Run LazySlurm on your local machine while monitoring a remote cluster:
 lazyslurm --remote user@login.hpc.edu
 ```
 
-All Slurm commands (`squeue`, `sacct`, `scontrol`, `sstat`, `scancel`, `sbatch`) are
-transparently tunneled via SSH. Log files are read remotely. The GPU tab uses
-`srun --overlap` on the remote cluster. The SSH-to-node feature (`o`) connects through
-the login node via ProxyJump.
+### One connection, opened once
+
+LazySlurm opens a **single SSH session in the background at startup** and runs everything
+through it. It does not spawn `ssh` per Slurm call:
+
+1. An SSH *master* connection is started on a pty and authenticated once.
+2. A shell channel (`/bin/sh -s`) is opened over that master and kept alive for the whole
+   session.
+3. Each `squeue`, `sacct`, `scontrol`, `sstat`, `scancel`, `sbatch` — and every log-file
+   read — is written into that shell and its output read back. No new connection, no new
+   process, no re-authentication.
+
+Commands are serialized on the channel, so they queue rather than interleave. If the
+channel dies (network drop, remote logout), the next command reopens it automatically, and
+only re-authenticates if the master itself is gone. The session is closed when you quit.
+
+### Two-factor authentication
+
+Because the master owns a pty, whatever the cluster asks at login is captured and shown to
+you in a modal instead of being lost:
+
+```
+╭─ ssh user@login.hpc.edu ─────────────────────────────╮
+│ Duo two-factor login for user                        │
+│ Passcode or option (1-3):                            │
+│ ******                                               │
+╰────────────────────── enter send  esc cancel ────────╯
+```
+
+The label is the server's own prompt text, so it reads exactly as it would in a terminal —
+`Password:`, `Verification code:`, `Passcode or option (1-3):`, `Token_Response:` and so
+on. Input is masked (host-key `(yes/no)` questions are not). You are asked **once**, at
+startup, because every later command reuses that connection.
+
+If you mistype a code or press `Escape`, the Command Log says so and nothing is polled;
+press `r` to retry the connection. Failures report the server's own message (for example
+`Permission denied (keyboard-interactive)`) rather than a generic timeout.
+
+Everything else that shells out reuses the same authenticated connection, so 2FA is never
+requested twice:
+
+| Feature | How it reaches the cluster |
+|---------|---------------------------|
+| Slurm commands, log reads | Written into the shared shell channel |
+| Live CPU/GPU tabs | The hop to the compute node is made **from the login node**, inside the session |
+| SSH to node (`o`) | A `ProxyCommand` over the session's control socket (not `-J`) |
+| Fetching a log for the editor (`e`) | `scp` over the session's control socket |
+
+The control socket lives in `~/.ssh/cm-lazyslurm/`. If you already have a master
+connection to that host, it is reused and you are not prompted at all — passwordless keys
+therefore still connect with no interaction.
+
+### Other remote notes
 
 When using `--remote user@host`, the username is automatically used as the default
 `--user` for Slurm queries (no need to specify both).
 
+The archived-script fallback for resubmission is local-only: the archive lives on your
+machine while `sbatch` runs on the login node.
+
 **Login node warning**: If the local or remote hostname contains "login", LazySlurm shows
 a warning popup reminding you to be mindful of resource usage on shared login nodes.
-
-For best performance, configure SSH connection multiplexing in `~/.ssh/config`:
-
-```
-Host login.hpc.edu
-    ControlMaster auto
-    ControlPath ~/.ssh/sockets/%r@%h-%p
-    ControlPersist 600
-```
 
 ## Configuration
 

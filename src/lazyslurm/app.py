@@ -307,6 +307,74 @@ class EditJobScreen(ModalScreen[dict]):
         self.dismiss({})
 
 
+class SSHPromptScreen(ModalScreen[str | None]):
+    """Ask the user for whatever the cluster's SSH login is prompting for.
+
+    Used for passwords and for two-factor verification codes: the SSH session
+    forwards the server's own prompt text, so the label reads exactly like it
+    would in a terminal ("Verification code:", "Duo passcode:", ...).
+    Dismisses with the answer, or None if the user aborts.
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    DEFAULT_CSS = """
+    SSHPromptScreen {
+        align: center middle;
+    }
+    SSHPromptScreen > Vertical {
+        width: 56;
+        height: auto;
+        border: round $accent;
+        border-title-color: $text-muted;
+        border-title-align: left;
+        border-subtitle-color: $text-muted;
+        border-subtitle-align: right;
+        background: $surface;
+        padding: 0 1;
+    }
+    SSHPromptScreen Input {
+        width: 1fr;
+        height: 1;
+        border: none;
+        padding: 0;
+        background: $surface;
+    }
+    SSHPromptScreen Input:focus {
+        border: none;
+        padding: 0;
+        background: $boost;
+    }
+    SSHPromptScreen .prompt {
+        height: auto;
+        color: $text;
+    }
+    """
+
+    def __init__(self, host: str, prompt: str, secret: bool = True) -> None:
+        super().__init__()
+        self.host = host
+        self.prompt = prompt
+        self.secret = secret
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static(self.prompt, classes="prompt")
+            yield Input(password=self.secret, id="ssh-answer")
+
+    def on_mount(self) -> None:
+        box = self.query_one(Vertical)
+        box.border_title = f" ssh {self.host} "
+        box.border_subtitle = " enter send  esc cancel "
+        self.query_one("#ssh-answer", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self.dismiss(event.value)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class PartitionScreen(Screen):
     """Full-screen partition monitor.
 
@@ -531,14 +599,59 @@ class LazySlurmApp(App):
                     timeout=8,
                 )
 
+        # Remote mode: open the one SSH session everything runs through before
+        # the first poll, so any password / 2FA prompt is answered up front.
+        if self.config.remote:
+            self.call_after_refresh(self._start_remote_session)
+        else:
+            self.call_after_refresh(self._poll_jobs)
+
         # Polling (refresh=0 disables auto-refresh)
-        self.call_after_refresh(self._poll_jobs)
         if self.config.refresh > 0:
             self.set_interval(self.config.refresh, self._poll_jobs)
             if not self.config.no_live:
                 self.set_interval(self.config.refresh, self._refresh_live_monitors)
         else:
             self._log("auto-refresh", "disabled (refresh=0)")
+
+    # ------------------------------------------------------------------
+    # Remote SSH session
+    # ------------------------------------------------------------------
+
+    def _ssh_control_opt(self) -> str:
+        """`-o ControlPath=...` for the live session, so helpers reuse it.
+
+        Any ssh/scp we shell out to must ride the connection that is already
+        authenticated; opening a fresh one would prompt for 2FA again.
+        """
+        session = slurm.get_session()
+        if session is None:
+            return ""
+        return f"-o {shlex.quote('ControlPath=' + session.control_path)}"
+
+    def _proxy_command(self) -> str:
+        """ProxyCommand that hops to a compute node through the live session."""
+        return f"ssh {self._ssh_control_opt()} -W %h:%p {shlex.quote(self.config.remote)}"
+
+    async def _ssh_prompt(self, prompt: str, secret: bool) -> str | None:
+        """Ask the user for a password / verification code (SSH prompt callback)."""
+        return await self.push_screen_wait(
+            SSHPromptScreen(self.config.remote, prompt, secret)
+        )
+
+    async def _start_remote_session(self) -> None:
+        """Connect the shared SSH session, then start polling."""
+        self._log(f"ssh {self.config.remote}", "opening session...")
+        ok, msg = await slurm.connect_remote(self._ssh_prompt, self.config)
+        self._log("ssh", msg)
+        if not ok:
+            self.notify(msg, title="SSH connection failed", severity="error", timeout=10)
+            self._log("ssh", "press [bold]r[/] to retry")
+            return
+        await self._poll_jobs()
+
+    async def on_unmount(self) -> None:
+        await slurm.disconnect_remote()
 
     # ------------------------------------------------------------------
     # Data polling
@@ -1071,7 +1184,10 @@ class LazySlurmApp(App):
         node = slurm._first_node(self._selected_node)
         cmd_parts = ["ssh"]
         if self.config.remote:
-            cmd_parts.extend(["-J", self.config.remote])
+            # Jump through the *existing* session instead of `-J`, which would
+            # open a second connection to the login node and ask for the 2FA
+            # code again. The ProxyCommand rides the running master socket.
+            cmd_parts.extend(["-o", shlex.quote(f"ProxyCommand={self._proxy_command()}")])
         cmd_parts.append(node)
         cmd_str = " ".join(cmd_parts)
 
@@ -1221,8 +1337,11 @@ class LazySlurmApp(App):
                 delete=False,
             )
             tmp.close()
-            # scp the file
-            rc = os.system(f"scp -q {self.config.remote}:{shlex.quote(path)} {shlex.quote(tmp.name)}")
+            # scp over the session's control socket — no second authentication
+            rc = os.system(
+                f"scp -q {self._ssh_control_opt()} "
+                f"{self.config.remote}:{shlex.quote(path)} {shlex.quote(tmp.name)}"
+            )
             if rc != 0:
                 self._log(f"edit {label}", f"failed to fetch remote file")
                 os.unlink(tmp.name)
@@ -1278,6 +1397,11 @@ class LazySlurmApp(App):
 
     async def action_refresh(self) -> None:
         self._log("refresh")
+        # In remote mode a failed or dropped session is retried here — the
+        # user's only way back after cancelling or mistyping a 2FA code.
+        if self.config.remote and slurm.get_session() is None:
+            await self._start_remote_session()
+            return
         await self._poll_jobs()
         if self._selected_job_id:
             await self._load_job_details(self._selected_job_id)
