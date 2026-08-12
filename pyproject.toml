@@ -1,6 +1,6 @@
 [project]
 name = "lazyslurm-py"
-version = "0.2.0"
+dynamic = ["version"]
 description = "A TUI for monitoring Slurm HPC jobs"
 readme = "README.md"
 license = "MIT"
@@ -28,6 +28,11 @@ dev = [
 
 [project.scripts]
 lazyslurm = "lazyslurm.__main__:main"
+
+[tool.hatch.version]
+# Single source of truth: the packaged __version__, so the distribution version
+# and lazyslurm.__version__ cannot drift apart.
+path = "src/lazyslurm/__init__.py"
 
 [build-system]
 requires = ["hatchling"]
