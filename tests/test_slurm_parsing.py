@@ -849,3 +849,13 @@ def test_cluster_summary_counts_array_tasks_not_rows():
     out = slurm.format_cluster_summary(running, [], Config(user="bob"))
     assert "2[/] running" in out   # 100 and 200_0
     assert "9[/] pending" in out   # the whole range
+
+
+def test_as_int_truncates_floats_slurm_reports():
+    # CPUsLoad comes through as "16.02"; the parser has to accept it.
+    assert slurm._as_int("16.02") == 16
+    assert slurm._as_int("8") == 8
+    assert slurm._as_int(None) == 0
+    assert slurm._as_int("") == 0
+    assert slurm._as_int("N/A") == 0
+

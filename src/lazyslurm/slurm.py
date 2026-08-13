@@ -62,6 +62,17 @@ _NODE_SSH_OPTS = [
 ]
 
 
+def _as_int(value: str | None) -> int:
+    """Parse a Slurm numeric field, truncating toward zero. 0 when unparsable.
+
+    Goes through ``float`` on purpose: Slurm reports CPUsLoad as ``16.02``.
+    """
+    try:
+        return int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return 0
+
+
 def set_config(config: Config) -> None:
     """Set the module-level config (called once at app startup)."""
     global _config
@@ -895,13 +906,6 @@ async def get_job_stats(job_id: str) -> JobStats | None:
     return stats
 
 
-def _as_int(value: str | None) -> int:
-    try:
-        return int(str(value).strip())
-    except (TypeError, ValueError):
-        return 0
-
-
 async def _get_sstat(job_id: str) -> JobStats | None:
     """Get live resource usage for a running job via sstat."""
     stdout, _, rc = await _run_cmd(
@@ -1423,13 +1427,6 @@ _SINFO_NODE_FIELDS = (
 )
 # Fallback for Slurm versions without those -O field names; no GresUsed.
 _SINFO_NODE_FORMAT = "%N|%T|%C|%m|%e|%O|%G||%E"
-
-
-def _as_int(value: str) -> int:
-    try:
-        return int(float(value.strip()))
-    except (ValueError, AttributeError):
-        return 0
 
 
 def _as_float(value: str) -> float:
