@@ -21,6 +21,34 @@ _CONFIG_KEYS = {
     "partition_order": ("partition_order", list),
 }
 
+# Settings that exist only in the config file — no CLI equivalent. Together with
+# _CONFIG_KEYS this is the whole vocabulary of config.toml, and the one place to
+# add a key so that both the reader and the unknown-key check see it.
+_FILE_ONLY_KEYS = frozenset({
+    "partition_colors",
+    "editor",
+    "pager",
+    "max_name_width",
+    "max_partition_width",
+    "abbreviate_states",
+    "collapse_arrays",
+    "cache_max_age_days",
+    "script_cache_dir",
+})
+
+KNOWN_CONFIG_KEYS = frozenset(_CONFIG_KEYS) | _FILE_ONLY_KEYS
+
+
+def unknown_config_keys(saved: dict) -> list[str]:
+    """Config-file keys nothing reads — a typo, or a setting since renamed.
+
+    Such a key is silently inert today, which is the hardest kind of config
+    problem to diagnose because the file looks right. Reported, never rejected:
+    one typo must not cost the user every other setting they configured.
+    Nested tables are checked by table name only.
+    """
+    return sorted(key for key in saved if key not in KNOWN_CONFIG_KEYS)
+
 
 def parse_cache_max_age(raw: object) -> int | None:
     """Resolve ``cache_max_age_days`` from config. None means "never prune".
@@ -205,7 +233,11 @@ def main() -> None:
     )
 
     from lazyslurm.app import LazySlurmApp
-    app = LazySlurmApp(config=config, config_overrides=overrides)
+    app = LazySlurmApp(
+        config=config,
+        config_overrides=overrides,
+        config_warnings=unknown_config_keys(saved),
+    )
     app.run()
 
 

@@ -683,10 +683,17 @@ class LazySlurmApp(App):
         Binding("right_parenthesis", "next_meta_tab", show=False),
     ]
 
-    def __init__(self, config: Config | None = None, config_overrides: list[str] | None = None, **kwargs) -> None:
+    def __init__(
+        self,
+        config: Config | None = None,
+        config_overrides: list[str] | None = None,
+        config_warnings: list[str] | None = None,
+        **kwargs,
+    ) -> None:
         super().__init__(**kwargs)
         self.config = config or Config()
         self._config_overrides = config_overrides or []
+        self._config_warnings = config_warnings or []
         # Track which right panel has focus: "detail" or "metadata"
         self._right_focus: str = "detail"
         # Currently selected job
@@ -777,6 +784,10 @@ class LazySlurmApp(App):
         # Log config overrides
         for override in self._config_overrides:
             self._log("config override", override)
+
+        # A key nothing reads is inert, and the file looks right — so say so.
+        for key in self._config_warnings:
+            self._log("config file", f"ignoring unknown setting: {key}")
 
         # Login node warning
         import socket
@@ -1555,10 +1566,15 @@ class LazySlurmApp(App):
     def _reload_config(self) -> None:
         """Reload config from disk and apply changes live."""
         from lazyslurm import config as persistent_config
-        from lazyslurm.__main__ import parse_cache_max_age
+        from lazyslurm.__main__ import parse_cache_max_age, unknown_config_keys
 
         saved = persistent_config.load()
         old = self.config
+
+        # The user has just been editing the file, so a typo made here is the
+        # one worth catching immediately.
+        for key in unknown_config_keys(saved):
+            self._log("config file", f"ignoring unknown setting: {key}")
 
         # Rebuild config from file, preserving CLI-only values (remote, user)
         self.config = Config(

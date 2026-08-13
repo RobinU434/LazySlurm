@@ -447,3 +447,43 @@ def test_cache_job_paths_skips_the_rewrite_when_nothing_changed(tmp_path, monkey
     cfg.cache_job_paths("42", stdout_path="/w/other.out", work_dir="/w")
     assert len(writes) == 2
     assert cfg.get_cached_log_paths("42") == ("/w/other.out", None)
+
+
+# ---------------------------------------------------------------------------
+# unknown config keys are reported, never rejected
+# ---------------------------------------------------------------------------
+
+
+def test_unknown_config_keys_flags_typos_only():
+    from lazyslurm.__main__ import unknown_config_keys
+
+    saved = {
+        "refresh": 2.0,                        # CLI-backed key
+        "editor": "nvim",                      # file-only key
+        "partition_colors": {"gpu": "green"},  # nested table, checked by name
+        "reffresh": 2.0,                       # typo
+        "editr": "nvim",                       # typo
+    }
+    assert unknown_config_keys(saved) == ["editr", "reffresh"]
+
+
+def test_every_documented_template_key_is_known():
+    # The shipped template must not advertise a setting the loader ignores.
+    import re
+    from importlib.resources import files
+    from lazyslurm.__main__ import KNOWN_CONFIG_KEYS
+
+    text = files("lazyslurm").joinpath("templ", "config.toml").read_text()
+    documented = set()
+    for line in text.splitlines():
+        table = re.match(r"#\s*\[([a-z_]+)\]", line)
+        if table:
+            # Keys below a table header belong to it (gpu = "green"), and the
+            # unknown-key check only looks at table names anyway.
+            documented.add(table.group(1))
+            break
+        key = re.match(r"#\s*([a-z_]+)\s*=", line)
+        if key:
+            documented.add(key.group(1))
+    assert documented, "no settings found in the template"
+    assert documented <= set(KNOWN_CONFIG_KEYS), documented - set(KNOWN_CONFIG_KEYS)
