@@ -880,7 +880,6 @@ def test_as_int_truncates_floats_slurm_reports():
     assert slurm._as_int("N/A") == 0
 
 
-
 def test_importing_slurm_does_not_touch_the_ssh_dir():
     # The control dir is created at the point of use, not at import time.
     assert isinstance(slurm._SSH_CONTROL_DIR, Path)
