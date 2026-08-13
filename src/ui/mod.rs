@@ -5,8 +5,17 @@
 //! expansion, cursor movement — and are asserted directly in tests. Rendering
 //! turns that state into cells and nothing more.
 
+pub mod app;
+pub mod event;
 pub mod filter;
 pub mod job_table;
+pub mod layout;
+pub mod render;
+pub mod terminal;
+pub mod text;
+pub mod theme;
 
+pub use app::{run, App};
 pub use filter::{matches, parse_query, Field, Filterable, Op, Term};
 pub use job_table::{Depth, JobRow, JobTable, Row, PLACEHOLDER_KEY};
+pub use theme::Theme;

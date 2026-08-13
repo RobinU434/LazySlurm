@@ -1,43 +1,37 @@
 //! Entry point for the `lazyslurm` binary.
 
+use std::process::ExitCode;
 use std::sync::Arc;
 
 use lazyslurm::cli::Args;
 use lazyslurm::slurm::{LocalRunner, Slurm};
 use lazyslurm::startup::Settings;
-use lazyslurm::VERSION;
+use lazyslurm::ui::{run, App};
 
 #[tokio::main]
-async fn main() {
+async fn main() -> ExitCode {
     let args = Args::parse_args();
     let settings = Settings::discover(&args);
 
+    // Anything worth telling the user about startup is shown in the command log
+    // rather than printed, since the screen is about to be taken over.
+    let mut notes = settings.notes.clone();
+    notes.extend(settings.prune_caches());
+    notes.extend(settings.overrides.iter().map(|entry| entry.to_string()));
+
     // TODO(P8): a remote target needs the SSH session as its transport.
-    let slurm = Slurm::new(Box::new(LocalRunner), settings.config.clone())
-        .with_cache(Arc::new(settings.log_cache()));
-
-    // TODO(P4): replace this with the terminal UI. Until then the binary is a
-    // working front end for the query layer, which is what makes it testable
-    // against a real cluster while the UI is being built.
-    println!("lazyslurm {VERSION} (Rust) — TUI not yet implemented");
-
-    for note in settings.notes.iter().chain(settings.prune_caches().iter()) {
-        println!("  {note}");
-    }
-    for entry in &settings.overrides {
-        println!("  config override: {entry}");
-    }
-
-    let jobs = slurm.running_jobs().await;
-    println!(
-        "\n{} active job(s) for {}",
-        jobs.len(),
-        settings.config.effective_user()
+    let slurm = Arc::new(
+        Slurm::new(Box::new(LocalRunner), settings.config.clone())
+            .with_cache(Arc::new(settings.log_cache())),
     );
-    for job in jobs.iter().take(20) {
-        println!(
-            "  {:<14} {:<20} {:<10} {:<10} {}",
-            job.job_id, job.name, job.state, job.elapsed, job.partition
-        );
+
+    let app = App::new(settings.config);
+    match run(slurm, app, notes).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            // The terminal has been restored by now, so this is visible.
+            eprintln!("lazyslurm: {error:#}");
+            ExitCode::FAILURE
+        }
     }
 }
