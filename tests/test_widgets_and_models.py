@@ -425,3 +425,24 @@ def test_cache_max_age_zero_means_never_not_delete_everything():
     assert parse_cache_max_age("7") == 7
     assert parse_cache_max_age("nonsense") == 30
 
+
+def test_cache_job_paths_skips_the_rewrite_when_nothing_changed(tmp_path, monkeypatch):
+    monkeypatch.setattr(cfg, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "LOG_CACHE_FILE", tmp_path / "log_cache.json")
+
+    writes = []
+    real_save = cfg._save_log_cache
+    monkeypatch.setattr(
+        cfg, "_save_log_cache",
+        lambda cache: (writes.append(1), real_save(cache))[1],
+    )
+
+    cfg.cache_job_paths("42", stdout_path="/w/out", work_dir="/w")
+    assert len(writes) == 1
+    # Same values again — the file must not be rewritten.
+    cfg.cache_job_paths("42", stdout_path="/w/out", work_dir="/w")
+    assert len(writes) == 1
+    # A changed value still goes through.
+    cfg.cache_job_paths("42", stdout_path="/w/other.out", work_dir="/w")
+    assert len(writes) == 2
+    assert cfg.get_cached_log_paths("42") == ("/w/other.out", None)

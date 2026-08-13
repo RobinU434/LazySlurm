@@ -132,7 +132,7 @@ def cache_job_paths(
     if not any((stdout_path, stderr_path, command, work_dir, submit_line)):
         return
     cache = _load_log_cache()
-    entry = cache.get(job_id, {})
+    entry = dict(cache.get(job_id, {}))
     if stdout_path:
         entry["stdout"] = stdout_path
     if stderr_path:
@@ -143,6 +143,16 @@ def cache_job_paths(
         entry["submit_line"] = submit_line
     if work_dir:
         entry["workdir"] = work_dir
+    old = cache.get(job_id)
+    unchanged = old is not None and all(
+        old.get(k) == v for k, v in entry.items() if k != "ts"
+    )
+    # This runs on every job selection, and a full read-modify-write of a cache
+    # holding thousands of entries is not worth doing when nothing changed. The
+    # timestamp is still refreshed once a day so a job the user keeps visiting
+    # does not age out of the cache under their cursor.
+    if unchanged and time.time() - float(old.get("ts", 0) or 0) < 86400:
+        return
     entry["ts"] = time.time()
     cache[job_id] = entry
     _save_log_cache(cache)
