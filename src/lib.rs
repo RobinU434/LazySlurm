@@ -18,6 +18,7 @@ pub mod config;
 pub mod model;
 pub mod slurm;
 pub mod startup;
+pub mod ui;
 
 /// The crate version, as published to both crates.io and PyPI.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
