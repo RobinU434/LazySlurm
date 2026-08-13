@@ -277,6 +277,9 @@ def _app_with_jobs(monkeypatch, jobs=RUNNING):
         return None  # detail panels stay empty; not what these tests are about
 
     monkeypatch.setattr(slurm, "get_job_detail", _no_detail)
+    # get_job_stats shells out to sstat, which is absent off a cluster; these
+    # tests are about row actions, not stats.
+    monkeypatch.setattr(slurm, "get_job_stats", _no_detail)
     return LazySlurmApp(config=Config(refresh=0, no_live=True, no_gpu=True))
 
 
