@@ -216,6 +216,14 @@ a blank where the fallback field has the answer. Worth fixing in the Python too.
 - **`g`/`G`** are bound on the job tables only. The full-screen panels do not
   advertise them and do not handle them; add to their binding tables if wanted.
 
+## Handing over
+
+The one remaining task needs a cluster. [AGENT_HANDOFF.md](AGENT_HANDOFF.md) is
+the entry point for whoever has one — orientation, how to turn cluster access
+into permanent fixtures, how to drive the interface without a human at the
+keyboard, the safety rules for the destructive keys, and what to compare each
+number against.
+
 ## Releasing
 
 Two things stand between here and a release, and **neither has been done**:

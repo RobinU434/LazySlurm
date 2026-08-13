@@ -9,6 +9,12 @@ you got it right.
 
 ---
 
+> **Status: every phase below is implemented.** What remains is validation
+> against a real cluster and the release itself — see
+> [AGENT_HANDOFF.md](AGENT_HANDOFF.md). This document is kept as the record of
+> what was built and why; §6 (behaviour that is easy to lose) and §11 (fidelity
+> rules) still govern changes.
+
 ## 0. How to use this plan (agent workflow)
 
 This document is written for an agent working in a loop. For **every** work item:

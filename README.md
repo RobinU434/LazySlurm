@@ -345,7 +345,9 @@ mean:
   listed with their reasoning in [DIVERGENCES.md](DIVERGENCES.md).
 
 Porting notes and the phase-by-phase plan are in
-[RUST_PORT_PLAN.md](RUST_PORT_PLAN.md) and [PORT_STATUS.md](PORT_STATUS.md).
+[RUST_PORT_PLAN.md](RUST_PORT_PLAN.md) and [PORT_STATUS.md](PORT_STATUS.md). If
+you have a cluster and want to help finish it,
+[AGENT_HANDOFF.md](AGENT_HANDOFF.md) says exactly what is left.
 
 ## Development
 

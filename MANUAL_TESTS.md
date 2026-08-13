@@ -10,6 +10,30 @@ against Slurm, and whether the terminal survives.
 **Record the result.** Copy this file, tick as you go, and note anything odd —
 including things that worked but looked wrong.
 
+## If you are an agent
+
+Read [AGENT_HANDOFF.md](AGENT_HANDOFF.md) first — it covers how to drive the
+interface without a human at the keyboard, and what to compare each number
+against.
+
+Two things that will not be obvious:
+
+- **The program needs a real terminal.** With a redirected stdout it has no size
+  and draws nothing. Use `scripts/drive_tui.py`, which allocates a pty, sizes
+  it, sends keystrokes on a schedule and prints what was drawn.
+- **Sections 4 and 7 cancel, edit and resubmit real jobs.** Submit your own
+  scratch jobs and act only on those:
+  ```sh
+  for i in 1 2 3; do sbatch --wrap 'sleep 600' -J lazyslurm-test-$i; done
+  ```
+  Filter to them (`/name:lazyslurm-test`) before pressing anything, so the
+  cursor cannot be on somebody else's work. `Shift+C` has no confirmation.
+
+Some of this list cannot be judged from captured text — whether a redraw
+flickered, whether colours are readable, whether a resize looked right. Do those
+by eye at least once. Everything else can be checked by grepping a captured
+frame.
+
 ---
 
 ## 1. Local mode, on a login node
