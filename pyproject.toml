@@ -27,6 +27,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=8",
+    "pytest-cov>=5",
 ]
 
 [project.scripts]
@@ -40,6 +41,35 @@ path = "src/lazyslurm/__init__.py"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.coverage.run]
+# Measure the installed package by import name, not by path: the tests run
+# against the editable install, so a path source would report 0% for every file.
+source = ["lazyslurm"]
+branch = true
+
+[tool.coverage.paths]
+# Map the editable install back onto the working tree, so the report names
+# files the way the repository does.
+source = ["src/lazyslurm", "*/site-packages/lazyslurm"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+# A floor, not a target: it exists to catch a drop, and should be raised as
+# coverage rises. Set a little below the current 70% so an ordinary refactor
+# does not trip it; `pytest --cov` fails below it.
+fail_under = 68
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    'if __name__ == "__main__":',
+    "raise NotImplementedError",
+    "@overload",
+]
+
+[tool.coverage.html]
+directory = "htmlcov"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lazyslurm"]

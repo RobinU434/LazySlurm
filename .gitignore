@@ -8,6 +8,12 @@ build/
 *.swo
 .DS_Store
 
+# Coverage output
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
 CLAUDE.md
 *.lock
 
