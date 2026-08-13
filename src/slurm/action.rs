@@ -4,10 +4,11 @@
 //! none of them is fatal: a failed `scancel` is a line in the command log, not
 //! an error that unwinds the app.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::model::RunningJob;
 
+use super::cache::ScriptStore;
 use super::fs::file_exists;
 use super::transport::CommandRunner;
 
@@ -307,12 +308,35 @@ pub async fn get_batch_script(runner: &dyn CommandRunner, job_id: &str) -> Optio
     (!output.stdout.trim().is_empty()).then_some(output.stdout)
 }
 
+/// A local path to the job's sbatch script, fetching and archiving it if needed.
+///
+/// Uses the archive when one is held (all tasks of an array share it), otherwise
+/// fetches from Slurm and stores the text. `None` when the script is neither
+/// archived nor still retrievable.
+///
+/// Worth calling opportunistically whenever `scontrol` answers about a job: that
+/// is exactly the window in which the script can still be had, and after it
+/// closes the only copy is the one archived here.
+pub async fn archive_batch_script(
+    runner: &dyn CommandRunner,
+    store: &dyn ScriptStore,
+    job_id: &str,
+) -> Option<PathBuf> {
+    if let Some(archived) = store.archived(job_id) {
+        return Some(archived);
+    }
+    let text = get_batch_script(runner, job_id).await?;
+    store.archive(job_id, &text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::slurm::cache::testing::MemoryScriptStore;
     use crate::slurm::transport::testing::StubRunner;
     use crate::slurm::transport::Output;
     use rstest::rstest;
+    use std::sync::Arc;
 
     fn tokens(values: &[&str]) -> Vec<String> {
         values.iter().map(|v| (*v).to_string()).collect()
@@ -542,6 +566,45 @@ mod tests {
         let outcome = update_job(&runner, "1234", &[("partition", "nope")]).await;
         assert!(!outcome.success);
         assert!(outcome.message.contains("Invalid partition name"));
+    }
+
+    #[tokio::test]
+    async fn archives_a_script_the_first_time_it_is_asked_for() {
+        let runner = Arc::new(StubRunner::with_stdout("#!/bin/bash\necho hi\n"));
+        let store = MemoryScriptStore::default();
+
+        let path = archive_batch_script(&runner.clone(), &store, "123").await;
+
+        assert_eq!(path, Some(PathBuf::from("/archive/123.sh")));
+        assert_eq!(store.text("123").as_deref(), Some("#!/bin/bash\necho hi\n"));
+        assert_eq!(runner.only_call()[0], "scontrol");
+    }
+
+    #[tokio::test]
+    async fn uses_the_archive_instead_of_asking_slurm_again() {
+        let runner = Arc::new(StubRunner::with_stdout(""));
+        let store = MemoryScriptStore::default();
+        store.seed("123", "#!/bin/bash\ncached\n");
+
+        // An array task resolves to the same archived script as its base id.
+        let path = archive_batch_script(&runner.clone(), &store, "123_7").await;
+
+        assert_eq!(path, Some(PathBuf::from("/archive/123.sh")));
+        assert!(runner.calls().is_empty(), "Slurm should not be consulted");
+    }
+
+    #[tokio::test]
+    async fn reports_a_script_that_is_gone_for_good() {
+        // Past MinJobAge scontrol fails — and still exits 0.
+        let runner = StubRunner::new(|_| Output {
+            stdout: String::new(),
+            stderr: "job script retrieval failed: Invalid job id specified".into(),
+            code: 0,
+        });
+        let store = MemoryScriptStore::default();
+
+        assert_eq!(archive_batch_script(&runner, &store, "123").await, None);
+        assert_eq!(store.text("123"), None);
     }
 
     #[tokio::test]

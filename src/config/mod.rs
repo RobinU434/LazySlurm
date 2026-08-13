@@ -4,6 +4,16 @@
 //! over the persistent config file layered over defaults. Resolution itself lives
 //! in the CLI and file modules; this is just the result.
 
+pub mod file;
+pub mod log_cache;
+pub mod paths;
+pub mod script_cache;
+
+pub use file::{FileConfig, LoadError};
+pub use log_cache::{JobRecord, LogCache};
+pub use paths::Paths;
+pub use script_cache::ScriptCache;
+
 use std::collections::BTreeMap;
 
 /// How often to poll, in seconds, when the user has not said otherwise.

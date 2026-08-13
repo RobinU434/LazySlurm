@@ -8,6 +8,7 @@
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use chrono::{Datelike, Duration, Local, NaiveDate};
 
@@ -18,6 +19,7 @@ use crate::model::{
     PriorityInfo, RunningJob, UsageRow,
 };
 
+use super::cache::DetailCache;
 use super::fs::file_exists;
 use super::parse;
 use super::transport::CommandRunner;
@@ -165,6 +167,9 @@ pub struct Slurm {
     runner: Box<dyn CommandRunner>,
     config: Config,
     availability: Availability,
+    /// Where to write down what Slurm is about to forget. Optional: without one
+    /// everything still works, but an aged-out job loses its log paths.
+    cache: Option<Arc<dyn DetailCache>>,
 }
 
 impl Slurm {
@@ -174,7 +179,14 @@ impl Slurm {
             runner,
             config,
             availability: Availability::default(),
+            cache: None,
         }
+    }
+
+    /// Remember job details across the `MinJobAge` cliff using `cache`.
+    pub fn with_cache(mut self, cache: Arc<dyn DetailCache>) -> Self {
+        self.cache = Some(cache);
+        self
     }
 
     /// The transport, for callers that run actions or read files.
@@ -277,14 +289,20 @@ impl Slurm {
 
         if output.is_useful() && !output.stdout.contains("Invalid job id") {
             let raw = parse::scontrol(&output.stdout);
-            return Some(JobDetail {
+            let detail = JobDetail {
                 job_id: job_id.to_string(),
                 stdout_path: raw.get("StdOut").cloned(),
                 stderr_path: raw.get("StdErr").cloned(),
                 work_dir: raw.get("WorkDir").cloned().unwrap_or_default(),
                 raw,
                 source: DetailSource::Scontrol,
-            });
+            };
+            // This is the only window in which these paths exist. Write them
+            // down now; after MinJobAge nothing can recover them.
+            if let Some(cache) = &self.cache {
+                cache.remember(job_id, &detail);
+            }
+            return Some(detail);
         }
 
         self.job_detail_from_sacct(job_id).await
@@ -314,24 +332,55 @@ impl Slurm {
             .map(|line| line.split('|').map(str::trim).collect::<Vec<_>>())
             .find(|fields| fields.len() >= 20 && !fields[0].contains('.'))?;
 
-        let raw: BTreeMap<String, String> = SACCT_DETAIL_KEYS
+        let mut raw: BTreeMap<String, String> = SACCT_DETAIL_KEYS
             .iter()
             .zip(line.iter())
             .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
             .collect();
 
-        let work_dir = raw.get("WorkDir").cloned().unwrap_or_default();
+        let mut work_dir = raw.get("WorkDir").cloned().unwrap_or_default();
         let job_name = raw.get("JobName").cloned().unwrap_or_default();
 
-        let stdout_path = self
-            .guess_log_path(&work_dir, job_id, "out", &job_name)
-            .await;
-        let mut stderr_path = self
-            .guess_log_path(&work_dir, job_id, "err", &job_name)
-            .await;
+        // Paths written down while the job was still in slurmctld beat anything
+        // we could guess, so they are consulted first.
+        let cached = self
+            .cache
+            .as_ref()
+            .map(|cache| cache.recall_log_paths(job_id));
+        let (mut stdout_path, mut stderr_path) = match cached {
+            Some((out, err)) if out.is_some() || err.is_some() => (out, err),
+            _ => (None, None),
+        };
+
+        if stdout_path.is_none() && stderr_path.is_none() {
+            stdout_path = self
+                .guess_log_path(&work_dir, job_id, "out", &job_name)
+                .await;
+            stderr_path = self
+                .guess_log_path(&work_dir, job_id, "err", &job_name)
+                .await;
+        }
         // Many clusters merge stdout and stderr into one .out file.
         if stderr_path.is_none() {
             stderr_path = stdout_path.clone();
+        }
+
+        // sacct may report neither the submit command nor the working directory;
+        // both were cached while the job was live.
+        if let Some(cache) = &self.cache {
+            let (command, cached_dir) = cache.recall_command(job_id);
+            if let Some(command) = command {
+                if !raw.contains_key("Command")
+                    && raw.get("SubmitLine").is_none_or(String::is_empty)
+                {
+                    raw.insert("Command".to_string(), command);
+                }
+            }
+            if work_dir.is_empty() {
+                if let Some(cached_dir) = cached_dir {
+                    work_dir = cached_dir;
+                }
+            }
         }
 
         Some(JobDetail {
@@ -753,6 +802,7 @@ fn apply_accounting(stats: &mut JobStats, fields: &BTreeMap<String, String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::slurm::cache::testing::MemoryCache;
     use crate::slurm::transport::testing::StubRunner;
     use crate::slurm::transport::Output;
     use std::sync::Arc;
@@ -1100,5 +1150,81 @@ mod tests {
         assert_eq!(detail.submit_line(), "sbatch job.sh");
         assert_eq!(detail.node_list(), "node01");
         assert_eq!(detail.qos(), "normal");
+    }
+
+    /// A stub cluster where scontrol has forgotten job 123 but sacct has not.
+    fn aged_out_runner() -> StubRunner {
+        StubRunner::new(|args| match args[0] {
+            "scontrol" => Output {
+                stdout: "Invalid job id specified".into(),
+                stderr: String::new(),
+                code: 0,
+            },
+            // No guessed log path exists on disk.
+            "test" => Output::failure(""),
+            _ => Output {
+                stdout: "123|train|COMPLETED|0:0|gpu|node01|8|1|16Gn|04:00:00|01:00:00|\
+                         s|s|e||physics|normal|cpu=8|cpu=8|"
+                    .into(),
+                stderr: String::new(),
+                code: 0,
+            },
+        })
+    }
+
+    #[tokio::test]
+    async fn remembers_what_scontrol_reported() {
+        let cache = Arc::new(MemoryCache::default());
+        let slurm =
+            with_stdout("JobId=123 WorkDir=/work StdOut=/work/o StdErr=/work/e JobState=RUNNING")
+                .with_cache(cache.clone());
+
+        slurm.job_detail("123").await.expect("scontrol answered");
+
+        // This is the only window in which those paths exist.
+        assert!(cache.knows("123"));
+        assert_eq!(cache.recall_log_paths("123").0.as_deref(), Some("/work/o"));
+    }
+
+    #[tokio::test]
+    async fn prefers_cached_log_paths_over_guessing() {
+        let cache = Arc::new(MemoryCache::default());
+        cache.seed(
+            "123",
+            Some("/elsewhere/train.log"),
+            Some("/elsewhere/err.log"),
+            None,
+        );
+
+        let runner = Arc::new(aged_out_runner());
+        let slurm =
+            Slurm::new(Box::new(runner.clone()), Config::default()).with_cache(cache.clone());
+
+        let detail = slurm.job_detail("123").await.expect("sacct answered");
+
+        assert_eq!(detail.stdout_path.as_deref(), Some("/elsewhere/train.log"));
+        assert_eq!(detail.stderr_path.as_deref(), Some("/elsewhere/err.log"));
+        // Nothing was guessed, so no candidate path was ever stat'ed.
+        assert!(!runner.calls().iter().any(|call| call[0] == "test"));
+    }
+
+    #[tokio::test]
+    async fn restores_the_cached_command_when_sacct_has_none() {
+        let cache = Arc::new(MemoryCache::default());
+        cache.seed("123", None, None, Some("sbatch --array=1-4 job.sh"));
+
+        let slurm =
+            Slurm::new(Box::new(aged_out_runner()), Config::default()).with_cache(cache.clone());
+
+        let detail = slurm.job_detail("123").await.expect("sacct answered");
+        assert_eq!(detail.submit_line(), "sbatch --array=1-4 job.sh");
+    }
+
+    #[tokio::test]
+    async fn works_without_a_cache_at_all() {
+        // The cache is an optimisation; nothing depends on it being present.
+        let slurm = Slurm::new(Box::new(aged_out_runner()), Config::default());
+        let detail = slurm.job_detail("123").await.expect("sacct answered");
+        assert_eq!(detail.source, DetailSource::Sacct);
     }
 }

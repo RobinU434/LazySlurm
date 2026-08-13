@@ -1,0 +1,41 @@
+# LazySlurm configuration
+# Uncomment and modify values as needed. See README for full documentation.
+#
+# All CLI arguments can be set here as defaults.
+# CLI arguments always override config file values.
+
+# refresh = 5.0              # auto-refresh interval in seconds (0 = off)
+# days = 7                   # how many days back for terminated jobs
+# user = ""                  # Slurm user to monitor (empty = $USER)
+# partition = ""             # filter by partition (empty = all)
+# no_gpu = false             # disable GPU monitoring tab
+# no_live = false            # disable live CPU/GPU monitoring
+# remote = ""                # SSH target for remote mode (e.g. "user@login.hpc.edu")
+# editor = "vim"             # text editor for viewing logs and config
+# pager = "less"             # pager for browsing whole logs with 'l' ("less", "more", "bat")
+
+# Column display settings
+# max_name_width = 16        # max characters for job name column (0 = unlimited)
+# max_partition_width = 16   # max characters for partition column (0 = unlimited)
+# abbreviate_states = false  # use short state names: COMP, FAIL, TIME, CAN, OOM, ...
+# collapse_arrays = true     # fold a job array into one row; Enter expands it
+
+# Cache settings
+# cache_max_age_days = 30    # auto-delete cached job info older than N days (null = never)
+# script_cache_dir = ""      # where archived sbatch scripts live (default: <config_dir>/scripts)
+
+# Partition display order in the cluster bar.
+# Partitions not listed appear after these in their default order.
+# Can also be set via: lazyslurm --partition-order gpu,cpu,fat
+# partition_order = ["gpu", "cpu", "fat"]
+
+# Custom partition colors in the job tables.
+# Overrides the automatic hash-based coloring.
+# Valid color names: cyan, magenta, yellow, green, blue, red,
+# bright_cyan, bright_magenta, bright_green, white, dim, bold,
+# or any Rich color (e.g. "dark_orange", "grey50").
+# [partition_colors]
+# gpu = "green"
+# cpu = "cyan"
+# fat = "magenta"
+# debug = "dim"

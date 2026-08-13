@@ -11,6 +11,7 @@
 //! and a test can hold as many independent instances as it wants.
 
 pub mod action;
+pub mod cache;
 pub mod fs;
 pub mod parse;
 pub mod query;
@@ -18,9 +19,10 @@ pub mod reason;
 pub mod transport;
 
 pub use action::{
-    build_update_args, cancel_job, get_batch_script, normalize_memory, resubmit_job,
-    script_token_index, EditableField, Outcome, ScriptFallback, EDITABLE_FIELDS,
+    archive_batch_script, build_update_args, cancel_job, get_batch_script, normalize_memory,
+    resubmit_job, script_token_index, EditableField, Outcome, ScriptFallback, EDITABLE_FIELDS,
 };
+pub use cache::{DetailCache, ScriptStore};
 pub use fs::{read_log_file, tail_file, TAIL_LINES};
 pub use query::{Slurm, UsageWindow, USAGE_WINDOWS};
 pub use reason::{explain, format_start_estimate};

@@ -87,11 +87,17 @@ pub struct JobDetail {
 }
 
 impl JobDetail {
-    /// Look up the first of several possible field names.
+    /// Look up the first of several possible field names that has a value.
+    ///
+    /// A key that is present but empty does **not** count: sacct emits empty
+    /// columns for fields it does not have, so stopping at the first key that
+    /// merely exists would return `""` where a later alternative holds the
+    /// answer — most visibly an empty `SubmitLine` masking a good `Command`.
     fn first_of(&self, keys: &[&str]) -> &str {
         keys.iter()
-            .find_map(|key| self.raw.get(*key).map(String::as_str))
-            .unwrap_or(NOT_AVAILABLE)
+            .filter_map(|key| self.raw.get(*key))
+            .find(|value| !value.is_empty())
+            .map_or(NOT_AVAILABLE, String::as_str)
     }
 
     /// The command that submitted this job.
@@ -347,6 +353,23 @@ mod tests {
     fn falls_back_to_command_when_no_submit_line() {
         let detail = detail_from(&[("Command", "/home/me/job.sh")], DetailSource::Sacct);
         assert_eq!(detail.submit_line(), "/home/me/job.sh");
+    }
+
+    #[test]
+    fn an_empty_field_falls_through_to_the_next_alternative() {
+        // sacct emits empty columns rather than omitting them, so a present but
+        // blank SubmitLine must not mask a usable Command.
+        let detail = detail_from(
+            &[("SubmitLine", ""), ("Command", "/home/me/job.sh")],
+            DetailSource::Sacct,
+        );
+        assert_eq!(detail.submit_line(), "/home/me/job.sh");
+    }
+
+    #[test]
+    fn reports_not_available_when_every_alternative_is_empty() {
+        let detail = detail_from(&[("SubmitLine", ""), ("Command", "")], DetailSource::Sacct);
+        assert_eq!(detail.submit_line(), NOT_AVAILABLE);
     }
 
     #[test]
