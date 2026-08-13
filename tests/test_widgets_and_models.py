@@ -464,7 +464,10 @@ def test_unknown_config_keys_flags_typos_only():
         "reffresh": 2.0,                       # typo
         "editr": "nvim",                       # typo
     }
-    assert unknown_config_keys(saved) == ["editr", "reffresh"]
+    assert unknown_config_keys(saved) == [
+        "ignoring unknown setting: editr",
+        "ignoring unknown setting: reffresh",
+    ]
 
 
 def test_every_documented_template_key_is_known():
@@ -474,16 +477,30 @@ def test_every_documented_template_key_is_known():
     from lazyslurm.__main__ import KNOWN_CONFIG_KEYS
 
     text = files("lazyslurm").joinpath("templ", "config.toml").read_text()
+    # A commented-out setting is "# key = value" with a single space after the
+    # "#"; prose that happens to contain an "=" is indented further, so the
+    # exact-one-space rule separates the two.
     documented = set()
     for line in text.splitlines():
-        table = re.match(r"#\s*\[([a-z_]+)\]", line)
+        table = re.match(r"# \[([a-z_]+)\]$", line)
         if table:
             # Keys below a table header belong to it (gpu = "green"), and the
             # unknown-key check only looks at table names anyway.
             documented.add(table.group(1))
             break
-        key = re.match(r"#\s*([a-z_]+)\s*=", line)
+        key = re.match(r"# ([a-z_]+) = ", line)
         if key:
             documented.add(key.group(1))
     assert documented, "no settings found in the template"
     assert documented <= set(KNOWN_CONFIG_KEYS), documented - set(KNOWN_CONFIG_KEYS)
+
+
+def test_parse_interactive_shell_validates_and_warns():
+    from lazyslurm.__main__ import parse_interactive_shell
+
+    assert parse_interactive_shell("ssh") == ("ssh", "")
+    assert parse_interactive_shell("srun") == ("srun", "")
+    assert parse_interactive_shell(" SRUN ") == ("srun", "")
+    value, warning = parse_interactive_shell("telnet")
+    assert value == "ssh"                      # falls back, never fails
+    assert "telnet" in warning and "ssh | srun" in warning

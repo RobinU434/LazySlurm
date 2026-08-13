@@ -132,7 +132,8 @@ Press `?` at any time for this list inside the app:
 | `l` | Open the active log tab (stdout or stderr) in a **pager** — the way to read a huge log |
 | `e` | Open the job's **stdout** log in an external editor (suspends TUI) |
 | `Shift+E` | Open the job's **stderr** log in an external editor |
-| `o` | SSH to the selected job's compute node. Suspends the TUI; type `exit` to return |
+| `o` | Open a shell on the selected job's compute node. Suspends the TUI; type `exit` to return. The mechanism is [configurable](#interactive-shell-ssh-vs-srun) — SSH by default |
+| `Shift+O` | The same, using the *other* access method (`ssh` ↔ `srun`) for this one shell |
 | `,` | Edit config file (`~/.config/lazyslurm/config.toml`) in your editor |
 | `r` | Force refresh all job data |
 | `?` | Help for **the panel you are in** — job tables, Job Details, Job Metadata, partition monitor, node view or account usage. Other panels are listed at the bottom (also closes with `Escape`) |
@@ -543,6 +544,46 @@ in the editor, and cleaned up when the editor closes.
 If the configured editor is not found on your system, an error is shown in the Command
 Log (e.g., `editor 'code' not found — set 'editor' in config.toml`).
 
+### Interactive shell: ssh vs srun
+
+Press `o` to get a shell on the compute node running the selected job. There are two
+ways to do that, and they land you in genuinely different places:
+
+```toml
+interactive_shell = "ssh"    # "ssh" (default) | "srun"
+```
+
+**`ssh` — the machine.** You get a normal login shell on the node, *outside* the job's
+cgroup. `CUDA_VISIBLE_DEVICES` is unset, `nvidia-smi` shows **every GPU on the node**
+rather than the one you allocated, and anything you start there is not capped by the
+job's CPU or memory limits — so a heavy process competes with your job instead of being
+contained by it. In exchange it adds no job step, so it cannot skew the
+[efficiency report](#stats), and it either connects or fails fast.
+
+**`srun` — the allocation.** LazySlurm runs `srun --overlap --jobid=<id> --pty bash`, so
+the shell lands inside the job's cgroup: correct `CUDA_VISIBLE_DEVICES`, correct
+resource limits, the same environment the job sees. The costs are real, though: the
+shell appears in `sacct` as a job step, and an idle debugging shell drags the job's
+reported CPU efficiency down. It also needs Slurm ≥ 20.11 for `--overlap`, and can block
+while negotiating the step launch.
+
+So: **use `ssh` to poke at the machine, `srun` to debug inside your allocation.** If
+`nvidia-smi` shows you more GPUs than you asked for, that is the `ssh` path working as
+designed — switch to `srun` for that shell.
+
+You do not have to choose once and live with it: `o` uses the configured method and
+`Shift+O` uses the other one, for a single shell.
+
+Two cases where you may *have* to use `srun`:
+
+- Your cluster runs `pam_slurm_adm`, which refuses SSH to a compute node without an
+  allocation there.
+- You are reproducing something that depends on the job's environment or limits.
+
+`srun` needs a live allocation, so it only applies to a **running** job. On anything
+else LazySlurm falls back to `ssh` and says so in the Command Log. If the step launch
+fails, it reports the exit status rather than silently connecting you somewhere else.
+
 ### Job Completion Notifications
 
 When a running job finishes (completes, fails, times out, etc.), LazySlurm:
@@ -658,7 +699,8 @@ requested twice:
 |---------|---------------------------|
 | Slurm commands, log reads | Written into the shared shell channel |
 | Live CPU/GPU tabs | The hop to the compute node is made **from the login node**, inside the session |
-| SSH to node (`o`) | A `ProxyCommand` over the session's control socket (not `-J`) |
+| Shell on a node (`o`), `interactive_shell = "ssh"` | A `ProxyCommand` over the session's control socket (not `-J`) |
+| Shell on a node (`o`), `interactive_shell = "srun"` | `srun --pty` run **on the login node**, inside the session |
 | Fetching a log for the editor (`e`) | `scp` over the session's control socket |
 
 The control socket lives in `~/.ssh/cm-lazyslurm/`. If you already have a master

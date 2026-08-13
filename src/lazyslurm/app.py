@@ -644,6 +644,14 @@ class UsageScreen(Screen):
 _MAX_HISTORY = 60  # max sparkline samples per job
 
 
+def _exit_code(status: int) -> str:
+    """Readable exit status from what os.system() returned."""
+    try:
+        return f"exit {os.waitstatus_to_exitcode(status)}"
+    except ValueError:  # killed by a signal
+        return f"status {status}"
+
+
 class LazySlurmApp(App):
     """LazySlurm — a TUI for monitoring Slurm jobs."""
 
@@ -667,7 +675,8 @@ class LazySlurmApp(App):
         Binding("p", "partitions", "Partitions", show=False),
         Binding("U", "usage", "Usage", show=False),
         Binding("b", "view_batch_script", "Script", show=False),
-        Binding("o", "ssh_to_node", "SSH", show=False),
+        Binding("o", "ssh_to_node", "Shell", show=False),
+        Binding("O", "ssh_to_node_alt", "Shell (other method)", show=False),
         Binding("l", "page_log", "Pager", show=False),
         Binding("e", "edit_stdout", "Edit Out", show=False),
         Binding("shift+e", "edit_stderr", "Edit Err", show=False),
@@ -785,9 +794,9 @@ class LazySlurmApp(App):
         for override in self._config_overrides:
             self._log("config override", override)
 
-        # A key nothing reads is inert, and the file looks right — so say so.
-        for key in self._config_warnings:
-            self._log("config file", f"ignoring unknown setting: {key}")
+        # A setting nothing reads is inert, and the file looks right — say so.
+        for warning in self._config_warnings:
+            self._log("config file", warning)
 
         # Login node warning
         import socket
@@ -1486,30 +1495,58 @@ class LazySlurmApp(App):
             await self._poll_jobs()
 
     async def action_ssh_to_node(self) -> None:
+        await self._open_interactive_shell(self.config.interactive_shell)
+
+    async def action_ssh_to_node_alt(self) -> None:
+        """The access method the config did *not* choose (Shift+O).
+
+        The two are different tasks — "poke at the machine" versus "debug
+        inside my allocation" — and which one a user needs varies per job, not
+        per install, so both are always one key away.
+        """
+        configured = self.config.interactive_shell
+        other = "srun" if configured == "ssh" else "ssh"
+        await self._open_interactive_shell(other)
+
+    async def _open_interactive_shell(self, method: str) -> None:
         if not self._selected_node or self._selected_node in ("N/A", "None", "(null)", ""):
-            self._log("ssh", "no node assigned to this job")
+            self._log("shell", "no node assigned to this job")
             return
 
         node = slurm._first_node(self._selected_node)
-        cmd_parts = ["ssh"]
-        if self.config.remote:
-            # Jump through the *existing* session instead of `-J`, which would
-            # open a second connection to the login node and ask for the 2FA
-            # code again. The ProxyCommand rides the running master socket.
-            cmd_parts.extend(["-o", shlex.quote(f"ProxyCommand={self._proxy_command()}")])
-        cmd_parts.append(node)
-        cmd_str = " ".join(cmd_parts)
+        job_id = self._selected_job_id or ""
+        # srun attaches to an allocation, so it needs one: a job that is no
+        # longer running has no step to overlap with. Fall back rather than
+        # fail, and say why.
+        if method == "srun" and job_id not in self._known_running_ids:
+            self._log("srun", f"job {job_id or '?'} is not running — using ssh instead")
+            method = "ssh"
 
-        self._log(f"ssh {node}")
+        cmd_str = slurm.interactive_shell_cmd(
+            method,
+            node,
+            job_id=job_id,
+            remote=self.config.remote,
+            control_opt=self._ssh_control_opt(),
+        )
+
+        self._log(f"{method} {node}", cmd_str)
         with self.suspend():
             # Clear terminal and show greeting
             os.system("clear")
-            job_info = f" (job {self._selected_job_id})" if self._selected_job_id else ""
+            job_info = f" (job {job_id})" if job_id else ""
             via = f" via {self.config.remote}" if self.config.remote else ""
-            print(f"LazySlurm — connecting to {node}{via}{job_info}")
-            print(f"Type 'exit' to return to LazySlurm.\n")
-            os.system(cmd_str)
-        self._log("ssh", f"session to {node} closed")
+            where = "inside the allocation on" if method == "srun" else "to"
+            print(f"LazySlurm — connecting {where} {node}{via}{job_info}")
+            print("Type 'exit' to return to LazySlurm.\n")
+            rc = os.system(cmd_str)
+        if rc and method == "srun":
+            # Don't silently retry over ssh: a failed step launch and a shell
+            # the user exited look the same from here, and ssh lands somewhere
+            # meaningfully different from what they asked for.
+            self._set_status(f"srun shell failed ({_exit_code(rc)}) — press O for ssh")
+        else:
+            self._log(method, f"session to {node} closed")
 
     # ------------------------------------------------------------------
     # Open log files in editor
@@ -1566,15 +1603,24 @@ class LazySlurmApp(App):
     def _reload_config(self) -> None:
         """Reload config from disk and apply changes live."""
         from lazyslurm import config as persistent_config
-        from lazyslurm.__main__ import parse_cache_max_age, unknown_config_keys
+        from lazyslurm.__main__ import (
+            parse_cache_max_age,
+            parse_interactive_shell,
+            unknown_config_keys,
+        )
 
         saved = persistent_config.load()
         old = self.config
 
         # The user has just been editing the file, so a typo made here is the
         # one worth catching immediately.
-        for key in unknown_config_keys(saved):
-            self._log("config file", f"ignoring unknown setting: {key}")
+        for warning in unknown_config_keys(saved):
+            self._log("config file", warning)
+        shell, shell_warning = parse_interactive_shell(
+            saved.get("interactive_shell", old.interactive_shell)
+        )
+        if shell_warning:
+            self._log("config file", shell_warning)
 
         # Rebuild config from file, preserving CLI-only values (remote, user)
         self.config = Config(
@@ -1599,6 +1645,7 @@ class LazySlurmApp(App):
             script_cache_dir=os.path.expanduser(
                 str(saved.get("script_cache_dir", old.script_cache_dir))
             ),
+            interactive_shell=shell,
         )
 
         # Re-apply module-level settings
@@ -1618,6 +1665,7 @@ class LazySlurmApp(App):
             "refresh", "days", "user", "partition", "no_gpu", "no_live",
             "editor", "max_name_width", "max_partition_width", "abbreviate_states",
             "partition_order", "cache_max_age_days", "script_cache_dir",
+            "interactive_shell",
         ):
             old_val = getattr(old, field)
             new_val = getattr(self.config, field)

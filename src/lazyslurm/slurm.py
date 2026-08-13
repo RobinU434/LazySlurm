@@ -531,6 +531,55 @@ async def _file_exists(path: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Interactive shell on a compute node (the `o` key)
+# ---------------------------------------------------------------------------
+
+# The two ways to get a shell on a job's node, and why a user would pick one:
+#
+#   ssh   Lands on the machine, outside the job's cgroup. No CUDA_VISIBLE_DEVICES,
+#         all node GPUs visible, nothing capped by the job's limits. Adds no job
+#         step, so it cannot skew the efficiency report the tool also shows, and
+#         it either connects or fails fast rather than blocking on Slurm state.
+#   srun  Lands inside the allocation, so the environment matches what the job
+#         sees. Costs a job step in sacct — an idle debugging shell drags the
+#         job's reported CPU efficiency down — needs Slurm >= 20.11 for
+#         --overlap, and can block negotiating the step launch. Required on
+#         clusters where pam_slurm_adm refuses SSH without an allocation.
+INTERACTIVE_SHELLS: tuple[str, ...] = ("ssh", "srun")
+
+
+def interactive_shell_cmd(
+    method: str,
+    node: str,
+    job_id: str = "",
+    remote: str = "",
+    control_opt: str = "",
+    shell: str = "bash",
+) -> str:
+    """Build the command that opens an interactive shell on a compute node.
+
+    Pure string building, so the choice is testable without a terminal. In
+    remote mode both paths ride the already-authenticated master socket:
+    ``ssh`` hops with a ProxyCommand (``-J`` would open a second connection and
+    ask for the 2FA code again), and ``srun`` runs on the login node itself.
+    """
+    def join(*parts: str) -> str:
+        return " ".join(p for p in parts if p)
+
+    if method == "srun":
+        srun = f"srun --overlap --jobid={shlex.quote(job_id)} --pty {shlex.quote(shell)}"
+        if remote:
+            # -t forces a pty on the login node, which srun --pty needs.
+            return join("ssh", "-t", control_opt, shlex.quote(remote), shlex.quote(srun))
+        return srun
+
+    if remote:
+        proxy = join("ssh", control_opt, "-W %h:%p", shlex.quote(remote))
+        return join("ssh", "-o", shlex.quote("ProxyCommand=" + proxy), shlex.quote(node))
+    return join("ssh", shlex.quote(node))
+
+
+# ---------------------------------------------------------------------------
 # Account usage and fairshare (sreport + sshare)
 # ---------------------------------------------------------------------------
 

@@ -904,3 +904,44 @@ def test_guess_log_path_never_probes_the_same_candidate_twice(tmp_path):
         s._file_exists = orig
 
     assert len(seen) == len(set(seen)), f"duplicate candidates probed: {seen}"
+
+
+# ---------------------------------------------------------------------------
+# interactive shell command construction (the `o` key)
+# ---------------------------------------------------------------------------
+
+
+def test_interactive_shell_ssh_local():
+    assert slurm.interactive_shell_cmd("ssh", "gpu-node01") == "ssh gpu-node01"
+
+
+def test_interactive_shell_ssh_remote_uses_proxycommand_not_dash_j():
+    cmd = slurm.interactive_shell_cmd(
+        "ssh", "gpu-node01", remote="me@login.hpc", control_opt="-o ControlPath=/tmp/s",
+    )
+    # -J would open a second connection to the login node and prompt for 2FA again.
+    assert "ProxyCommand=" in cmd and " -J " not in cmd
+    assert "-W %h:%p" in cmd
+    assert "/tmp/s" in cmd
+    assert cmd.endswith("gpu-node01")
+
+
+def test_interactive_shell_srun_local_attaches_to_the_job():
+    cmd = slurm.interactive_shell_cmd("srun", "gpu-node01", job_id="123")
+    assert cmd == "srun --overlap --jobid=123 --pty bash"
+
+
+def test_interactive_shell_srun_remote_runs_on_the_login_node_with_a_pty():
+    cmd = slurm.interactive_shell_cmd(
+        "srun", "gpu-node01", job_id="123",
+        remote="me@login.hpc", control_opt="-o ControlPath=/tmp/s",
+    )
+    assert cmd.startswith("ssh -t ")          # srun --pty needs a tty
+    assert "me@login.hpc" in cmd
+    assert "srun --overlap --jobid=123 --pty bash" in cmd
+    assert "gpu-node01" not in cmd            # the hop is Slurm's job, not ssh's
+
+
+def test_interactive_shell_quotes_hostile_arguments():
+    cmd = slurm.interactive_shell_cmd("ssh", "node; rm -rf /")
+    assert "; rm -rf /" not in cmd.replace("'node; rm -rf /'", "")
