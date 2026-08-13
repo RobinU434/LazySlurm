@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 
@@ -640,9 +641,15 @@ def sizing_hint(eff: Efficiency) -> str:
         if cores < eff.cpu_alloc:
             suggestions.append(f"--cpus-per-task={cores}")
     if eff.walltime is not None and eff.walltime < 0.5 and eff.time_limit > 0:
-        target = eff.elapsed * 1.5
-        hours, rest = divmod(int(target), 3600)
-        suggestions.append(f"--time={hours:02d}:{rest // 60:02d}:00")
+        # Round *up* to the next whole minute, and never below what the job
+        # already used: truncating put a job that ran under 40s at
+        # "--time=00:00:00", which Slurm reads as no limit at all — the
+        # opposite of the advice. The extra minute keeps a short job from
+        # being killed by the suggestion meant to help it.
+        target = max(eff.elapsed * 1.5, eff.elapsed + 60)
+        minutes = max(1, math.ceil(target / 60))
+        hours, mins = divmod(minutes, 60)
+        suggestions.append(f"--time={hours:02d}:{mins:02d}:00")
     if not suggestions:
         return ""
     return "next time try " + " ".join(suggestions)
