@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import sys
 
 from lazyslurm.models import Config
@@ -53,6 +54,40 @@ def unknown_config_keys(saved: dict) -> list[str]:
         for key in sorted(saved)
         if key not in KNOWN_CONFIG_KEYS
     ]
+
+
+# What the main view cannot work without. Everything else (sinfo, sstat, sprio,
+# sreport, sshare) degrades to a message in its own panel.
+REQUIRED_COMMANDS = ("squeue", "sacct")
+
+
+def missing_commands(remote: str = "") -> list[str]:
+    """Which required binaries are absent locally. Empty in remote mode.
+
+    In remote mode the Slurm commands run on the cluster, so the only local
+    requirement is ssh.
+    """
+    needed = ("ssh",) if remote else REQUIRED_COMMANDS
+    return [name for name in needed if shutil.which(name) is None]
+
+
+def _no_slurm_message(missing: list[str], remote: str = "") -> str:
+    """What to print when the tool cannot possibly work here."""
+    names = ", ".join(missing)
+    if remote:
+        return (
+            f"lazyslurm: {names} not found on this machine.\n\n"
+            "Remote mode runs the Slurm commands on the cluster over ssh, so "
+            "an ssh client has to be installed locally."
+        )
+    return (
+        f"lazyslurm: no Slurm commands found on this machine ({names}).\n\n"
+        "LazySlurm reads jobs from the Slurm CLI, so it has to run somewhere "
+        "those exist:\n"
+        "  - on a cluster login node, or\n"
+        "  - on your own machine against a cluster, with --remote:\n\n"
+        "      lazyslurm --remote user@login.hpc.edu\n"
+    )
 
 
 def parse_cache_max_age(raw: object) -> int | None:
@@ -259,6 +294,14 @@ def main() -> None:
         script_cache_dir=script_cache_dir,
         interactive_shell=interactive_shell,
     )
+
+    # Bail out before the TUI starts rather than crashing on the first poll:
+    # every Slurm call would raise FileNotFoundError, and the traceback said
+    # nothing about what to do instead.
+    absent = missing_commands(str(resolved["remote"]))
+    if absent:
+        print(_no_slurm_message(absent, str(resolved["remote"])), file=sys.stderr)
+        raise SystemExit(1)
 
     from lazyslurm.app import LazySlurmApp
     app = LazySlurmApp(
