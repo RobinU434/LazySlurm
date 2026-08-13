@@ -4,7 +4,15 @@ All notable changes to LazySlurm are documented here. The distribution is
 published on PyPI as [`lazyslurm-py`](https://pypi.org/project/lazyslurm-py/);
 the command, the import package and the config directory are all `lazyslurm`.
 
-## Unreleased
+## 0.3.0 — 2026-08-13
+
+Job arrays fold into one row, a failed job can be resubmitted with more of what it
+ran out of, and remote mode is materially more reliable — the two-factor login no
+longer asks for the code repeatedly, and a slow one no longer leaks threads or
+loses the prompt. Alongside that, sixteen fixes: a job name containing a "|"
+misparsed the whole row, a down node was reported as out of memory when its
+memory was simply unknown, and the sizing hint could advise a zero time limit —
+which Slurm reads as no limit at all.
 
 ### Added
 
@@ -37,6 +45,9 @@ the command, the import package and the config directory are all `lazyslurm`.
 - A one-line status bar above the key bar: refusals like "Only pending jobs can be
   edited" no longer scroll away in the Command Log
   ([#34](https://github.com/RobinU434/LazySlurm/issues/34)).
+- **Coverage reporting.** `uv run pytest --cov` produces a report with no further setup
+  (`--cov-report=html` for a browsable one). Branch coverage is on and the run fails
+  below 68%, a floor to catch a drop rather than a target.
 
 ### Changed
 
@@ -70,6 +81,15 @@ the command, the import package and the config directory are all `lazyslurm`.
   other way. `action_focus_next_right` never actually moved focus before; the panel it
   claimed to focus was reached only by Textual's default widget cycling
   ([#38](https://github.com/RobinU434/LazySlurm/issues/38)).
+
+### Documentation
+
+- The README is now a menu: each section folds open, so finding one feature no longer
+  means scrolling past a dozen others. Headings stay visible, so every cross-link still
+  lands somewhere you can see.
+- New sections on the [ssh vs srun trade-off](README.md#interactive-shell-ssh-vs-srun)
+  — including why `nvidia-smi` may show more GPUs than you allocated — and on
+  resubmitting with more resources.
 
 ### Fixed
 
