@@ -887,3 +887,21 @@ def test_importing_slurm_does_not_touch_the_ssh_dir():
     assert not any(
         "ControlPath" in opt for opt in slurm._SSH_OPTS
     ), "multiplexing options must be added per call, not baked in at import"
+
+
+def test_guess_log_path_never_probes_the_same_candidate_twice(tmp_path):
+    seen: list[str] = []
+
+    async def _fake_exists(path: str) -> bool:
+        seen.append(path)
+        return False
+
+    import lazyslurm.slurm as s
+    orig = s._file_exists
+    s._file_exists = _fake_exists
+    try:
+        asyncio.run(s._guess_log_path(str(tmp_path), "42", "out", "train"))
+    finally:
+        s._file_exists = orig
+
+    assert len(seen) == len(set(seen)), f"duplicate candidates probed: {seen}"

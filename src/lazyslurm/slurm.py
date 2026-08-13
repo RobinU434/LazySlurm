@@ -487,8 +487,6 @@ async def _guess_log_path(
             os.path.join(work_dir, f"{job_name}-{job_id}.{ext_out}"),
             os.path.join(work_dir, f"{job_name}_{job_id}.{ext_out}"),
             os.path.join(work_dir, f"{job_name}.{ext_out}"),
-            # sbatch --output/--error with %j pattern
-            os.path.join(work_dir, f"{job_name}-%j.{ext_out}".replace("%j", job_id)),
         ])
     # Also check logs/ subdirectory
     candidates.extend([
@@ -496,7 +494,9 @@ async def _guess_log_path(
         os.path.join(work_dir, "log", f"slurm-{job_id}.{ext_out}"),
     ])
 
-    for path in candidates:
+    # Every candidate costs a stat — a full SSH round trip in remote mode — so
+    # never probe the same path twice (the first two coincide when suffix=="out").
+    for path in dict.fromkeys(candidates):
         if await _file_exists(path):
             return path
     return None
