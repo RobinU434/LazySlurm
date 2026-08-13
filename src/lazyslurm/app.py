@@ -696,8 +696,10 @@ class LazySlurmApp(App):
         Binding("shift+e", "edit_stderr", "Edit Err", show=False),
         Binding("comma", "edit_config", "Config", show=False, key_display=","),
         Binding("r", "refresh", "Refresh", show=True),
-        Binding("tab", "focus_next_right", "Next Panel", show=False),
-        Binding("shift+tab", "focus_prev_right", "Prev Panel", show=False),
+        # priority: Textual's own Tab binding moves focus to the next widget,
+        # which would fight the panel cycle these implement.
+        Binding("tab", "focus_next_right", "Next Panel", show=False, priority=True),
+        Binding("shift+tab", "focus_prev_right", "Prev Panel", show=False, priority=True),
         Binding("left", "focus_prev_right", show=False),
         Binding("right", "focus_next_right", show=False),
         Binding("left_square_bracket", "prev_detail_tab", show=False),
@@ -1196,6 +1198,32 @@ class LazySlurmApp(App):
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "search-input":
             self._apply_filter(event.value)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Enter accepts the filter: close the bar, keep the query.
+
+        Filtering exists to narrow a long list down to the jobs you want to act
+        on. Every other way out of the bar clears the query, so the cursor
+        could never reach the rows it found. Escape still abandons — accept and
+        abandon are the useful pair.
+        """
+        if event.input.id != "search-input":
+            return
+        event.stop()
+        search = self.query_one("#search-input", Input)
+        search.display = False
+        self._search_visible = False
+        # Deliberately no _apply_filter("") — the filter stays in force, and
+        # the table's border title keeps showing "— 2/4 match".
+        self._focus_a_job_table()
+
+    def _focus_a_job_table(self) -> None:
+        """Focus whichever job table has rows, preferring the active one."""
+        active = self.query_one("#active-jobs", ActiveJobTable)
+        completed = self.query_one("#completed-jobs", CompletedJobTable)
+        target = active if active.row_count else (completed if completed.row_count else active)
+        target.focus()
+        self._right_focus = "jobs"
 
     def _apply_filter(self, text: str) -> None:
         self.query_one("#active-jobs", ActiveJobTable).apply_filter(text)
@@ -1978,18 +2006,42 @@ class LazySlurmApp(App):
         )
 
 
+    # Tab cycles through the three panels a user acts in. The job tables are
+    # part of the cycle: without them, focus that reached the right-hand panels
+    # could only be brought back with the mouse.
+    _FOCUS_CYCLE = ("jobs", "detail", "metadata")
+
+    def _focus_panel(self, panel: str) -> None:
+        if panel == "jobs":
+            self._focus_a_job_table()
+            return
+        view = self.query_one("#detail-view" if panel == "detail" else "#metadata-view")
+        # TabbedContent itself is not focusable — focusing it was a no-op, and
+        # the panel only ever got focus because Textual's own Tab binding moved
+        # it. The first focusable descendant is the tab strip, which is what
+        # [ / ] and ( / ) then act on.
+        target = next((node for node in view.query("*") if node.focusable), None)
+        if target is not None:
+            target.focus()
+        self._right_focus = panel
+
+    def _cycle_focus(self, step: int) -> None:
+        current = self._right_focus if self._right_focus in self._FOCUS_CYCLE else "jobs"
+        # Real focus wins when it is on a table: the user may have clicked, or
+        # arrived there some other way. (_focused_job_table falls back to a
+        # table when neither has focus, so it cannot answer this question.)
+        active = self.query_one("#active-jobs", ActiveJobTable)
+        completed = self.query_one("#completed-jobs", CompletedJobTable)
+        if active.has_focus or completed.has_focus:
+            current = "jobs"
+        index = self._FOCUS_CYCLE.index(current)
+        self._focus_panel(self._FOCUS_CYCLE[(index + step) % len(self._FOCUS_CYCLE)])
+
     def action_focus_next_right(self) -> None:
-        detail = self.query_one("#detail-view", DetailView)
-        metadata = self.query_one("#metadata-view", MetadataView)
-        if self._right_focus == "detail":
-            self._right_focus = "metadata"
-            metadata.query_one("TabbedContent").focus()
-        else:
-            self._right_focus = "detail"
-            detail.query_one("TabbedContent").focus()
+        self._cycle_focus(1)
 
     def action_focus_prev_right(self) -> None:
-        self.action_focus_next_right()
+        self._cycle_focus(-1)
 
     def action_next_detail_tab(self) -> None:
         self.query_one("#detail-view", DetailView).switch_tab(1)

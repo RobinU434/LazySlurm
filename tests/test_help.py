@@ -179,19 +179,22 @@ def test_help_follows_focus_in_the_main_view(monkeypatch):
         async with app.run_test(size=(110, 36)) as pilot:
             await pilot.pause()
             assert await _help_context(app, pilot) == help_topics.JOBS
-            # Tab walks: completed table, then the right-hand panels.
-            await pilot.press("tab")
-            await pilot.pause()
-            assert await _help_context(app, pilot) == help_topics.JOBS
+            # Tab cycles the three panels a user acts in, in order.
             await pilot.press("tab")
             await pilot.pause()
             assert await _help_context(app, pilot) == help_topics.DETAIL
+            await pilot.press("tab")
+            await pilot.pause()
+            assert await _help_context(app, pilot) == help_topics.METADATA
+            await pilot.press("tab")
+            await pilot.pause()
+            assert await _help_context(app, pilot) == help_topics.JOBS
 
     _run(scenario())
 
 
 def test_help_on_the_metadata_panel(monkeypatch):
-    """Four Tabs from the job table reach the metadata panel."""
+    """Two Tabs from the job table reach the metadata panel."""
     async def _quiet(*args):
         return "", "", 0
 
@@ -200,7 +203,7 @@ def test_help_on_the_metadata_panel(monkeypatch):
         app = _app()
         async with app.run_test(size=(110, 36)) as pilot:
             await pilot.pause()
-            for _ in range(4):
+            for _ in range(2):
                 await pilot.press("tab")
                 await pilot.pause()
             assert app._help_context() == help_topics.METADATA

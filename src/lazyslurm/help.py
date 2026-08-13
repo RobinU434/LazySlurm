@@ -64,8 +64,8 @@ GLOBAL: tuple[Key, ...] = (
     Key("Shift+U", "account usage and fair share", ("U",)),
     Key("r", "refresh now", ("r",)),
     Key(",", "edit the config file in your editor", ("comma",)),
-    Key("Tab / Shift+Tab", "move between the panels on the right", ("tab", "shift+tab")),
-    Key("Left / Right", "move between the panels on the right", ("left", "right")),
+    Key("Tab / Shift+Tab", "cycle: job tables -> details -> metadata", ("tab", "shift+tab")),
+    Key("Left / Right", "cycle the panels the other way", ("left", "right")),
     Key("q", "quit (on a full-screen panel: back)", ("q",)),
 )
 
@@ -93,7 +93,8 @@ PANELS: tuple[Panel, ...] = (
         ),
         notes=(
             "Multi-select applies c, Shift+C and u to every selected job.",
-            "/ opens the filter bar (Escape closes and clears it). Plain words match",
+            "/ opens the filter bar. Enter accepts the filter and puts the cursor",
+            "back on the matches; Escape abandons it. Plain words match",
             "id, name and partition; key:value terms are ANDed —",
             "  state:pend  part:gpu  name:train  id:4815  gpu:>=2",
             "Aliases: st: s: · partition: p: · n: · job: · gpus: gres:. An unknown",
