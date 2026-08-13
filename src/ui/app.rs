@@ -6,6 +6,7 @@
 //! it to [`App::handle_key`] and asserting on the state that came out.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -1688,9 +1689,30 @@ fn run_shell(
         .map(|path| vec!["-o".to_string(), format!("ControlPath={path}")])
         .unwrap_or_default();
 
+    // In remote mode a log lives on the cluster, so it has to come down before
+    // an editor can open it. The pager avoids this by running over there
+    // instead; an editor cannot.
+    let fetched = match &shell {
+        Shell::Edit { path, label } if remote => {
+            match fetch_remote(&config.remote, &control, path) {
+                Ok(local) => Some(local),
+                Err(error) => {
+                    app.log(format!("edit {label}"), Some(error));
+                    return Ok(());
+                }
+            }
+        }
+        _ => None,
+    };
+
     let (argv, note) = match &shell {
         Shell::Edit { path, label } | Shell::View { path, label } => {
             let readonly = matches!(shell, Shell::View { .. });
+            let path = fetched
+                .as_ref()
+                .map(|local| local.display().to_string())
+                .unwrap_or_else(|| path.clone());
+            let path = &path;
             if which(&config.editor).is_none() {
                 app.log(
                     format!("edit {label}"),
@@ -1805,12 +1827,49 @@ fn run_shell(
         app.log(shell_label(&shell), Some(format!("failed: {error}")));
     }
 
+    // The copy was only ever a means to an end.
+    if let Some(local) = fetched {
+        let _ = std::fs::remove_file(local);
+    }
+
     if matches!(shell, Shell::EditConfig) {
         reload_config(app, settings);
     } else {
         app.log(shell_label(&shell), Some("closed".into()));
     }
     Ok(())
+}
+
+/// Copy a file down from the cluster, over the connection already open.
+///
+/// The remote path is quoted **once**: `scp` hands it to a shell on the far
+/// side, and there is no local shell in the way because the command is spawned
+/// with an argument list rather than a command line. The Python gets this wrong
+/// in both directions — see issues #39 and #40.
+fn fetch_remote(host: &str, control: &[String], path: &str) -> Result<PathBuf, String> {
+    let local = std::env::temp_dir().join(format!(
+        "lazyslurm_{}_{}",
+        std::process::id(),
+        std::path::Path::new(path)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "log".to_string())
+    ));
+
+    let remote_arg = format!("{host}:{}", shell_words::quote(path));
+    let mut command = std::process::Command::new("scp");
+    command.arg("-q");
+    command.args(control);
+    command.arg(&remote_arg).arg(&local);
+
+    match command.status() {
+        Ok(status) if status.success() => Ok(local),
+        Ok(_) => {
+            let _ = std::fs::remove_file(&local);
+            Err(format!("could not fetch {path} from {host}"))
+        }
+        Err(error) => Err(format!("could not run scp: {error}")),
+    }
 }
 
 fn shell_label(shell: &Shell) -> String {
@@ -3003,6 +3062,65 @@ mod tests {
         );
         assert!(changes.iter().any(|c| c.contains("editor")), "{changes:?}");
         assert_eq!(app.config.days, 21);
+    }
+
+    #[test]
+    fn a_reload_keeps_the_settings_only_the_command_line_can_give() {
+        // --remote and --user never appear in the config file, so a reload must
+        // not drop them and silently move the session to the local cluster.
+        let mut app = App::new(Config {
+            remote: "me@login.hpc.edu".into(),
+            user: "rvy895".into(),
+            ..Config::default()
+        });
+
+        let mut reloaded = Config {
+            days: 21,
+            ..Config::default()
+        };
+        // What reload_config does before handing the config over.
+        reloaded.remote = app.config.remote.clone();
+        if reloaded.user.is_empty() {
+            reloaded.user = app.config.user.clone();
+        }
+        app.apply_config(reloaded);
+
+        assert_eq!(app.config.remote, "me@login.hpc.edu");
+        assert_eq!(app.config.user, "rvy895");
+        assert_eq!(app.config.days, 21);
+    }
+
+    #[test]
+    fn a_login_node_is_pointed_out() {
+        let mut app = App::new(Config {
+            remote: "me@login01.hpc.edu".into(),
+            ..Config::default()
+        });
+        warn_about_login_node(&mut app);
+
+        let logged: String = app
+            .log
+            .iter()
+            .filter_map(|entry| entry.result.clone())
+            .collect();
+        assert!(logged.contains("login node"), "{logged}");
+        assert!(logged.contains("login01.hpc.edu"), "{logged}");
+    }
+
+    #[test]
+    fn an_ordinary_host_is_not_flagged() {
+        let mut app = App::new(Config {
+            remote: "me@hpc.example.edu".into(),
+            ..Config::default()
+        });
+        let before = app.log.len();
+        warn_about_login_node(&mut app);
+        // The local hostname may legitimately add one; the remote must not.
+        assert!(app.log.iter().skip(before).all(|entry| !entry
+            .result
+            .as_deref()
+            .unwrap_or("")
+            .contains("hpc.example.edu")));
     }
 
     #[test]

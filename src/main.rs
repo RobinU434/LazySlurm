@@ -13,6 +13,9 @@ use lazyslurm::ui::{run, App};
 #[tokio::main]
 async fn main() -> ExitCode {
     let args = Args::parse_args();
+    if args.print_completions() {
+        return ExitCode::SUCCESS;
+    }
     let settings = Settings::discover(&args);
 
     // Anything worth telling the user about startup is shown in the command log

@@ -3,7 +3,7 @@
 Tracks progress against [RUST_PORT_PLAN.md](RUST_PORT_PLAN.md). One line per work
 item; update as you go, so a resumed session knows where it stopped.
 
-**Branch:** `rust-dev` · **Tests:** 582 passing · **Last updated:** 2026-08-13
+**Branch:** `rust-dev` · **Tests:** 586 passing · **Last updated:** 2026-08-13
 
 `lazyslurm` now starts, draws the main screen and quits. Verified end to end in
 a pty as well as by full-screen `TestBackend` draws.
@@ -35,7 +35,7 @@ comparison against a real cluster.
 | P6 | Partition, node and usage screens | **done** |
 | P7 | Actions wired to the UI, editor/pager shell-outs | **done** |
 | P8 | Remote mode over one SSH session | **done** |
-| P9 | Polish and release | not started |
+| P9 | Polish and release | **done**, except the release itself |
 
 ## Toolchain
 
@@ -189,6 +189,21 @@ Two test-isolation bugs were fixed here, both worth knowing about:
   killing only the leader left children holding the pty open and the reader
   blocked long after `close()`.
 
+### P9 — polish
+- README rewritten for the Rust implementation: install, the name-conflict
+  warning, the sdist toolchain note, keys, features, config, caches, status.
+- [MANUAL_TESTS.md](MANUAL_TESTS.md) — the checks no automated test can make.
+- `.github/workflows/release.yml` — tag-triggered wheels, sdist and PyPI
+  publish. **Never run.** See "Releasing" below.
+- `--completions <shell>`.
+
+Auditing §6 of the plan found a real gap: **the remote editor never fetched the
+file**. `e` in remote mode opened a path that only exists on the cluster. It now
+scp's the log down over the existing control socket, opens it, and removes the
+copy. The remote path is quoted **once**, because `scp` is spawned with an
+argument list — there is no local shell in the way. The Python gets this wrong
+in both directions (issues #39, #40).
+
 ## Divergences
 
 Seven, all recorded in [DIVERGENCES.md](DIVERGENCES.md) with reasoning. One (#4)
@@ -201,22 +216,42 @@ a blank where the fallback field has the answer. Worth fixing in the Python too.
 - **`g`/`G`** are bound on the job tables only. The full-screen panels do not
   advertise them and do not handle them; add to their binding tables if wanted.
 
-## Next steps
+## Releasing
 
-P9 — polish and release:
+Two things stand between here and a release, and **neither has been done**:
 
-1. Rewrite the README for the Rust implementation: `pip install lazyslurm-rs`,
-   the `lazyslurm-py` / `lazyslurm-rs` name-conflict warning, and the note that
-   an sdist build needs a Rust toolchain.
-2. Walk `MANUAL_TESTS.md` on a real cluster, local **and** `--remote`. Nothing
-   below has been run against real Slurm yet — every check so far is against
-   recorded output or a local shell.
-3. Optional: the `python -m lazyslurm` shim, and shell completions via
-   `clap_complete`.
-4. Tag, build wheels in CI, `maturin upload`.
+1. **Nothing has run against a live Slurm cluster.** Every check so far is
+   against recorded output, a local `/bin/sh` standing in for the SSH channel,
+   or a scripted 2FA login. [MANUAL_TESTS.md](MANUAL_TESTS.md) is the gate —
+   walk it locally *and* with `--remote` before tagging.
+2. **Publishing is deliberate and was not attempted.** The workflow fires only
+   on a `v*` tag, and it needs PyPI trusted publishing configured for this
+   repository first (or a `PYPI_API_TOKEN` secret, with the publish step
+   changed to use it). Then:
 
-Before releasing, walk §6 of the plan — the "behaviour that is easy to lose"
-checklist. Most items now have tests, but the list is the acceptance gate.
+   ```sh
+   git tag v0.1.0 && git push origin v0.1.0
+   ```
+
+   Do not upload a locally built wheel: it carries this machine's glibc.
+   `manylinux_2_39` will not install on most login nodes; only the CI
+   container's `manylinux2014` (glibc 2.17) wheels are fit to publish.
+
+### The §6 checklist
+
+The plan's "behaviour that is easy to lose" list is the acceptance gate for
+correctness. All nineteen items now hold, and all but two are covered by a named
+test. The exceptions are behaviours that only exist inside a spawned task:
+opportunistic script archiving on detail load, and that remote mode never opens
+a second connection — both need a real cluster, and both are in
+`MANUAL_TESTS.md`.
+
+### Not done, deliberately
+
+The `python -m lazyslurm` shim from §3.4 of the plan. It would add a Python
+package to a wheel that deliberately contains none, so that `import lazyslurm`
+could do nothing useful and `python -m lazyslurm` could duplicate a command
+already on `PATH`. If someone asks for it, it is half an hour's work.
 
 ### The old P8 notes, kept for reference Read `reference/python/src/lazyslurm/ssh.py`
 in full first; its module docstring explains the design, and every part of it is

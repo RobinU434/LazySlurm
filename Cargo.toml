@@ -19,6 +19,7 @@ path = "src/main.rs"
 anyhow = "1"
 chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4.6.9"
 crossterm = "0.29.0"
 nix = { version = "0.31.3", features = ["term", "process", "fs", "signal"] }
 ratatui = "0.30"

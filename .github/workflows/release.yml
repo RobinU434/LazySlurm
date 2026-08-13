@@ -1,0 +1,108 @@
+# Publishes to PyPI when a version tag is pushed.
+#
+# Nothing here runs on an ordinary push: releasing is deliberate, and the
+# workflow only fires on a `v*` tag or a manual dispatch.
+#
+# Before the first release, either configure PyPI trusted publishing for this
+# repository (recommended — no token to leak) or add a `PYPI_API_TOKEN` secret
+# and swap the publish step over to it.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Test before releasing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --all-features
+
+  wheels:
+    name: Wheel (${{ matrix.target }})
+    needs: check
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # manylinux2014 is glibc 2.17 — old enough for essentially every HPC
+      # login node still in service. Never publish a locally built wheel: it
+      # carries the glibc of whatever machine built it.
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist
+          manylinux: "2014"
+
+      - name: Check the metadata
+        run: |
+          pip install twine
+          twine check dist/*
+
+      - name: Smoke-test the wheel
+        if: matrix.target == 'x86_64'
+        run: |
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install dist/*.whl
+          /tmp/venv/bin/lazyslurm --version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.target }}
+          path: dist
+
+  sdist:
+    name: Source distribution
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist
+
+  publish:
+    name: Publish to PyPI
+    needs: [wheels, sdist]
+    runs-on: ubuntu-latest
+    # Trusted publishing needs this, and an environment gives you a place to
+    # require a manual approval before anything leaves the building.
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: What is about to be published
+        run: ls -l dist
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist

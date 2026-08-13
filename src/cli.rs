@@ -5,7 +5,8 @@
 //! [`Args::apply_to`] layer CLI over file over default without a flag that was
 //! merely defaulted overwriting a configured value.
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
+use clap_complete::Shell;
 
 use crate::config::Config;
 
@@ -44,6 +45,10 @@ pub struct Args {
     /// SSH target for remote mode, e.g. user@login.hpc.edu.
     #[arg(short = 'H', long, value_name = "HOST")]
     pub remote: Option<String>,
+
+    /// Print a shell completion script and exit.
+    #[arg(long, value_name = "SHELL")]
+    pub completions: Option<Shell>,
 }
 
 /// A setting the command line overrode, for the startup log.
@@ -64,6 +69,20 @@ impl Args {
     /// Parse the process arguments.
     pub fn parse_args() -> Self {
         Self::parse()
+    }
+
+    /// Print a completion script, if one was asked for.
+    ///
+    /// Returns whether it did, so the caller can exit instead of starting the
+    /// interface — this is a `--help`-shaped flag, not a setting.
+    pub fn print_completions(&self) -> bool {
+        let Some(shell) = self.completions else {
+            return false;
+        };
+        let mut command = Self::command();
+        let name = command.get_name().to_string();
+        clap_complete::generate(shell, &mut command, name, &mut std::io::stdout());
+        true
     }
 
     /// Layer these arguments over `config`, reporting what they changed.
@@ -173,6 +192,16 @@ mod tests {
         let mut full = vec!["lazyslurm"];
         full.extend_from_slice(argv);
         Args::try_parse_from(full).expect("arguments parse")
+    }
+
+    #[test]
+    fn completions_are_a_flag_not_a_setting() {
+        assert!(!args_from(&[]).print_completions());
+        // Every shell clap knows about is accepted.
+        for shell in ["bash", "zsh", "fish", "elvish", "powershell"] {
+            assert!(Args::try_parse_from(["lazyslurm", "--completions", shell]).is_ok());
+        }
+        assert!(Args::try_parse_from(["lazyslurm", "--completions", "nonsense"]).is_err());
     }
 
     #[test]
