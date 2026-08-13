@@ -73,6 +73,17 @@ the command, the import package and the config directory are all `lazyslurm`.
 
 ### Fixed
 
+- **A slow SSH login leaked a thread per second, and could swallow the 2FA prompt**
+  ([#52](https://github.com/RobinU434/LazySlurm/issues/52)). The auth pump started a
+  fresh pty read every second; `asyncio.wait_for` cancels the future on timeout but
+  cannot cancel a thread already blocked in `os.read`, so each quiet second left another
+  reader stuck on the same descriptor. When ssh finally wrote, the kernel could hand the
+  text to a reader nobody was awaiting — the prompt vanished and the login hung until the
+  120s timeout. The leaked threads also came out of the default executor that log reads
+  and file checks share, so a slow login degraded the rest of the session. One read now
+  stays pending across polls. This bit hardest on exactly the clusters the feature exists
+  for: a Duo push waits on a phone, and ten quiet seconds meant ten leaked threads.
+
 - **The job list on the partition and node screens jumped to the top every refresh**
   ([#43](https://github.com/RobinU434/LazySlurm/issues/43)). Those panes are rebuilt on
   the refresh timer, and rebuilding resets the cursor — so on a busy partition the list
