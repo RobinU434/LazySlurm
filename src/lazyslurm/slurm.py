@@ -468,14 +468,17 @@ async def _guess_log_path(
             os.path.join(work_dir, f"{job_name}-{job_id}.{ext_out}"),
             os.path.join(work_dir, f"{job_name}_{job_id}.{ext_out}"),
             os.path.join(work_dir, f"{job_name}.{ext_out}"),
-            # sbatch --output/--error with %j pattern
-            os.path.join(work_dir, f"{job_name}-%j.{ext_out}".replace("%j", job_id)),
         ])
     # Also check logs/ subdirectory
     candidates.extend([
         os.path.join(work_dir, "logs", f"slurm-{job_id}.{ext_out}"),
         os.path.join(work_dir, "log", f"slurm-{job_id}.{ext_out}"),
     ])
+
+    # Deduplicate while preserving search order. `ext_out == suffix` when
+    # suffix is "out", and the explicit {job_name}-{job_id} pattern already
+    # covers the %j replacement, so the raw list can contain duplicates.
+    candidates = list(dict.fromkeys(candidates))
 
     for path in candidates:
         if await _file_exists(path):

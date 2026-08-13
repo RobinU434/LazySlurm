@@ -357,6 +357,45 @@ def test_resubmit_without_job_id_skips_fallback(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# _guess_log_path candidate generation
+# ---------------------------------------------------------------------------
+
+
+def test_guess_log_path_has_no_duplicate_candidates(monkeypatch):
+    """Regression: {job_name}-%j.{ext} expands to the same path as {job_name}-{job_id}.{ext}."""
+    seen: list[str] = []
+
+    async def _record_exists(path: str) -> bool:
+        seen.append(path)
+        return False
+
+    monkeypatch.setattr(slurm, "_file_exists", _record_exists)
+    result = asyncio.run(slurm._guess_log_path("/work", "123", "out", "train"))
+    assert result is None
+    assert len(seen) == len(set(seen)), f"duplicate candidates: {seen}"
+
+
+def test_guess_log_path_priorities_match_common_patterns(monkeypatch):
+    """The default Slurm pattern is checked first, then job-name variants, then logs/."""
+    seen: list[str] = []
+
+    async def _record_exists(path: str) -> bool:
+        seen.append(path)
+        return False
+
+    monkeypatch.setattr(slurm, "_file_exists", _record_exists)
+    asyncio.run(slurm._guess_log_path("/work", "123", "out", "train"))
+
+    # Deduplication collapses the two identical default-pattern candidates.
+    assert seen[0] == "/work/slurm-123.out"
+    assert "/work/train-123.out" in seen
+    assert "/work/train_123.out" in seen
+    assert "/work/train.out" in seen
+    assert "/work/logs/slurm-123.out" in seen
+    assert "/work/log/slurm-123.out" in seen
+
+
+# ---------------------------------------------------------------------------
 # cluster summary: partition availability (sinfo) + count formatting
 # ---------------------------------------------------------------------------
 
