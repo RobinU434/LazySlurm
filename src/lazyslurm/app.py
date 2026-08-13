@@ -723,6 +723,8 @@ class LazySlurmApp(App):
         self._multiselect_ids: set[str] = set()
         # Job ids currently being edited by EditJobScreen
         self._edit_job_ids: list[str] = []
+        # Timer clearing the status line
+        self._status_timer = None
 
     def compose(self) -> ComposeResult:
         show_gpu = not self.config.no_gpu and not self.config.no_live
@@ -739,6 +741,7 @@ class LazySlurmApp(App):
                 yield DetailView(id="detail-view", show_gpu=show_gpu)
                 yield MetadataView(id="metadata-view")
                 yield RichLog(id="command-log", wrap=True, markup=True)
+        yield Static(id="status-line")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -1784,11 +1787,29 @@ class LazySlurmApp(App):
         if result:
             log.write(f"  [dim]>>> {result}[/]")
 
+    # How long a status message stays on the bar above the key bar.
+    _STATUS_SECONDS = 5.0
+
     def _set_status(self, text: str) -> None:
-        """Log a message to the command log panel."""
-        if text:
-            self._log(text)
-        # Also update the footer subtitle for one-line visibility
+        """Show a user-facing message on the status line and log it.
+
+        Unlike `_log`, which traces commands, this is for things the user is
+        waiting to be told — a refusal, a result. The command log scrolls; the
+        status line holds the message where the eye already is.
+        """
+        if not text:
+            return
+        self._log(text)
+        try:
+            status = self.query_one("#status-line", Static)
+        except NoMatches:
+            return  # called before mount (or from a screen without the bar)
+        status.update(text)
+        if self._status_timer is not None:
+            self._status_timer.stop()
+        self._status_timer = self.set_timer(
+            self._STATUS_SECONDS, lambda: status.update(""),
+        )
 
 
     def action_focus_next_right(self) -> None:

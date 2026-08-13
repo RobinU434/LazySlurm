@@ -160,10 +160,6 @@ def cache_job_paths(
     _save_log_cache(cache)
 
 
-# Backwards-compatible alias
-cache_log_paths = cache_job_paths
-
-
 def get_cached_log_paths(job_id: str) -> tuple[str | None, str | None]:
     """Retrieve cached stdout/stderr paths for a job."""
     cache = _load_log_cache()

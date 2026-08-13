@@ -7,6 +7,16 @@
     padding: 0 1;
 }
 
+/* One-line status above the key bar: user-facing messages ("Only pending jobs
+   can be edited") would otherwise scroll away in the command log. */
+#status-line {
+    dock: bottom;
+    height: 1;
+    background: transparent;
+    color: $warning;
+    padding: 0 1;
+}
+
 /* Main two-column layout */
 #main-container {
     layout: horizontal;
