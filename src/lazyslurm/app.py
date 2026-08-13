@@ -17,7 +17,7 @@ from textual.widgets import DataTable, Footer, Input, RichLog, Static
 
 from lazyslurm import help as help_topics
 from lazyslurm import slurm
-from lazyslurm.models import Config, PriorityInfo
+from lazyslurm.models import Config, PriorityInfo, parse_duration
 from lazyslurm.widgets.detail_view import DetailView, parse_mem_bytes
 from lazyslurm.widgets.job_table import ActiveJobTable, CompletedJobTable, JobSelected, set_partition_colors, set_display_config
 from lazyslurm.widgets.metadata_view import MetadataView
@@ -704,6 +704,8 @@ class LazySlurmApp(App):
         self._first_poll_done: bool = False
         # Sparkline resource history
         self._resource_history: dict[str, dict[str, list[float]]] = {}
+        # Previous (TotalCPU, Elapsed) per job — the CPU series is a delta
+        self._cpu_marker: dict[str, tuple[float, float] | None] = {}
         # Resubmit state
         self._resubmit_script: str = ""
         self._resubmit_work_dir: str = ""
@@ -932,14 +934,29 @@ class LazySlurmApp(App):
             hist["memory"].append(mem)
             if len(hist["memory"]) > _MAX_HISTORY:
                 hist["memory"] = hist["memory"][-_MAX_HISTORY:]
-        # Parse CPU: try total_cpu as seconds-like value, or just count samples
-        # For sparklines, use max_rss as primary metric; CPU is harder to normalize
-        # Use ave_rss as a proxy for CPU activity (non-zero means active)
-        cpu_val = parse_mem_bytes(stats.ave_rss)
-        if cpu_val is not None:
-            hist["cpu"].append(cpu_val)
-            if len(hist["cpu"]) > _MAX_HISTORY:
-                hist["cpu"] = hist["cpu"][-_MAX_HISTORY:]
+        # TotalCPU and Elapsed are both cumulative, so the ratio of their deltas
+        # since the previous sample is the core-equivalents busy over that
+        # interval — the same quantity the Efficiency block reports as cpu_used.
+        # Normalised by AllocCPUS it gives a 0-1 series: a flat CPU line under a
+        # rising memory line is what a stalled job looks like.
+        cpu_now = parse_duration(stats.total_cpu)
+        elapsed_now = parse_duration(stats.elapsed)
+        prev = self._cpu_marker.get(job_id)
+        self._cpu_marker[job_id] = (
+            (cpu_now, elapsed_now) if cpu_now is not None and elapsed_now is not None
+            else None
+        )
+        if cpu_now is None or elapsed_now is None or prev is None:
+            return
+        d_cpu, d_elapsed = cpu_now - prev[0], elapsed_now - prev[1]
+        if d_elapsed <= 0:
+            return
+        busy = d_cpu / d_elapsed
+        if stats.alloc_cpus > 0:
+            busy /= stats.alloc_cpus
+        hist["cpu"].append(max(0.0, busy))
+        if len(hist["cpu"]) > _MAX_HISTORY:
+            hist["cpu"] = hist["cpu"][-_MAX_HISTORY:]
 
     # ------------------------------------------------------------------
     # Job selection handling (debounced)

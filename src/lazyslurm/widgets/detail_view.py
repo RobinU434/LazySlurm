@@ -44,12 +44,17 @@ def efficiency_bar(ratio: float | None, width: int = 8) -> str:
 _SPARK_CHARS = "▁▂▃▄▅▆▇█"
 
 
-def sparkline(values: list[float]) -> str:
-    """Render a sparkline from a list of numeric values."""
+def sparkline(values: list[float], scale_max: float | None = None) -> str:
+    """Render a sparkline from a list of numeric values.
+
+    ``scale_max`` fixes the top of the scale — pass 1.0 for a series that is
+    already a fraction, so a job using half its cores does not look identical
+    to one using all of them.
+    """
     if not values:
         return ""
-    mx = max(values)
-    if mx == 0:
+    mx = scale_max if scale_max else max(values)
+    if mx <= 0:
         return "▁" * len(values)
     return "".join(_SPARK_CHARS[min(int(v / mx * 7), 7)] for v in values)
 
@@ -243,7 +248,13 @@ class DetailView(Vertical):
             if "memory" in history and history["memory"]:
                 hist_lines.append(f"  Memory: {sparkline(history['memory'])}  ({len(history['memory'])} samples)")
             if "cpu" in history and history["cpu"]:
-                hist_lines.append(f"  CPU:    {sparkline(history['cpu'])}  ({len(history['cpu'])} samples)")
+                # Fraction of allocated cores busy since the previous sample —
+                # plotted against a fixed 0-100% scale, not its own maximum.
+                cpu = history["cpu"]
+                hist_lines.append(
+                    f"  CPU:    {sparkline(cpu, scale_max=1.0)}"
+                    f"  ({len(cpu)} samples, now {cpu[-1] * 100:.0f}% of alloc)"
+                )
             if len(hist_lines) > 1:
                 sections.append("\n".join(hist_lines))
 

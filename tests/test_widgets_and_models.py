@@ -137,6 +137,12 @@ def test_jobdetail_all_empty_gives_na():
     assert d.node_list == "N/A"
 
 
+def test_sparkline_fixed_scale_does_not_self_normalise():
+    # A series that is already a fraction must plot against 0-1, so half the
+    # cores busy does not look the same as all of them.
+    assert sparkline([0.5, 0.5], scale_max=1.0) == sparkline([0.5], scale_max=1.0) * 2
+    assert sparkline([0.5, 0.5], scale_max=1.0) != sparkline([1.0, 1.0], scale_max=1.0)
+
 def test_jobdetail_gres_from_tres():
     d = JobDetail(job_id="1", raw={"ReqTRES": "cpu=4,mem=8G,gres/gpu=2"})
     assert "gres/gpu=2" in d.gres
