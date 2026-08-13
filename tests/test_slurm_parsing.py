@@ -1073,3 +1073,68 @@ def test_read_log_file_reports_not_found_locally_not_on_the_cluster(monkeypatch)
 
     path = "/work/bens'runs/missing.out"
     assert asyncio.run(slurm.read_log_file(path)) == f"(file not found: {path})"
+
+
+# ---------------------------------------------------------------------------
+# a "|" in a job name must not shift the row (#47)
+# ---------------------------------------------------------------------------
+
+
+def test_pipe_in_job_name_does_not_shift_squeue_columns(monkeypatch):
+    row = "101|train|v2|1:00|gpu|RUNNING|2:00|1|4|8G|gpu:1|/work/a"
+    monkeypatch.setattr(slurm, "_run_cmd", _fake_run_cmd(row))
+
+    job = asyncio.run(slurm.get_running_jobs(Config()))[0]
+    assert job.name == "train|v2"
+    assert job.state == "RUNNING"       # used for colour, filters and counts
+    assert job.partition == "gpu"
+    assert job.elapsed == "1:00"
+    # work_dir feeds log-path guessing and resubmit's --chdir, so a shifted
+    # value here submits the next run in the wrong directory.
+    assert job.work_dir == "/work/a"
+
+
+def test_several_pipes_in_a_job_name_still_parse(monkeypatch):
+    row = "101|a|b|c|1:00|gpu|RUNNING|2:00|1|4|8G|gpu:1|/work/a"
+    monkeypatch.setattr(slurm, "_run_cmd", _fake_run_cmd(row))
+    job = asyncio.run(slurm.get_running_jobs(Config()))[0]
+    assert job.name == "a|b|c"
+    assert job.work_dir == "/work/a"
+
+
+def test_short_row_is_still_rejected(monkeypatch):
+    monkeypatch.setattr(slurm, "_run_cmd", _fake_run_cmd("101|train|1:00"))
+    assert asyncio.run(slurm.get_running_jobs(Config())) == []
+
+
+def test_pipe_in_job_name_does_not_shift_sacct_columns(monkeypatch):
+    row = "300|job|X|COMPLETED|0:0|s|e|1:00|gpu"
+    monkeypatch.setattr(slurm, "_run_cmd", _fake_run_cmd(row))
+    job = asyncio.run(slurm.get_completed_jobs(Config()))[0]
+    assert job.name == "job|X"
+    assert job.state == "COMPLETED"
+    assert job.partition == "gpu"
+    assert job.elapsed == "1:00"
+
+
+def test_pipe_in_job_name_does_not_shift_partition_jobs():
+    row = "9|bob|a|b|c|RUNNING|1:00|2:00|1|4|gpu:1|node01"
+    job = slurm.parse_partition_jobs(row)[0]
+    assert job.user == "bob"
+    assert job.name == "a|b|c"
+    assert job.state == "RUNNING"
+    assert job.nodelist == "node01"
+
+
+def test_node_reason_keeps_a_pipe_and_the_spacing_around_it():
+    # Reason is free text an admin typed, and it is the last field.
+    node = slurm.parse_sinfo_nodes(
+        "node07|down*|0/0/8/8|515000|N/A|N/A|gpu:8|(null)|disk full | replace me"
+    )[0]
+    assert node.reason == "disk full | replace me"
+
+
+def test_split_row_leaves_a_well_formed_row_alone():
+    assert slurm._split_row("a|b|c", 3, free_text=1) == ["a", "b", "c"]
+    assert slurm._split_row("a|b|c", 4, free_text=1) is None
+    assert slurm._split_row("a|b|c|d", 3, free_text=1) == ["a", "b|c", "d"]

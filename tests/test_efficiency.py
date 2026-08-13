@@ -229,7 +229,9 @@ def test_sizing_hint_suggests_smaller_everything():
     hint = sizing_hint(compute_efficiency(_stats()))
     assert "--mem=4G" in hint            # 2.6 GiB used + a third
     assert "--cpus-per-task=1" in hint
-    assert "--time=00:25:00" in hint     # 17 minutes + half
+    # 17m10s + half is 25m45s, which rounds *up*: truncating to 00:25:00 gave
+    # less headroom than the "+ half" this hint promises.
+    assert "--time=00:26:00" in hint
 
 
 def test_sizing_hint_is_silent_for_a_well_sized_job():
@@ -356,3 +358,35 @@ def test_format_bytes(value, text):
 )
 def test_format_duration(seconds, text):
     assert format_duration(seconds) == text
+
+
+# ---------------------------------------------------------------------------
+# sizing_hint never advises a limit the job would die under (#49)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("elapsed,limit", [(1, 600), (30, 600), (59, 600), (100, 250)])
+def test_time_suggestion_is_never_zero(elapsed, limit):
+    hint = sizing_hint(Efficiency(walltime=elapsed / limit, elapsed=elapsed,
+                                  time_limit=limit))
+    assert "--time=00:00:00" not in hint, "a zero limit means *unlimited* to Slurm"
+
+
+@pytest.mark.parametrize("elapsed,limit", [(1, 600), (30, 600), (100, 250), (3700, 37000)])
+def test_time_suggestion_covers_what_the_job_already_used(elapsed, limit):
+    import re
+
+    hint = sizing_hint(Efficiency(walltime=elapsed / limit, elapsed=elapsed,
+                                  time_limit=limit))
+    match = re.search(r"--time=(\d+):(\d\d):(\d\d)", hint)
+    assert match, hint
+    hours, minutes, seconds = (int(g) for g in match.groups())
+    suggested = hours * 3600 + minutes * 60 + seconds
+    assert suggested > elapsed, f"{suggested}s would kill a job that ran {elapsed}s"
+
+
+def test_time_suggestion_rounds_up_not_down():
+    # 100s * 1.5 = 150s: truncating to whole minutes gave 120s, which is less
+    # than the headroom the hint claims to offer.
+    hint = sizing_hint(Efficiency(walltime=0.4, elapsed=100, time_limit=250))
+    assert "--time=00:03:00" in hint

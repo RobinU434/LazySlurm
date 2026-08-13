@@ -73,6 +73,24 @@ the command, the import package and the config directory are all `lazyslurm`.
 
 ### Fixed
 
+- **A `|` in a job name shifted every column of its row**
+  ([#47](https://github.com/RobinU434/LazySlurm/issues/47)). Slurm does not escape the
+  delimiter it prints between fields, so a job named `train|v2` produced an extra field
+  and every column after the name was read one place to the right — including `state`,
+  which drives colours and filters, and `work_dir`, which resubmit passes as `--chdir`.
+  The row was not rejected, just silently wrong. Surplus pieces are now folded back into
+  the name. A node's drain `Reason` keeps its pipes and spacing too.
+- **A down node was shown as 100% memory used**
+  ([#48](https://github.com/RobinU434/LazySlurm/issues/48)). `sinfo` reports `FreeMem` as
+  `N/A` for a node that has not reported, which was read as zero free — so an unreachable
+  node rendered a red `503/503G`. Unknown now renders `—`, as the load column in the same
+  row already did.
+- **The stats tab could advise `--time=00:00:00`**
+  ([#49](https://github.com/RobinU434/LazySlurm/issues/49)). The sizing hint truncated to
+  whole minutes with no floor, so a job shorter than 40 seconds was told to ask for zero —
+  which Slurm reads as *unlimited*, the opposite of the advice. Suggestions now round up
+  and never fall below what the job already used.
+
 - **The job list on the partition and node screens jumped to the top every refresh**
   ([#43](https://github.com/RobinU434/LazySlurm/issues/43)). Those panes are rebuilt on
   the refresh timer, and rebuilding resets the cursor — so on a busy partition the list

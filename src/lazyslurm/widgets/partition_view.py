@@ -160,11 +160,21 @@ class NodeTable(KeyedTable):
         else:
             load = load_bar(node.load, width=6)
 
-        mem = Text.assemble(
-            (f"{node.mem_used_mb / 1024:5.0f}", "" if node.mem_used < 0.9 else "red"),
-            ("/", "dim"),
-            f"{node.memory_mb / 1024:.0f}G",
-        ) if node.memory_mb else Text("—", style="dim")
+        # Unknown is not "full": a node that has not reported its free memory
+        # gets the same "—" the load column above already uses.
+        used_mb = node.mem_used_mb
+        if node.memory_mb and used_mb is not None:
+            mem = Text.assemble(
+                (f"{used_mb / 1024:5.0f}", "" if (node.mem_used or 0) < 0.9 else "red"),
+                ("/", "dim"),
+                f"{node.memory_mb / 1024:.0f}G",
+            )
+        elif node.memory_mb:
+            mem = Text.assemble(
+                ("    —", "dim"), ("/", "dim"), f"{node.memory_mb / 1024:.0f}G",
+            )
+        else:
+            mem = Text("—", style="dim")
 
         return (
             Text(node.name, style="bold" if node.unresponsive else ""),
