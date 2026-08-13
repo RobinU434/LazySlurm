@@ -3,7 +3,7 @@
 Tracks progress against [RUST_PORT_PLAN.md](RUST_PORT_PLAN.md). One line per work
 item; update as you go, so a resumed session knows where it stopped.
 
-**Branch:** `rust-dev` · **Tests:** 556 passing · **Last updated:** 2026-08-13
+**Branch:** `rust-dev` · **Tests:** 582 passing · **Last updated:** 2026-08-13
 
 `lazyslurm` now starts, draws the main screen and quits. Verified end to end in
 a pty as well as by full-screen `TestBackend` draws.
@@ -34,7 +34,7 @@ comparison against a real cluster.
 | P5 | Detail / metadata / help panels | **done** |
 | P6 | Partition, node and usage screens | **done** |
 | P7 | Actions wired to the UI, editor/pager shell-outs | **done** |
-| P8 | Remote mode over one SSH session | not started |
+| P8 | Remote mode over one SSH session | **done** |
 | P9 | Polish and release | not started |
 
 ## Toolchain
@@ -168,6 +168,27 @@ quoted again for the local one; `ssh` hops through the live session's control
 socket rather than `-J`. Those are Python issues #39 and #40 — do not copy that
 code back.
 
+### P8 — remote mode
+- `ssh/pty.rs` — spawning on a pty, which is what makes 2FA work at all. A test
+  asserts the property directly: the child sees a terminal.
+- `ssh/session.rs` — master, auth pump, multiplexed channel, marker-framed
+  `run()`, reconnect, close.
+- `ssh/runner.rs` — `RemoteRunner`. **This is the whole of what remote mode
+  changes.** Everything above the transport was written once.
+
+The prompt crosses tasks: the session sends the question on the event channel
+with a `oneshot` for the reply, and the main loop owns the modal. `r` retries a
+refused or dropped session.
+
+Two test-isolation bugs were fixed here, both worth knowing about:
+
+- Tests were calling `std::env::set_var("HOME", …)`, which is process-wide and
+  raced with the session's control-path lookup. `expand_tilde` now has an
+  injectable-home inner function so no test needs to.
+- `PtyProcess::kill` kills the process *group*. We put the child in its own, so
+  killing only the leader left children holding the pty open and the reader
+  blocked long after `close()`.
+
 ## Divergences
 
 Seven, all recorded in [DIVERGENCES.md](DIVERGENCES.md) with reasoning. One (#4)
@@ -182,7 +203,22 @@ a blank where the fallback field has the answer. Worth fixing in the Python too.
 
 ## Next steps
 
-P8 — remote mode, the last feature phase. Read `reference/python/src/lazyslurm/ssh.py`
+P9 — polish and release:
+
+1. Rewrite the README for the Rust implementation: `pip install lazyslurm-rs`,
+   the `lazyslurm-py` / `lazyslurm-rs` name-conflict warning, and the note that
+   an sdist build needs a Rust toolchain.
+2. Walk `MANUAL_TESTS.md` on a real cluster, local **and** `--remote`. Nothing
+   below has been run against real Slurm yet — every check so far is against
+   recorded output or a local shell.
+3. Optional: the `python -m lazyslurm` shim, and shell completions via
+   `clap_complete`.
+4. Tag, build wheels in CI, `maturin upload`.
+
+Before releasing, walk §6 of the plan — the "behaviour that is easy to lose"
+checklist. Most items now have tests, but the list is the acceptance gate.
+
+### The old P8 notes, kept for reference Read `reference/python/src/lazyslurm/ssh.py`
 in full first; its module docstring explains the design, and every part of it is
 load-bearing.
 
