@@ -945,3 +945,95 @@ def test_interactive_shell_srun_remote_runs_on_the_login_node_with_a_pty():
 def test_interactive_shell_quotes_hostile_arguments():
     cmd = slurm.interactive_shell_cmd("ssh", "node; rm -rf /")
     assert "; rm -rf /" not in cmd.replace("'node; rm -rf /'", "")
+
+
+# ---------------------------------------------------------------------------
+# resubmit with modified resources
+# ---------------------------------------------------------------------------
+
+
+def test_resubmit_overrides_map_to_sbatch_flags():
+    tokens = slurm.build_resubmit_tokens(
+        ["job.sh"],
+        {"time_limit": "2:00:00", "memory": "8G", "cpus": "4",
+         "nodes": "2", "partition": "gpu"},
+    )
+    assert "--time=2:00:00" in tokens
+    assert "--mem=8G" in tokens
+    assert "--cpus-per-task=4" in tokens
+    assert "--nodes=2" in tokens
+    assert "--partition=gpu" in tokens
+    assert tokens[-1] == "job.sh"          # the script stays last
+
+
+def test_resubmit_override_replaces_the_original_flag():
+    # Every spelling sbatch accepts must be replaced, not duplicated.
+    for original in (
+        ["--time=1:00:00", "job.sh"],
+        ["--time", "1:00:00", "job.sh"],
+        ["-t", "1:00:00", "job.sh"],
+        ["-t1:00:00", "job.sh"],
+    ):
+        tokens = slurm.build_resubmit_tokens(list(original), {"time_limit": "4:00:00"})
+        assert "--time=4:00:00" in tokens
+        assert "1:00:00" not in " ".join(tokens), original
+        assert tokens[-1] == "job.sh"
+
+
+def test_resubmit_blank_override_changes_nothing():
+    tokens = slurm.build_resubmit_tokens(
+        ["--time=1:00:00", "job.sh"], {"time_limit": "  ", "memory": ""},
+    )
+    assert tokens == ["--time=1:00:00", "job.sh"]
+
+
+def test_resubmit_no_overrides_is_the_original_line():
+    tokens = ["--array=1-4", "-J", "train", "job.sh"]
+    assert slurm.build_resubmit_tokens(list(tokens), None) == tokens
+    assert slurm.build_resubmit_tokens(list(tokens), {}) == tokens
+
+
+def test_resubmit_keeps_unrelated_flags_and_script_arguments():
+    tokens = slurm.build_resubmit_tokens(
+        ["--array=1-4", "-J", "train", "job.sh", "--time=99"],
+        {"time_limit": "4:00:00"},
+    )
+    # --time after the script belongs to the script, not to sbatch.
+    assert tokens[-2:] == ["job.sh", "--time=99"]
+    assert "--array=1-4" in tokens and "-J" in tokens and "train" in tokens
+    assert "--time=4:00:00" in tokens
+
+
+def test_resubmit_memory_drops_the_squeue_per_node_marker():
+    tokens = slurm.build_resubmit_tokens(["job.sh"], {"memory": "40Gn"})
+    assert "--mem=40G" in tokens
+
+
+def test_suggest_doubles_time_after_timeout():
+    out = slurm.suggest_resubmit_overrides("TIMEOUT", {"time_limit": "2:00:00"})
+    assert out == {"time_limit": "04:00:00"}
+    # Past a day, Slurm needs the D-HH:MM:SS form.
+    out = slurm.suggest_resubmit_overrides("TIMEOUT", {"time_limit": "18:00:00"})
+    assert out == {"time_limit": "1-12:00:00"}
+
+
+def test_suggest_doubles_memory_after_oom():
+    assert slurm.suggest_resubmit_overrides(
+        "OUT_OF_MEMORY", {"memory": "4G"},
+    ) == {"memory": "8192M"}
+
+
+def test_suggest_nothing_for_other_states_or_missing_values():
+    assert slurm.suggest_resubmit_overrides("FAILED", {"time_limit": "2:00:00"}) == {}
+    assert slurm.suggest_resubmit_overrides("TIMEOUT", {"time_limit": "UNLIMITED"}) == {}
+    assert slurm.suggest_resubmit_overrides("OUT_OF_MEMORY", {"memory": ""}) == {}
+
+
+def test_resubmit_job_passes_overrides_through_to_sbatch(monkeypatch):
+    fake, calls = _capture_run_cmd()
+    monkeypatch.setattr(slurm, "_run_cmd", fake)
+    ok, _ = asyncio.run(slurm.resubmit_job(
+        "sbatch --time=1:00:00 job.sh", "/work", overrides={"time_limit": "3:00:00"},
+    ))
+    assert ok
+    assert calls["args"] == ("sbatch", "--chdir", "/work", "--time=3:00:00", "job.sh")

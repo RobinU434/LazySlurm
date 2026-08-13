@@ -228,10 +228,21 @@ class EditJobScreen(ModalScreen[dict]):
     }
     """
 
-    def __init__(self, job_ids: list[str], current: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        job_ids: list[str],
+        current: dict[str, str] | None = None,
+        prefill: dict[str, str] | None = None,
+        title: str = "",
+    ) -> None:
         super().__init__()
         self.job_ids = list(job_ids)
         self.current = current or {}
+        # What the fields *show*, when that differs from what the job has —
+        # a suggested value is still a change, so it is diffed against
+        # ``current`` rather than against itself.
+        self.prefill = {**self.current, **(prefill or {})}
+        self.title_text = title
         self._keys = [f[0] for f in slurm.EDITABLE_FIELDS]
 
     def compose(self) -> ComposeResult:
@@ -241,13 +252,15 @@ class EditJobScreen(ModalScreen[dict]):
                     yield Static(str(number), classes="lineno")
                     yield Static(scontrol_key, classes="field-label")
                     yield Input(
-                        value=self.current.get(key, ""),
+                        value=self.prefill.get(key, ""),
                         id=f"edit-{key}",
                     )
 
     def on_mount(self) -> None:
         box = self.query_one(Vertical)
-        if len(self.job_ids) == 1:
+        if self.title_text:
+            box.border_title = f" {self.title_text} "
+        elif len(self.job_ids) == 1:
             box.border_title = f" job.{self.job_ids[0]} "
         else:
             box.border_title = f" job.{len(self.job_ids)}-selected "
@@ -671,6 +684,7 @@ class LazySlurmApp(App):
         Binding("shift+c", "force_cancel_job", "Force Cancel", show=False),
         Binding("ctrl+v", "toggle_multiselect", "Multi-select", show=False),
         Binding("s", "resubmit_job", "Resubmit", show=False),
+        Binding("S", "resubmit_job_edit", "Resubmit (edit resources)", show=False),
         Binding("u", "edit_job", "Edit Job", show=False),
         Binding("p", "partitions", "Partitions", show=False),
         Binding("U", "usage", "Usage", show=False),
@@ -1475,6 +1489,10 @@ class LazySlurmApp(App):
             self._set_status("Cannot determine submit script for this job")
             return
 
+        state = detail.state.upper()
+        if state.startswith("TIMEOUT") or state.startswith("OUT_OF_MEMORY"):
+            self._log("resubmit", f"job ended {detail.state} — Shift+S resubmits with more")
+
         self._resubmit_script = script
         self._resubmit_work_dir = detail.work_dir
         self._resubmit_job_id = self._selected_job_id
@@ -1489,6 +1507,86 @@ class LazySlurmApp(App):
         self._log(f"sbatch {self._resubmit_script}")
         success, msg = await slurm.resubmit_job(
             self._resubmit_script, self._resubmit_work_dir, self._resubmit_job_id,
+        )
+        self._log("resubmit", msg)
+        if success:
+            await self._poll_jobs()
+
+    # Which JobDetail accessor holds each editable field. The scontrol and
+    # sacct spellings are already reconciled there.
+    _RESUBMIT_PREFILL = {
+        "time_limit": "time_limit",
+        "partition": "partition",
+        "nodes": "num_nodes",
+        "cpus": "num_cpus",
+        "memory": "memory",
+    }
+
+    async def action_resubmit_job_edit(self) -> None:
+        """Resubmit a terminated job with different resources (Shift+S).
+
+        The loop after a failure is "run it again, but bigger" — and the
+        property editor (`u`) only works on jobs that are still queued, by
+        which point it is too late.
+        """
+        if self._selected_job_id is None:
+            self._set_status("No job selected")
+            return
+        if self._selected_source != "completed":
+            self._set_status("Resubmit is only available for terminated jobs")
+            return
+
+        detail = await slurm.get_job_detail(self._selected_job_id)
+        if detail is None:
+            self._set_status("Cannot get job details")
+            return
+
+        script = detail.submit_line
+        if not script or script == "N/A":
+            self._set_status("Cannot determine submit script for this job")
+            return
+
+        current = {}
+        for key, attr in self._RESUBMIT_PREFILL.items():
+            value = str(getattr(detail, attr, "") or "")
+            current[key] = "" if value == "N/A" else value
+
+        suggested = slurm.suggest_resubmit_overrides(detail.state, current)
+        for key, value in suggested.items():
+            self._log("resubmit", f"{detail.state}: suggesting {key} {current[key]} -> {value}")
+
+        self._resubmit_script = script
+        self._resubmit_work_dir = detail.work_dir
+        self._resubmit_job_id = self._selected_job_id
+        self.push_screen(
+            EditJobScreen(
+                [self._selected_job_id],
+                current=current,
+                prefill=suggested,
+                title=f"resubmit job.{self._selected_job_id} ",
+            ),
+            callback=self._on_resubmit_edited,
+        )
+
+    async def _on_resubmit_edited(self, overrides: dict | None) -> None:
+        # Escape dismisses with {}, and so does Ctrl+S with nothing changed —
+        # neither should submit a job. Plain `s` is the no-changes path.
+        if not overrides:
+            self._log("resubmit", "cancelled — no changes to submit")
+            return
+        tokens = shlex.split(self._resubmit_script)
+        if tokens and tokens[0] == "sbatch":
+            tokens = tokens[1:]
+        preview = slurm.build_resubmit_tokens(tokens, overrides)
+        chdir = f"--chdir {self._resubmit_work_dir} " if self._resubmit_work_dir else ""
+        # The whole point is that the user can see what changed before it runs.
+        self._log("sbatch", f"{chdir}{' '.join(preview)}")
+
+        success, msg = await slurm.resubmit_job(
+            self._resubmit_script,
+            self._resubmit_work_dir,
+            self._resubmit_job_id,
+            overrides=overrides,
         )
         self._log("resubmit", msg)
         if success:

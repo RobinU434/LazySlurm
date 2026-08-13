@@ -125,6 +125,7 @@ Press `?` at any time for this list inside the app:
 | `Shift+C` | **Force cancel** — sends SIGKILL immediately, no confirmation |
 | `Ctrl+V` | Toggle multi-select mode (vim-visual style). Use Up/Down to extend the selection range from an anchor row, then press `c` or `Shift+C` to cancel all selected jobs. Press `Ctrl+V` again to exit. Detail panels freeze on the last single-selected job. |
 | `s` | Resubmit a terminated job using its original sbatch script (with confirmation) |
+| `Shift+S` | [Resubmit with different resources](#resubmit-with-more-resources) — opens the editor prefilled from the job, suggesting 2x after a TIMEOUT or OOM |
 | `u` | Edit a **pending** job's properties: runtime, partition, nodes, CPUs, memory. Works on a multi-selection too |
 | `Shift+U` | Open the [account usage panel](#account-usage) — CPU-hours and your fairshare |
 | `p` | Open the [partition monitor](#partition-monitor) — per-partition load and every user's jobs. `Escape` or `p` returns |
@@ -638,6 +639,31 @@ Resubmit (**`s`**) runs the job's original sbatch command. If the script file it
 longer exists, LazySlurm substitutes the archived copy and says so in the Command Log. Not
 available in remote mode, where the archive is local but `sbatch` runs on the login node.
 
+### Resubmit with more resources
+
+The loop after a failure is usually "run it again, but bigger" — more time after a
+TIMEOUT, more memory after an OOM kill. `u` cannot help there: Slurm fixes a job's
+allocation once it starts, so the property editor only works on jobs still queued.
+
+**`Shift+S`** opens that same editor for a *terminated* job, prefilled with what the job
+actually had, and submits with the changed fields as sbatch flags:
+
+```
+sbatch --chdir /work --time=4:00:00 --mem=16G job.sh
+```
+
+- Fields map to `--time`, `--partition`, `--nodes`, `--cpus-per-task` and `--mem`.
+- An override **replaces** the same option in the original submit line rather than being
+  appended next to it, so the command log shows exactly what was requested.
+- A field left blank keeps whatever the original line had. Options after the script name
+  belong to the script and are never touched.
+- After a **TIMEOUT** the runtime field is prefilled with double the old limit, and after
+  **OUT_OF_MEMORY** the memory field with double the old request. They are suggestions —
+  overwrite or clear them.
+- The full `sbatch` line is written to the Command Log before it runs.
+
+The [archived-script fallback](#resubmit-fallback) applies here too.
+
 ### Cache files
 
 | File | Purpose |
@@ -645,7 +671,7 @@ available in remote mode, where the archive is local but `sbatch` runs on the lo
 | `~/.config/lazyslurm/log_cache.json` | Cached `StdOut`/`StdErr` paths, work dir, and submit command per job ID |
 | `~/.config/lazyslurm/scripts/<job_id>.sh` | Archived sbatch scripts, mode `600` (they often contain tokens and private paths) |
 
-Both are pruned on startup using `cache_max_age_days` (default 30, `null` to never prune).
+Both are pruned on startup using `cache_max_age_days` (default 30, `0` to never prune).
 Set `script_cache_dir` in `config.toml` to archive scripts somewhere else.
 
 > Earlier versions shipped a `lazyslurm-daemon` that polled for log paths in the background.
