@@ -407,3 +407,21 @@ def test_load_bar(fraction, expected_bar, expected_style):
     assert text.plain.startswith(expected_bar)
     assert text.plain.endswith("%")
     assert text.spans[0].style == expected_style
+
+
+# ---------------------------------------------------------------------------
+# cache_max_age_days: TOML has no null, so 0/false must mean "never"
+# ---------------------------------------------------------------------------
+
+
+def test_cache_max_age_zero_means_never_not_delete_everything():
+    from lazyslurm.__main__ import parse_cache_max_age
+
+    assert parse_cache_max_age(0) is None
+    assert parse_cache_max_age(False) is None
+    assert parse_cache_max_age(None) is None
+    assert parse_cache_max_age(-1) is None
+    assert parse_cache_max_age(30) == 30
+    assert parse_cache_max_age("7") == 7
+    assert parse_cache_max_age("nonsense") == 30
+

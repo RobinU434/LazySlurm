@@ -21,7 +21,7 @@
 # collapse_arrays = true     # fold a job array into one row; Enter expands it
 
 # Cache settings
-# cache_max_age_days = 30    # auto-delete cached job info older than N days (null = never)
+# cache_max_age_days = 30    # auto-delete cached job info older than N days (0 = never)
 # script_cache_dir = ""      # where archived sbatch scripts live (default: <config_dir>/scripts)
 
 # Partition display order in the cluster bar.

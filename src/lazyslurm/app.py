@@ -1550,6 +1550,7 @@ class LazySlurmApp(App):
     def _reload_config(self) -> None:
         """Reload config from disk and apply changes live."""
         from lazyslurm import config as persistent_config
+        from lazyslurm.__main__ import parse_cache_max_age
 
         saved = persistent_config.load()
         old = self.config
@@ -1571,7 +1572,9 @@ class LazySlurmApp(App):
             max_partition_width=int(saved.get("max_partition_width", old.max_partition_width)),
             abbreviate_states=bool(saved.get("abbreviate_states", old.abbreviate_states)),
             collapse_arrays=bool(saved.get("collapse_arrays", old.collapse_arrays)),
-            cache_max_age_days=saved.get("cache_max_age_days", old.cache_max_age_days),
+            cache_max_age_days=parse_cache_max_age(
+                saved.get("cache_max_age_days", old.cache_max_age_days)
+            ),
             script_cache_dir=os.path.expanduser(
                 str(saved.get("script_cache_dir", old.script_cache_dir))
             ),
