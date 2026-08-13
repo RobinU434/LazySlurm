@@ -1128,9 +1128,11 @@ async def read_log_file(path: str | None, tail_lines: int = TAIL_LINES) -> str:
         return "(no log file path available)"
 
     if _config.remote:
-        # Read file via SSH
-        cmd = f"tail -n {tail_lines} {shlex.quote(path)} 2>/dev/null || echo '(file not found: {path})'"
-        stdout, _, rc = await _run_remote(cmd)
+        # The "file not found" text is a local UI string: building it on the
+        # cluster meant interpolating the path into a single-quoted echo, where
+        # a path containing an apostrophe closed the quote and handed the rest
+        # to the remote shell. The caller below already covers the empty case.
+        stdout, _, rc = await _run_remote(f"tail -n {tail_lines} {shlex.quote(path)}")
         return stdout if stdout.strip() else f"(file not found: {path})"
 
     if not os.path.isfile(path):
