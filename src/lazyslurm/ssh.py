@@ -129,16 +129,25 @@ class SSHSession:
         return self._channel is not None and self._channel.returncode is None
 
     async def connect(self) -> tuple[bool, str]:
-        """Authenticate once and open the shared shell channel."""
-        self._closed = False
-        if self._use_master:
-            ok, msg = await self._start_master()
+        """Authenticate once and open the shared shell channel.
+
+        Holds the same lock `run()` takes. A command that arrives while the
+        user is still typing their verification code then *waits* for this
+        login, instead of finding "not connected", calling _reconnect() and
+        starting a second `ssh -M` — which asks for another one-time password.
+        A poll every few seconds during a slow 2FA login meant a prompt every
+        few seconds.
+        """
+        async with self._lock:
+            self._closed = False
+            if self._use_master:
+                ok, msg = await self._start_master()
+                if not ok:
+                    return False, msg
+            ok, msg = await self._start_channel()
             if not ok:
                 return False, msg
-        ok, msg = await self._start_channel()
-        if not ok:
-            return False, msg
-        return True, f"Connected to {self.host}"
+            return True, f"Connected to {self.host}"
 
     async def _master_alive(self) -> bool:
         """Ask ssh whether the multiplexing master is up (`ssh -O check`).

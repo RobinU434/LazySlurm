@@ -757,6 +757,9 @@ class LazySlurmApp(App):
         self._edit_job_ids: list[str] = []
         # Timer clearing the status line
         self._status_timer = None
+        # Whether the refresh timers have been started (remote mode waits for
+        # the SSH session, so this can happen well after mount).
+        self._polling: bool = False
 
     def compose(self) -> ComposeResult:
         show_gpu = not self.config.no_gpu and not self.config.no_live
@@ -829,12 +832,19 @@ class LazySlurmApp(App):
 
         # Remote mode: open the one SSH session everything runs through before
         # the first poll, so any password / 2FA prompt is answered up front.
+        # The timers start only once that succeeds — a tick landing mid-login
+        # is a command queued behind the connection for no purpose.
         if self.config.remote:
             self.call_after_refresh(self._start_remote_session)
         else:
             self.call_after_refresh(self._poll_jobs)
+            self._start_polling()
 
-        # Polling (refresh=0 disables auto-refresh)
+    def _start_polling(self) -> None:
+        """Begin the refresh timers (refresh=0 disables auto-refresh)."""
+        if self._polling:
+            return
+        self._polling = True
         if self.config.refresh > 0:
             self.set_interval(self.config.refresh, self._poll_jobs)
             if not self.config.no_live:
@@ -877,6 +887,7 @@ class LazySlurmApp(App):
             self._log("ssh", "press [bold]r[/] to retry")
             return
         await self._poll_jobs()
+        self._start_polling()
 
     async def on_unmount(self) -> None:
         # Drop the notice hook first: it points at this app's command log, and

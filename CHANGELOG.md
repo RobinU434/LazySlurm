@@ -73,6 +73,15 @@ the command, the import package and the config directory are all `lazyslurm`.
 
 ### Fixed
 
+- **Remote mode asked for the one-time password several times**
+  ([#56](https://github.com/RobinU434/LazySlurm/issues/56)). The refresh timer started at
+  mount rather than after the SSH login, so every tick that landed while the user was
+  still typing their code found the session "not connected", tried to reconnect, saw no
+  live master — because the first one was still authenticating — and started another
+  `ssh -M`, which asked for another code. `connect()` now holds the same lock `run()`
+  takes, so a command arriving mid-login waits for that login, and the timers do not
+  start until the session is up. A genuinely dropped connection still re-authenticates.
+
 - **Starting off a cluster crashed instead of explaining**
   ([#54](https://github.com/RobinU434/LazySlurm/issues/54)). With no Slurm commands on
   `PATH`, the first poll raised `FileNotFoundError: 'squeue'` and dumped a traceback over
