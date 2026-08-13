@@ -9,6 +9,7 @@ Async functions are exercised by monkeypatching the transport layer
 from __future__ import annotations
 
 import asyncio
+import shlex
 from pathlib import Path
 
 import pytest
@@ -1037,3 +1038,38 @@ def test_resubmit_job_passes_overrides_through_to_sbatch(monkeypatch):
     ))
     assert ok
     assert calls["args"] == ("sbatch", "--chdir", "/work", "--time=3:00:00", "job.sh")
+
+
+# ---------------------------------------------------------------------------
+# remote log reading quotes its path (#39)
+# ---------------------------------------------------------------------------
+
+
+def test_read_log_file_quotes_a_path_with_an_apostrophe(monkeypatch):
+    sent = {}
+
+    async def _fake_remote(cmd, timeout=None):
+        sent["cmd"] = cmd
+        return "log line\n", "", 0
+
+    monkeypatch.setattr(slurm, "_run_remote", _fake_remote)
+    monkeypatch.setattr(slurm, "_config", Config(remote="me@login.hpc"))
+
+    path = "/work/bens'runs/slurm-4815.out"
+    out = asyncio.run(slurm.read_log_file(path, tail_lines=10))
+    assert out == "log line\n"
+
+    # The whole path must survive as a single shell word.
+    cmd = sent["cmd"]
+    assert shlex.split(cmd) == ["tail", "-n", "10", path]
+
+
+def test_read_log_file_reports_not_found_locally_not_on_the_cluster(monkeypatch):
+    async def _fake_remote(cmd, timeout=None):
+        return "", "", 1
+
+    monkeypatch.setattr(slurm, "_run_remote", _fake_remote)
+    monkeypatch.setattr(slurm, "_config", Config(remote="me@login.hpc"))
+
+    path = "/work/bens'runs/missing.out"
+    assert asyncio.run(slurm.read_log_file(path)) == f"(file not found: {path})"

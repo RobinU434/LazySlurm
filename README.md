@@ -108,17 +108,18 @@ Press `?` at any time for this list inside the app:
 | Key | Action |
 |-----|--------|
 | `Up` / `Down` | Navigate job list (wraps between Active and Terminated). The selected job's details update immediately. |
-| `Tab` / `Shift+Tab` | Switch focus between right-side panels |
-| `Left` / `Right` | Switch focus between right-side panels |
+| `Tab` / `Shift+Tab` | Cycle focus: job tables → Job Details → Job Metadata → job tables |
+| `Left` / `Right` | The same cycle, in the other direction |
 | `[` / `]` | Switch tabs in the **Job Details** panel (stdout, stderr, cpu, gpu, stats) |
 | `(` / `)` | Switch tabs in the **Job Metadata** panel (Resources, Submission, Raw) |
-| `Escape` | Close search bar |
+| `Enter` | In the filter bar: accept the filter and move the cursor onto the matches (the filter stays in force) |
+| `Escape` | In the filter bar: abandon the filter and close the bar |
 
 ### Actions
 
 | Key | Action |
 |-----|--------|
-| `/` | Open the [filter bar](#filtering) — plain text or `state:`/`part:`/`name:`/`id:`/`gpu:` terms. `Escape` closes and clears |
+| `/` | Open the [filter bar](#filtering) — plain text or `state:`/`part:`/`name:`/`id:`/`gpu:` terms. `Enter` accepts, `Escape` abandons |
 | `Enter` | Expand / collapse a [job array](#job-arrays) row |
 | `m` | Bookmark / unbookmark the selected job. Bookmarked jobs show a ★ prefix and are pinned to the top of their table |
 | `c` | Cancel the selected job (with confirmation prompt) |
@@ -296,7 +297,12 @@ Partition format is `name:A/I/O/T`:
 
 `/` opens the filter bar. Plain words search the job id, name and partition (and state,
 in the Terminated table) as before, and `key:value` terms narrow by field. Terms are
-ANDed:
+ANDed.
+
+**`Enter` accepts** the filter: the bar closes, the query stays in force, and the cursor
+lands back on the matching rows so you can cancel, edit or inspect them. **`Escape`
+abandons** it, clearing the query and showing every job again. While a filter is active
+the table's border title says so — `Active Jobs — 2/4 match`.
 
 ```
 state:pend part:gpu        pending jobs on the gpu partition
