@@ -1636,6 +1636,21 @@ _SINFO_NODE_FIELDS = (
 _SINFO_NODE_FORMAT = "%N|%T|%C|%m|%e|%O|%G||%E"
 
 
+def _as_opt_int(value: str) -> int | None:
+    """Like _as_int, but None for a field the node never reported.
+
+    sinfo prints "N/A" for FreeMem on a node that is down or unreachable.
+    Reading that as 0 would make the node look completely full.
+    """
+    text = (value or "").strip()
+    if not text or text in ("N/A", "(null)", "none", "Unknown"):
+        return None
+    try:
+        return int(float(text))
+    except ValueError:
+        return None
+
+
 def _as_float(value: str) -> float:
     try:
         return float(value.strip())
@@ -1673,7 +1688,7 @@ def parse_sinfo_nodes(stdout: str) -> list[NodeInfo]:
             state=field(1),
             cpus_alloc=c_a, cpus_idle=c_i, cpus_other=c_o, cpus_total=c_t,
             memory_mb=_as_int(field(3)),
-            free_mem_mb=_as_int(field(4)),
+            free_mem_mb=_as_opt_int(field(4)),
             cpu_load=_as_float(load_raw),
             gres=gres,
             gres_used=gres_used,

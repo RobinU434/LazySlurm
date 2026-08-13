@@ -546,3 +546,50 @@ def test_truncate_does_not_split_a_wide_character_in_half():
     out = job_table._truncate("実験実験", 4)
     assert cell_len(out) == 4
     assert "\ufffd" not in out
+
+
+# ---------------------------------------------------------------------------
+# unknown free memory is not "full" (#48)
+# ---------------------------------------------------------------------------
+
+
+def test_unreported_free_memory_is_unknown_not_full():
+    from lazyslurm import slurm
+
+    # sinfo prints N/A for FreeMem on a node that is down or unreachable.
+    node = slurm.parse_sinfo_nodes(
+        "node07|down*|0/0/8/8|515000|N/A|N/A|gpu:a100:8|(null)|Not responding"
+    )[0]
+    assert node.free_mem_mb is None
+    assert node.mem_used_mb is None
+    assert node.mem_used is None
+
+
+def test_reported_free_memory_still_computes():
+    from lazyslurm import slurm
+
+    node = slurm.parse_sinfo_nodes(
+        "node01|mixed|4/4/0/8|515000|260000|3.5|gpu:a100:8|gpu:a100:2|"
+    )[0]
+    assert node.free_mem_mb == 260000
+    assert node.mem_used_mb == 255000
+    assert node.mem_used == pytest.approx(255000 / 515000)
+
+
+def test_node_row_shows_a_dash_for_unknown_memory():
+    from lazyslurm import slurm
+    from lazyslurm.widgets.partition_view import NodeTable
+
+    table = NodeTable()
+    unknown = slurm.parse_sinfo_nodes(
+        "node07|down*|0/0/8/8|515000|N/A|N/A|gpu:a100:8|(null)|down"
+    )[0]
+    known = slurm.parse_sinfo_nodes(
+        "node02|allocated|8/0/0/8|515000|20000|7.9|gpu:a100:8|gpu:a100:8|"
+    )[0]
+
+    unknown_cell = table._row_for(unknown)[4].plain
+    known_cell = table._row_for(known)[4].plain
+    assert "—" in unknown_cell and "503" in unknown_cell   # capacity still shown
+    assert "503/503" not in unknown_cell                   # ...but not as "full"
+    assert known_cell.strip() == "483/503G"

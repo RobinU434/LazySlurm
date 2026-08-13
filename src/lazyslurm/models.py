@@ -195,7 +195,9 @@ class NodeInfo:
     cpus_other: int = 0
     cpus_total: int = 0
     memory_mb: int = 0  # configured
-    free_mem_mb: int = 0
+    # None when the node has not reported it — sinfo says "N/A" for a node that
+    # is down or unreachable, which is not the same as "no memory free".
+    free_mem_mb: int | None = None
     cpu_load: float = 0.0  # absolute load average, as Slurm reports it
     gres: str = ""  # configured
     gres_used: str = ""
@@ -220,12 +222,19 @@ class NodeInfo:
         return self.cpu_load / self.cpus_total if self.cpus_total else 0.0
 
     @property
-    def mem_used_mb(self) -> int:
+    def mem_used_mb(self) -> int | None:
+        """Memory in use, or None when the node has not reported free memory."""
+        if self.free_mem_mb is None:
+            return None
         return max(self.memory_mb - self.free_mem_mb, 0)
 
     @property
-    def mem_used(self) -> float:
-        return self.mem_used_mb / self.memory_mb if self.memory_mb else 0.0
+    def mem_used(self) -> float | None:
+        """Fraction of memory in use, or None when that is unknown."""
+        used = self.mem_used_mb
+        if used is None or not self.memory_mb:
+            return None
+        return used / self.memory_mb
 
     @property
     def gpus_total(self) -> int:
