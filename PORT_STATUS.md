@@ -3,7 +3,7 @@
 Tracks progress against [RUST_PORT_PLAN.md](RUST_PORT_PLAN.md). One line per work
 item; update as you go, so a resumed session knows where it stopped.
 
-**Branch:** `rust-dev` · **Tests:** 304 passing · **Last updated:** 2026-08-13
+**Branch:** `rust-dev` · **Tests:** 364 passing · **Last updated:** 2026-08-13
 
 ## Layout
 
@@ -27,7 +27,7 @@ comparison against a real cluster.
 | P1 | Models, formatting, efficiency | **done** |
 | P2 | Slurm command layer: parsers, transport, queries, actions | **done** |
 | P3 | Config file, on-disk caches, CLI resolution | **done** |
-| P4 | Job tables, filtering, arrays, main screen | next |
+| P4 | Job tables, filtering, arrays, main screen | **state done**, rendering next |
 | P5 | Detail / metadata / help panels | not started |
 | P6 | Partition, node and usage screens | not started |
 | P7 | Actions wired to the UI, editor/pager shell-outs | not started |
@@ -86,6 +86,23 @@ CI runs the same three, plus wheel and sdist builds.
 consults the cache before guessing log paths, which is what keeps a job's logs
 reachable after `MinJobAge`.
 
+### P4 (part 1) — `src/ui/`
+- `filter.rs` — the query language, ported from `test_filters.py`.
+- `job_table.rs` — `JobTable<T>` over both job types: filtering, array grouping
+  and expansion, bookmark pinning, multi-select, the no-match placeholder,
+  cursor preservation. Ported from `test_array_collapse.py`.
+
+Neither file references a terminal or a rendering type, which is what §5.2 of
+the plan requires and what makes these 60 tests possible at all.
+
+Two details worth keeping in mind when the renderer lands:
+
+- The cursor anchor is **held as state**, not read off the rows during a
+  rebuild. A rebuild normally follows a change to the job list, at which point
+  the existing rows index into a list that no longer matches them.
+- `Row::Job` carries an *index* into the job list, so a renderer must read jobs
+  through `JobTable::job()` and must not cache rows across a poll.
+
 ## Divergences
 
 Four, all recorded in [DIVERGENCES.md](DIVERGENCES.md) with reasoning. One (#4)
@@ -103,9 +120,17 @@ a blank where the fallback field has the answer. Worth fixing in the Python too.
 
 ## Next steps
 
-1. Start P4. Read §5.2 of the plan **before** writing UI code: state transitions
-   must be testable without a terminal, or the UI tests cannot be ported at all.
-2. First slice: `ratatui` + `crossterm`, the two-column layout, and the active
-   job table with cursor preservation across polls.
-3. Then filtering and array collapse, ported against `test_filters.py` and
-   `test_array_collapse.py`.
+Finish P4 — rendering and the event loop, on top of the state layer above:
+
+1. Add `ratatui` and `crossterm`. Build `ui/theme.rs` (every `Style` constant,
+   replacing the 288-line `.tcss`) and `ui/layout.rs` for the fr-ratio splits.
+2. Render `JobTable` rows into a `ratatui::Table`: markers before the name,
+   partition colours from the same `sum(bytes) % 9` hash the Python uses, state
+   colours on the Job ID cell in the active table and the State cell in the
+   terminated one.
+3. The event loop: an input task, a tick task and data tasks all feeding one
+   `mpsc` channel, with a `generation` counter to drop stale detail loads
+   instead of trying to cancel them.
+4. Key handling, including `Up`/`Down` wrapping between the two tables in both
+   directions — `move_cursor` already returns `false` at the edge for this.
+5. `format_cluster_summary` as styled spans (deferred from P2).
