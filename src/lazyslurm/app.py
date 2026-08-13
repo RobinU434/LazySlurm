@@ -1860,13 +1860,17 @@ class LazySlurmApp(App):
                 delete=False,
             )
             tmp.close()
-            # scp over the session's control socket — no second authentication
+            # scp over the session's control socket — no second authentication.
+            # A remote scp path passes through *two* shells, the local one and
+            # the one scp starts on the far side, so it needs quoting twice:
+            # one round leaves "/work/my runs/x.out" to be re-split remotely.
             rc = os.system(
                 f"scp -q {self._ssh_control_opt()} "
-                f"{self.config.remote}:{shlex.quote(path)} {shlex.quote(tmp.name)}"
+                f"{shlex.quote(self.config.remote)}:{shlex.quote(shlex.quote(path))} "
+                f"{shlex.quote(tmp.name)}"
             )
             if rc != 0:
-                self._log(f"edit {label}", f"failed to fetch remote file")
+                self._log(f"edit {label}", f"failed to fetch remote file: {path}")
                 os.unlink(tmp.name)
                 return
             local_path = tmp.name
