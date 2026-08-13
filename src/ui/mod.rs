@@ -14,6 +14,7 @@ pub mod job_table;
 pub mod layout;
 pub mod log_pane;
 pub mod metadata;
+pub mod modal;
 pub mod render;
 pub mod screens;
 pub mod simple_table;

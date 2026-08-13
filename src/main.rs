@@ -25,8 +25,8 @@ async fn main() -> ExitCode {
             .with_cache(Arc::new(settings.log_cache())),
     );
 
-    let app = App::new(settings.config);
-    match run(slurm, app, notes).await {
+    let app = App::new(settings.config.clone());
+    match run(slurm, app, settings, notes).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             // The terminal has been restored by now, so this is visible.

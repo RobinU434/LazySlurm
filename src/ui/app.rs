@@ -20,6 +20,7 @@ use crate::model::{
     array_task_count, parse_duration, parse_mem_bytes, CompletedJob, JobStats, RunningJob,
 };
 use crate::slurm::{Slurm, TAIL_LINES};
+use crate::startup::Settings;
 
 use super::detail::{DetailView, ResourceHistory};
 use super::event::{DetailLoaded, Event, Events, JobsLoaded, Sender, UsageLoaded};
@@ -27,6 +28,7 @@ use super::help::{self, Action, Context};
 use super::job_table::JobTable;
 use super::layout::main_layout;
 use super::metadata::MetadataView;
+use super::modal::{EditModal, Modal, Outcome, Request};
 use super::render::{self, LogEntry, TableStyle};
 use super::screens::{NodeScreen, Pane, PartitionScreen, UsageScreen};
 use super::terminal::{install_panic_hook, Session};
@@ -126,8 +128,23 @@ impl Screen {
     }
 }
 
+/// Something that needs the terminal to itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Shell {
+    /// Open a file in the user's editor.
+    Edit { path: String, label: String },
+    /// Open a file read-only, for a batch script.
+    View { path: String, label: String },
+    /// Browse a whole log in the pager.
+    Page { path: String, label: String },
+    /// Open a shell on a compute node.
+    Ssh { node: String },
+    /// Edit the config file, then reload it.
+    EditConfig,
+}
+
 /// What a keystroke asked the runner to do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// Nothing beyond the state change already applied.
     None,
@@ -138,6 +155,14 @@ pub enum Command {
     LoadDetail,
     /// A screen was opened or moved; load what it needs.
     LoadScreen,
+    /// Ask Slurm to change something.
+    Run(Request),
+    /// Leave the interface and run something in the terminal.
+    Shell(Shell),
+    /// Fetch a job's batch script, then show it.
+    ViewScript {
+        job_id: String,
+    },
 }
 
 /// The main screen.
@@ -169,6 +194,17 @@ pub struct App {
     stack: Vec<Screen>,
     /// The node the shown job is on, for live monitoring.
     metadata_node: Option<String>,
+    /// The shown job's log paths and submit command, kept so the editor, the
+    /// pager and resubmission do not have to ask Slurm all over again.
+    stdout_path: Option<String>,
+    stderr_path: Option<String>,
+    shown_submit: Option<String>,
+    shown_work_dir: String,
+    /// The open dialog, if any. It takes every key while it is up.
+    modal: Option<Modal>,
+    /// Where a multi-select range started, and in which table.
+    multiselect: Option<(Panel, String)>,
+    selected_ids: BTreeSet<String>,
 }
 
 impl App {
@@ -198,6 +234,13 @@ impl App {
             cpu_samples: BTreeMap::new(),
             stack: Vec::new(),
             metadata_node: None,
+            stdout_path: None,
+            stderr_path: None,
+            shown_submit: None,
+            shown_work_dir: String::new(),
+            modal: None,
+            multiselect: None,
+            selected_ids: BTreeSet::new(),
         };
         app.active.set_focused(true);
         app
@@ -257,6 +300,19 @@ impl App {
             .as_ref()
             .map(|detail| detail.node_list().to_string())
             .filter(|node| crate::model::job::has_node(node));
+
+        if let Some(detail) = &loaded.detail {
+            self.stdout_path = detail.stdout_path.clone();
+            self.stderr_path = detail.stderr_path.clone();
+            self.shown_work_dir = detail.work_dir.clone();
+            self.shown_submit = Some(detail.submit_line().to_string())
+                .filter(|line| !crate::model::job::is_missing(line));
+        } else {
+            self.stdout_path = None;
+            self.stderr_path = None;
+            self.shown_submit = None;
+            self.shown_work_dir.clear();
+        }
         self.metadata
             .set_detail(loaded.detail, loaded.priority, loaded.sprio_available);
         true
@@ -430,6 +486,21 @@ impl App {
             self.help_open = false;
             return Command::None;
         }
+        if let Some(modal) = &mut self.modal {
+            return match modal.handle_key(key) {
+                Outcome::Continue => Command::None,
+                Outcome::Dismissed => {
+                    self.modal = None;
+                    self.exit_multiselect();
+                    Command::None
+                }
+                Outcome::Accepted(request) => {
+                    self.modal = None;
+                    self.exit_multiselect();
+                    Command::Run(request)
+                }
+            };
+        }
         if self.search.is_some() {
             return self.handle_search_key(key);
         }
@@ -550,8 +621,305 @@ impl App {
             Action::Back => {
                 self.stack.pop();
             }
+            Action::Cancel => {
+                let ids = self.action_targets();
+                if ids.is_empty() {
+                    self.log("cancel", Some("no job selected".into()));
+                } else {
+                    self.modal = Some(Modal::ConfirmCancel { ids });
+                }
+            }
+            Action::ForceCancel => {
+                // No confirmation, deliberately: this is the key you reach for
+                // when a job has to die now.
+                let ids = self.action_targets();
+                if ids.is_empty() {
+                    self.log("force cancel", Some("no job selected".into()));
+                } else {
+                    self.exit_multiselect();
+                    return Command::Run(Request::Cancel { ids, force: true });
+                }
+            }
+            Action::MultiSelect => self.toggle_multiselect(),
+            Action::EditJob => return self.open_editor(),
+            Action::Resubmit => return self.open_resubmit(),
+            Action::ViewScript => {
+                if let Some(job_id) = self.selected_job_id().map(str::to_string) {
+                    return Command::ViewScript { job_id };
+                }
+            }
+            Action::EditStdout => return self.open_log(false, false),
+            Action::EditStderr => return self.open_log(true, false),
+            Action::PageLog => {
+                // The pager opens whichever log the detail panel is showing.
+                let stderr = self.detail.active_tab() == Some("stderr");
+                return self.open_log(stderr, true);
+            }
+            Action::SshToNode => match self.selected_node() {
+                Some(node) => {
+                    return Command::Shell(Shell::Ssh {
+                        node: crate::slurm::parse::first_node(&node),
+                    })
+                }
+                None => self.log("ssh", Some("no node assigned to this job".into())),
+            },
+            Action::EditConfig => return Command::Shell(Shell::EditConfig),
         }
         Command::None
+    }
+
+    // -- actions ------------------------------------------------------------
+
+    /// The jobs an action applies to.
+    ///
+    /// Multi-select wins; otherwise a collapsed array is targeted as a whole,
+    /// because `scancel 123` takes every task of it; otherwise the one job.
+    fn action_targets(&self) -> Vec<String> {
+        if !self.selected_ids.is_empty() {
+            return self.selected_ids.iter().cloned().collect();
+        }
+        match self.focus {
+            Panel::Completed => self.completed.selected_key().map(str::to_string),
+            _ => self.active.selected_key().map(str::to_string),
+        }
+        .into_iter()
+        .collect()
+    }
+
+    /// Open the property editor for the selected pending job(s).
+    fn open_editor(&mut self) -> Command {
+        if self.focus == Panel::Completed {
+            self.log("edit", Some("only pending jobs can be edited".into()));
+            return Command::None;
+        }
+
+        // A selected row may stand for a whole array; edit its tasks.
+        let targets: Vec<String> = self
+            .active
+            .expand_ids(self.action_targets().iter().map(String::as_str));
+
+        let (pending, skipped): (Vec<String>, Vec<String>) = targets.into_iter().partition(|id| {
+            self.active
+                .jobs()
+                .iter()
+                .any(|job| job.job_id == *id && job.state == "PENDING")
+        });
+
+        if !skipped.is_empty() {
+            self.log(
+                "edit",
+                Some(format!("skipping {} non-pending job(s)", skipped.len())),
+            );
+        }
+        if pending.is_empty() {
+            self.log("edit", Some("only pending jobs can be edited".into()));
+            return Command::None;
+        }
+
+        // Prefill from the job's current values when editing exactly one.
+        let current = (pending.len() == 1)
+            .then(|| {
+                self.active
+                    .jobs()
+                    .iter()
+                    .find(|job| job.job_id == pending[0])
+                    .map(|job| {
+                        crate::slurm::EDITABLE_FIELDS
+                            .iter()
+                            .map(|field| (field.current)(job).to_string())
+                            .collect::<Vec<_>>()
+                    })
+            })
+            .flatten();
+
+        self.modal = Some(Modal::Edit(EditModal::new(pending, current)));
+        Command::None
+    }
+
+    /// Ask to resubmit the selected terminated job.
+    fn open_resubmit(&mut self) -> Command {
+        if self.focus != Panel::Completed {
+            self.log(
+                "resubmit",
+                Some("only available for terminated jobs".into()),
+            );
+            return Command::None;
+        }
+        let Some(job_id) = self.completed.selected_job_id().map(str::to_string) else {
+            return Command::None;
+        };
+
+        // The submit line comes from the metadata panel, which has already
+        // loaded it; asking Slurm again would only repeat that work.
+        let Some(command) = self.shown_submit_line() else {
+            self.log(
+                "resubmit",
+                Some("cannot determine the submit command for this job".into()),
+            );
+            return Command::None;
+        };
+
+        self.modal = Some(Modal::ConfirmResubmit {
+            job_id,
+            command,
+            work_dir: self.shown_work_dir.clone(),
+        });
+        Command::None
+    }
+
+    /// Open a log in the editor, or in the pager.
+    fn open_log(&mut self, stderr: bool, pager: bool) -> Command {
+        let (path, label) = if stderr {
+            (self.stderr_path.clone(), "stderr")
+        } else {
+            (self.stdout_path.clone(), "stdout")
+        };
+
+        let Some(path) = path else {
+            self.log(
+                if pager { "page" } else { "edit" },
+                Some(format!("no {label} path available")),
+            );
+            return Command::None;
+        };
+
+        let label = label.to_string();
+        Command::Shell(if pager {
+            Shell::Page { path, label }
+        } else {
+            Shell::Edit { path, label }
+        })
+    }
+
+    // -- multi-select -------------------------------------------------------
+
+    /// Start or stop selecting a range.
+    fn toggle_multiselect(&mut self) {
+        if self.multiselect.is_some() {
+            self.exit_multiselect();
+            self.log("multi-select", Some("disabled".into()));
+            return;
+        }
+        if !self.focus.is_table() {
+            self.log("multi-select", Some("focus a job table first".into()));
+            return;
+        }
+
+        let anchor = match self.focus {
+            Panel::Completed => self.completed.selected_key(),
+            _ => self.active.selected_key(),
+        };
+        let Some(anchor) = anchor.map(str::to_string) else {
+            self.log(
+                "multi-select",
+                Some("no job to anchor the selection".into()),
+            );
+            return;
+        };
+
+        self.multiselect = Some((self.focus, anchor.clone()));
+        self.selected_ids = BTreeSet::from([anchor]);
+        self.push_multiselect();
+        self.log(
+            "multi-select",
+            Some("Up/Down extends · c cancels all · Ctrl+V exits".into()),
+        );
+    }
+
+    fn exit_multiselect(&mut self) {
+        if self.multiselect.take().is_none() && self.selected_ids.is_empty() {
+            return;
+        }
+        self.selected_ids.clear();
+        self.push_multiselect();
+    }
+
+    /// Recompute the selected range from the anchor to the cursor.
+    fn extend_multiselect(&mut self) {
+        let Some((panel, anchor)) = self.multiselect.clone() else {
+            return;
+        };
+        let (order, current) = match panel {
+            Panel::Completed => (
+                self.completed.row_keys(),
+                self.completed.selected_key().map(str::to_string),
+            ),
+            _ => (
+                self.active.row_keys(),
+                self.active.selected_key().map(str::to_string),
+            ),
+        };
+
+        let (Some(from), Some(to)) = (
+            order.iter().position(|key| *key == anchor),
+            current.and_then(|key| order.iter().position(|row| *row == key)),
+        ) else {
+            return;
+        };
+
+        let (low, high) = if from <= to { (from, to) } else { (to, from) };
+        self.selected_ids = order[low..=high].iter().cloned().collect();
+        self.push_multiselect();
+    }
+
+    fn push_multiselect(&mut self) {
+        self.active.set_multiselected(self.selected_ids.clone());
+        self.completed.set_multiselected(self.selected_ids.clone());
+    }
+
+    /// Adopt a reloaded configuration, reporting what changed.
+    pub fn apply_config(&mut self, config: Config) -> Vec<String> {
+        let old = self.config.clone();
+        let mut changes = Vec::new();
+
+        let mut note = |name: &str, before: String, after: String| {
+            if before != after {
+                changes.push(format!("{name}: {before} → {after}"));
+            }
+        };
+        note(
+            "refresh",
+            old.refresh.to_string(),
+            config.refresh.to_string(),
+        );
+        note("days", old.days.to_string(), config.days.to_string());
+        note("editor", old.editor.clone(), config.editor.clone());
+        note("pager", old.pager.clone(), config.pager.clone());
+        note(
+            "max_name_width",
+            old.max_name_width.to_string(),
+            config.max_name_width.to_string(),
+        );
+        note(
+            "collapse_arrays",
+            old.collapse_arrays.to_string(),
+            config.collapse_arrays.to_string(),
+        );
+        if old.partition_colors != config.partition_colors {
+            changes.push("partition_colors updated".to_string());
+        }
+
+        self.theme = Theme::new(&config.partition_colors, config.abbreviate_states);
+        if old.collapse_arrays != config.collapse_arrays {
+            self.active.set_collapse_arrays(config.collapse_arrays);
+            self.completed.set_collapse_arrays(config.collapse_arrays);
+        }
+        self.config = config;
+        changes
+    }
+
+    /// The submit command of the job currently shown, if it has a usable one.
+    fn shown_submit_line(&self) -> Option<String> {
+        self.shown_submit.clone()
+    }
+
+    /// The jobs currently multi-selected.
+    pub fn selected_ids(&self) -> &BTreeSet<String> {
+        &self.selected_ids
+    }
+
+    pub fn is_multiselecting(&self) -> bool {
+        self.multiselect.is_some()
     }
 
     fn scroll_panel(&mut self, delta: isize) {
@@ -613,6 +981,7 @@ impl App {
             _ => self.active.move_cursor(delta),
         };
         if moved {
+            self.extend_multiselect();
             return Command::LoadDetail;
         }
 
@@ -692,6 +1061,7 @@ impl App {
             if self.help_open {
                 render::help_overlay(frame, frame.area(), &help::help_lines(self.context()));
             }
+            self.draw_modal(frame);
             return;
         }
 
@@ -760,6 +1130,18 @@ impl App {
         if self.help_open {
             render::help_overlay(frame, frame.area(), &help::help_lines(self.focus.context()));
         }
+        self.draw_modal(frame);
+    }
+
+    /// Draw the open dialog, if there is one.
+    fn draw_modal(&self, frame: &mut Frame) {
+        let Some(modal) = &self.modal else {
+            return;
+        };
+        let (title, content) = modal.view();
+        // Cancellation is the one that cannot be undone, so it is marked.
+        let danger = matches!(modal, Modal::ConfirmCancel { .. });
+        render::modal(frame, frame.area(), &title, &content, danger);
     }
 
     /// Draw whichever full-screen panel is on top.
@@ -940,7 +1322,12 @@ impl App {
 }
 
 /// Run the interface until the user quits.
-pub async fn run(slurm: Arc<Slurm>, mut app: App, notes: Vec<String>) -> Result<()> {
+pub async fn run(
+    slurm: Arc<Slurm>,
+    mut app: App,
+    settings: Settings,
+    notes: Vec<String>,
+) -> Result<()> {
     install_panic_hook();
     let mut session = Session::enter()?;
     let mut events = Events::start();
@@ -969,12 +1356,25 @@ pub async fn run(slurm: Arc<Slurm>, mut app: App, notes: Vec<String>) -> Result<
                         spawn_screen_load(&slurm, &app, events.sender());
                     } else {
                         spawn_poll(slurm.clone(), events.sender());
-                        spawn_detail_load(&slurm, &mut app, events.sender());
+                        spawn_detail_load(&slurm, &mut app, &settings, events.sender());
                         spawn_live_load(&slurm, &app, events.sender());
                     }
                 }
-                Command::LoadDetail => spawn_detail_load(&slurm, &mut app, events.sender()),
+                Command::LoadDetail => {
+                    spawn_detail_load(&slurm, &mut app, &settings, events.sender())
+                }
                 Command::LoadScreen => spawn_screen_load(&slurm, &app, events.sender()),
+                Command::Run(request) => {
+                    describe(&mut app, &request);
+                    spawn_request(slurm.clone(), request, events.sender());
+                }
+                Command::ViewScript { job_id } => {
+                    spawn_script_fetch(slurm.clone(), &settings, job_id, events.sender());
+                }
+                Command::Shell(shell) => {
+                    run_shell(&mut session, &mut app, &slurm, &settings, shell)?;
+                    spawn_poll(slurm.clone(), events.sender());
+                }
                 Command::None => {}
             },
             Event::Tick => {
@@ -984,7 +1384,7 @@ pub async fn run(slurm: Arc<Slurm>, mut app: App, notes: Vec<String>) -> Result<
                     spawn_screen_load(&slurm, &app, events.sender());
                 } else {
                     spawn_poll(slurm.clone(), events.sender());
-                    spawn_detail_load(&slurm, &mut app, events.sender());
+                    spawn_detail_load(&slurm, &mut app, &settings, events.sender());
                     spawn_live_load(&slurm, &app, events.sender());
                 }
             }
@@ -993,7 +1393,7 @@ pub async fn run(slurm: Arc<Slurm>, mut app: App, notes: Vec<String>) -> Result<
                 app.apply_jobs(*loaded);
                 // The first poll is what gives us something to select.
                 if !had_selection {
-                    spawn_detail_load(&slurm, &mut app, events.sender());
+                    spawn_detail_load(&slurm, &mut app, &settings, events.sender());
                 }
             }
             Event::Detail(loaded) => {
@@ -1013,6 +1413,18 @@ pub async fn run(slurm: Arc<Slurm>, mut app: App, notes: Vec<String>) -> Result<
             Event::NodeJobs { node, jobs } => app.apply_node_jobs(&node, jobs),
             Event::Usage(loaded) => app.apply_usage(*loaded),
             Event::Live { tab, content } => app.apply_live(tab, content),
+            Event::OpenScript(path) => {
+                run_shell(
+                    &mut session,
+                    &mut app,
+                    &slurm,
+                    &settings,
+                    Shell::View {
+                        path: path.display().to_string(),
+                        label: "script".into(),
+                    },
+                )?;
+            }
             Event::Log(action, result) => app.log(action, result),
             Event::Resize => {}
         }
@@ -1043,7 +1455,7 @@ fn spawn_poll(slurm: Arc<Slurm>, sender: Sender) {
 /// The pause lets the cursor settle: arrowing through a list would otherwise
 /// fire several Slurm commands per row. A load that is superseded while waiting
 /// does no work at all — it checks the generation before asking Slurm anything.
-fn spawn_detail_load(slurm: &Arc<Slurm>, app: &mut App, sender: Sender) {
+fn spawn_detail_load(slurm: &Arc<Slurm>, app: &mut App, settings: &Settings, sender: Sender) {
     let Some(job_id) = app.selected_job_id().map(str::to_string) else {
         return;
     };
@@ -1051,6 +1463,7 @@ fn spawn_detail_load(slurm: &Arc<Slurm>, app: &mut App, sender: Sender) {
     let generation = app.next_generation();
     let current = app.generation_handle();
     let slurm = slurm.clone();
+    let scripts = settings.script_cache();
 
     tokio::spawn(async move {
         tokio::time::sleep(SELECTION_DEBOUNCE).await;
@@ -1059,6 +1472,18 @@ fn spawn_detail_load(slurm: &Arc<Slurm>, app: &mut App, sender: Sender) {
         }
 
         let detail = slurm.job_detail(&job_id).await;
+
+        // scontrol answering means the job is still in slurmctld, so its batch
+        // script is still retrievable — archive it now, because after MinJobAge
+        // it is gone for good. Cheap after the first time, and a failure here
+        // must never interrupt loading the job.
+        if detail
+            .as_ref()
+            .is_some_and(|detail| detail.source == crate::model::DetailSource::Scontrol)
+        {
+            crate::slurm::archive_batch_script(slurm.runner(), &scripts, &job_id).await;
+        }
+
         let (stdout_path, stderr_path, partition, pending) = match &detail {
             Some(detail) => (
                 detail.stdout_path.clone(),
@@ -1093,6 +1518,374 @@ fn spawn_detail_load(slurm: &Arc<Slurm>, app: &mut App, sender: Sender) {
             priority,
             sprio_available: slurm.sprio_available(),
         })));
+    });
+}
+
+/// Read-only flags per editor.
+///
+/// vim gets `-R` rather than `-M` on purpose: `-R` still allows `:w elsewhere`,
+/// which is the "save a copy of this script" workflow.
+const READONLY_FLAGS: &[(&str, &[&str])] = &[
+    ("vim", &["-R"]),
+    ("nvim", &["-R"]),
+    ("vi", &["-R"]),
+    ("view", &["-R"]),
+    ("gvim", &["-R"]),
+    ("nano", &["-v"]),
+    ("less", &[]),
+    ("more", &[]),
+    ("bat", &[]),
+    ("most", &[]),
+];
+
+/// Pagers that can open a file at its end, so a live log shows its newest lines.
+const PAGER_FLAGS: &[(&str, &[&str])] = &[
+    ("less", &["-R", "+G"]),
+    ("most", &["+"]),
+    ("more", &["+G"]),
+    ("bat", &["--paging=always", "--style=plain"]),
+];
+
+fn flags_for(
+    table: &[(&str, &'static [&'static str])],
+    program: &str,
+) -> Option<&'static [&'static str]> {
+    let name = std::path::Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(program);
+    table
+        .iter()
+        .find(|(known, _)| *known == name)
+        .map(|(_, flags)| *flags)
+}
+
+/// Give the terminal to another program, then take it back.
+fn run_shell(
+    session: &mut Session,
+    app: &mut App,
+    slurm: &Arc<Slurm>,
+    settings: &Settings,
+    shell: Shell,
+) -> Result<()> {
+    let config = app.config.clone();
+    let remote = config.is_remote();
+
+    // Anything we shell out to in remote mode must ride the connection that is
+    // already authenticated; a fresh one would ask for the 2FA code again.
+    let control = slurm
+        .session_control_path()
+        .map(|path| vec!["-o".to_string(), format!("ControlPath={path}")])
+        .unwrap_or_default();
+
+    let (argv, note) = match &shell {
+        Shell::Edit { path, label } | Shell::View { path, label } => {
+            let readonly = matches!(shell, Shell::View { .. });
+            if which(&config.editor).is_none() {
+                app.log(
+                    format!("edit {label}"),
+                    Some(format!(
+                        "editor '{}' not found — set 'editor' in config.toml",
+                        config.editor
+                    )),
+                );
+                return Ok(());
+            }
+
+            let mut argv = vec![config.editor.clone()];
+            if readonly {
+                match flags_for(READONLY_FLAGS, &config.editor) {
+                    Some(flags) => argv.extend(flags.iter().map(|f| (*f).to_string())),
+                    None => app.log(
+                        label.clone(),
+                        Some(format!(
+                            "'{}' has no known read-only flag — opening writable",
+                            config.editor
+                        )),
+                    ),
+                }
+            }
+            argv.push(path.clone());
+            (argv, format!("{} {path}", config.editor))
+        }
+        Shell::Page { path, label } => {
+            if !remote && which(&config.pager).is_none() {
+                app.log(
+                    format!("page {label}"),
+                    Some(format!(
+                        "pager '{}' not found — set 'pager' in config.toml",
+                        config.pager
+                    )),
+                );
+                return Ok(());
+            }
+            let mut argv = vec![config.pager.clone()];
+            argv.extend(
+                flags_for(PAGER_FLAGS, &config.pager)
+                    .unwrap_or(&[])
+                    .iter()
+                    .map(|f| (*f).to_string()),
+            );
+            argv.push(path.clone());
+
+            if remote {
+                // Run the pager *on the cluster*: no copying a multi-gigabyte
+                // log down, and no second authentication. Every argument is
+                // quoted for the remote shell, and the whole command quoted
+                // again for the local one.
+                let remote_command = argv
+                    .iter()
+                    .map(|arg| shell_words::quote(arg).into_owned())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let mut ssh = vec!["ssh".to_string(), "-t".to_string()];
+                ssh.extend(control.clone());
+                ssh.push(config.remote.clone());
+                ssh.push(remote_command);
+                (ssh, format!("{} {path} (on the cluster)", config.pager))
+            } else {
+                (argv, format!("{} {path}", config.pager))
+            }
+        }
+        Shell::Ssh { node } => {
+            let mut argv = vec!["ssh".to_string()];
+            if remote {
+                // Hop through the live session rather than `-J`, which would
+                // open a second connection to the login node.
+                let proxy = format!(
+                    "ssh {} -W %h:%p {}",
+                    control.join(" "),
+                    shell_words::quote(&config.remote)
+                );
+                argv.extend(["-o".to_string(), format!("ProxyCommand={proxy}")]);
+            }
+            argv.push(node.clone());
+            (argv, format!("ssh {node}"))
+        }
+        Shell::EditConfig => {
+            if let Err(error) = crate::config::file::write_template_if_missing(&settings.paths) {
+                app.log("edit config", Some(format!("{error}")));
+                return Ok(());
+            }
+            if which(&config.editor).is_none() {
+                app.log(
+                    "edit config",
+                    Some(format!("editor '{}' not found", config.editor)),
+                );
+                return Ok(());
+            }
+            (
+                vec![
+                    config.editor.clone(),
+                    settings.paths.config_file().display().to_string(),
+                ],
+                settings.paths.config_file().display().to_string(),
+            )
+        }
+    };
+
+    app.log(shell_label(&shell), Some(note));
+
+    let status = session.suspended(|| {
+        std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .status()
+    })?;
+    if let Err(error) = status {
+        app.log(shell_label(&shell), Some(format!("failed: {error}")));
+    }
+
+    if matches!(shell, Shell::EditConfig) {
+        reload_config(app, settings);
+    } else {
+        app.log(shell_label(&shell), Some("closed".into()));
+    }
+    Ok(())
+}
+
+fn shell_label(shell: &Shell) -> String {
+    match shell {
+        Shell::Edit { label, .. } => format!("edit {label}"),
+        Shell::View { label, .. } => label.clone(),
+        Shell::Page { label, .. } => format!("page {label}"),
+        Shell::Ssh { node } => format!("ssh {node}"),
+        Shell::EditConfig => "edit config".to_string(),
+    }
+}
+
+/// Whether a program is on `PATH`.
+fn which(program: &str) -> Option<std::path::PathBuf> {
+    if program.contains('/') {
+        let path = std::path::PathBuf::from(program);
+        return path.is_file().then_some(path);
+    }
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|dir| dir.join(program))
+            .find(|candidate| candidate.is_file())
+    })
+}
+
+/// Re-read the config file and apply what changed.
+fn reload_config(app: &mut App, settings: &Settings) {
+    let mut config = crate::config::Config::default();
+    match crate::config::FileConfig::load(&settings.paths) {
+        Ok(file) => file.apply_to(&mut config),
+        Err(error) => {
+            app.log("config reloaded", Some(error.to_string()));
+            return;
+        }
+    }
+
+    // Settings that only ever come from the command line survive the reload.
+    config.remote = app.config.remote.clone();
+    if config.user.is_empty() {
+        config.user = app.config.user.clone();
+    }
+
+    let changes = app.apply_config(config);
+    if changes.is_empty() {
+        app.log("config reloaded", Some("no changes".into()));
+    } else {
+        for change in changes {
+            app.log("config reloaded", Some(change));
+        }
+    }
+}
+
+/// Say in the command log what is about to be asked of Slurm.
+fn describe(app: &mut App, request: &Request) {
+    match request {
+        Request::Cancel { ids, force } => {
+            let flag = if *force { " --signal=KILL" } else { "" };
+            app.log(
+                format!("scancel{flag} {} job(s)", ids.len()),
+                Some(preview(ids)),
+            );
+        }
+        Request::Update { ids, updates } => {
+            let pairs: Vec<(&str, &str)> = updates
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()))
+                .collect();
+            app.log(
+                format!("scontrol update {} job(s)", ids.len()),
+                Some(crate::slurm::build_update_args(&pairs).join(" ")),
+            );
+        }
+        Request::Resubmit { command, .. } => app.log(format!("sbatch {command}"), None),
+    }
+}
+
+/// The first few ids of a list, for a log line.
+fn preview(ids: &[String]) -> String {
+    let head = ids.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+    if ids.len() > 5 {
+        format!("{head}, …")
+    } else {
+        head
+    }
+}
+
+/// Carry out a change, then report each outcome to the command log.
+fn spawn_request(slurm: Arc<Slurm>, request: Request, sender: Sender) {
+    tokio::spawn(async move {
+        let outcomes = match request {
+            Request::Cancel { ids, force } => {
+                let mut outcomes = Vec::new();
+                for id in ids {
+                    outcomes.push(crate::slurm::cancel_job(slurm.runner(), &id, force).await);
+                }
+                outcomes
+            }
+            Request::Update { ids, updates } => {
+                let pairs: Vec<(&str, &str)> = updates
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.as_str()))
+                    .collect();
+                let mut outcomes = Vec::new();
+                for id in ids {
+                    outcomes
+                        .push(crate::slurm::action::update_job(slurm.runner(), &id, &pairs).await);
+                }
+                outcomes
+            }
+            Request::Resubmit {
+                command, work_dir, ..
+            } => vec![
+                crate::slurm::resubmit_job(
+                    slurm.runner(),
+                    &command,
+                    &work_dir,
+                    crate::slurm::ScriptFallback::Unchecked,
+                )
+                .await,
+            ],
+        };
+
+        let failures = outcomes.iter().filter(|outcome| !outcome.success).count();
+        for outcome in &outcomes {
+            let _ = sender.send(Event::Log(
+                if outcome.success { "ok" } else { "failed" }.to_string(),
+                Some(outcome.message.clone()),
+            ));
+        }
+        if failures > 0 {
+            let _ = sender.send(Event::Log(
+                "result".into(),
+                Some(format!("{failures}/{} failed", outcomes.len())),
+            ));
+        }
+
+        // Whatever changed, the job lists are now out of date.
+        let (running, completed, partitions) = tokio::join!(
+            slurm.running_jobs(),
+            slurm.completed_jobs(),
+            slurm.partition_availability(),
+        );
+        let _ = sender.send(Event::Jobs(Box::new(JobsLoaded {
+            running,
+            completed,
+            partitions,
+        })));
+    });
+}
+
+/// Fetch and archive a job's batch script, then ask to open it.
+fn spawn_script_fetch(slurm: Arc<Slurm>, settings: &Settings, job_id: String, sender: Sender) {
+    let store = settings.script_cache();
+    tokio::spawn(async move {
+        let cached = store.get(&job_id).is_some();
+        if !cached {
+            let _ = sender.send(Event::Log(
+                "batch script".into(),
+                Some(format!("fetching script for {job_id}...")),
+            ));
+        }
+
+        match crate::slurm::archive_batch_script(slurm.runner(), &store, &job_id).await {
+            Some(path) => {
+                let _ = sender.send(Event::Log(
+                    "batch script".into(),
+                    Some(format!(
+                        "{} {}",
+                        if cached { "cached" } else { "archived" },
+                        path.display()
+                    )),
+                ));
+                let _ = sender.send(Event::OpenScript(path));
+            }
+            None => {
+                let _ = sender.send(Event::Log(
+                    "batch script".into(),
+                    Some(
+                        "unavailable — Slurm no longer holds this job (MinJobAge) and no \
+                         copy was archived while it was live"
+                            .into(),
+                    ),
+                ));
+            }
+        }
     });
 }
 
@@ -1831,6 +2624,281 @@ mod tests {
         });
         app.detail.select_tab("cpu");
         assert_eq!(app.live_tab(), None);
+    }
+
+    #[test]
+    fn c_asks_before_cancelling() {
+        let mut app = app();
+
+        assert_eq!(app.handle_key(key(KeyCode::Char('c'))), Command::None);
+        // Nothing happens until the user says so.
+        let output = screen_text(&mut app, 100, 40);
+        assert!(output.contains("Cancel job 100"), "{output}");
+
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('y'))),
+            Command::Run(Request::Cancel {
+                ids: vec!["100".into()],
+                force: false,
+            })
+        );
+    }
+
+    #[test]
+    fn refusing_a_cancel_does_nothing_at_all() {
+        let mut app = app();
+        app.handle_key(key(KeyCode::Char('c')));
+        assert_eq!(app.handle_key(key(KeyCode::Char('n'))), Command::None);
+        assert!(!screen_text(&mut app, 100, 40).contains("Cancel job"));
+    }
+
+    #[test]
+    fn shift_c_force_cancels_without_asking() {
+        // Deliberate: this is the key you reach for when a job has to die now.
+        let mut app = app();
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('C'))),
+            Command::Run(Request::Cancel {
+                ids: vec!["100".into()],
+                force: true,
+            })
+        );
+    }
+
+    #[test]
+    fn a_collapsed_array_cancels_as_a_whole() {
+        // `scancel 200` takes every task, so the base id is the right target.
+        let mut app = App::new(Config::default());
+        app.apply_jobs(JobsLoaded {
+            running: vec![
+                running("200_0", "sweep", "RUNNING"),
+                running("200_1", "sweep", "PENDING"),
+            ],
+            completed: vec![],
+            partitions: vec![],
+        });
+
+        app.handle_key(key(KeyCode::Char('c')));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('y'))),
+            Command::Run(Request::Cancel {
+                ids: vec!["200".into()],
+                force: false,
+            })
+        );
+    }
+
+    #[test]
+    fn multi_select_extends_over_the_displayed_rows() {
+        let mut app = app();
+        let ctrl_v = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL);
+
+        app.handle_key(ctrl_v);
+        assert!(app.is_multiselecting());
+        assert_eq!(app.selected_ids().len(), 1);
+
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(
+            app.selected_ids().iter().cloned().collect::<Vec<_>>(),
+            vec!["100", "101"]
+        );
+
+        app.handle_key(ctrl_v);
+        assert!(!app.is_multiselecting());
+        assert!(app.selected_ids().is_empty());
+    }
+
+    #[test]
+    fn cancelling_applies_to_every_selected_job() {
+        let mut app = app();
+        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL));
+        app.handle_key(key(KeyCode::Down));
+
+        app.handle_key(key(KeyCode::Char('c')));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('y'))),
+            Command::Run(Request::Cancel {
+                ids: vec!["100".into(), "101".into()],
+                force: false,
+            })
+        );
+        // Acting on the selection also ends it.
+        assert!(!app.is_multiselecting());
+    }
+
+    #[test]
+    fn only_pending_jobs_can_be_edited() {
+        let mut app = app();
+        // Job 100 is RUNNING; the editor refuses and says so.
+        assert_eq!(app.handle_key(key(KeyCode::Char('u'))), Command::None);
+        assert!(!screen_text(&mut app, 100, 40).contains("job.100"));
+
+        app.handle_key(key(KeyCode::Down)); // job 101, PENDING
+        app.handle_key(key(KeyCode::Char('u')));
+        assert!(screen_text(&mut app, 100, 40).contains("job.101"));
+    }
+
+    #[test]
+    fn the_editor_returns_an_update_request() {
+        let mut app = app();
+        app.handle_key(key(KeyCode::Down)); // the pending job
+        app.handle_key(key(KeyCode::Char('u')));
+
+        for stroke in typed("4:00:00") {
+            app.handle_key(stroke);
+        }
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+            Command::Run(Request::Update {
+                ids: vec!["101".into()],
+                updates: vec![("time_limit".into(), "4:00:00".into())],
+            })
+        );
+    }
+
+    #[test]
+    fn resubmit_is_only_offered_for_terminated_jobs() {
+        let mut app = app();
+        assert_eq!(app.handle_key(key(KeyCode::Char('s'))), Command::None);
+
+        // Move to the terminated table and load a job that has a submit line.
+        app.handle_key(key(KeyCode::Up));
+        let mut loaded = loaded(&app, "91", "COMPLETED");
+        loaded.detail.as_mut().unwrap().raw.insert(
+            "SubmitLine".to_string(),
+            "sbatch --array=1-4 job.sh".to_string(),
+        );
+        app.apply_detail(loaded);
+
+        app.handle_key(key(KeyCode::Char('s')));
+        assert!(screen_text(&mut app, 100, 40).contains("Resubmit job 91"));
+
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('y'))),
+            Command::Run(Request::Resubmit {
+                job_id: "91".into(),
+                command: "sbatch --array=1-4 job.sh".into(),
+                work_dir: "/work".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_modal_takes_every_key_while_it_is_open() {
+        let mut app = app();
+        app.handle_key(key(KeyCode::Char('c')));
+
+        // q does not quit while a confirmation is up.
+        assert_eq!(app.handle_key(key(KeyCode::Char('q'))), Command::None);
+        assert_eq!(app.handle_key(key(KeyCode::Down)), Command::None);
+        assert_eq!(app.active.selected_index(), 0);
+    }
+
+    #[test]
+    fn opening_a_log_needs_a_path() {
+        let mut app = app();
+        // No detail loaded, so there is no stdout path yet.
+        assert_eq!(app.handle_key(key(KeyCode::Char('e'))), Command::None);
+
+        app.set_focus(Panel::Detail);
+        let mut loaded = loaded(&app, "100", "RUNNING");
+        loaded.detail.as_mut().unwrap().stdout_path = Some("/work/slurm-100.out".into());
+        app.apply_detail(loaded);
+
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('e'))),
+            Command::Shell(Shell::Edit {
+                path: "/work/slurm-100.out".into(),
+                label: "stdout".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn the_pager_opens_whichever_log_is_showing() {
+        let mut app = app();
+        app.set_focus(Panel::Detail);
+        let mut loaded = loaded(&app, "100", "RUNNING");
+        {
+            let detail = loaded.detail.as_mut().unwrap();
+            detail.stdout_path = Some("/work/out".into());
+            detail.stderr_path = Some("/work/err".into());
+        }
+        app.apply_detail(loaded);
+
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('l'))),
+            Command::Shell(Shell::Page {
+                path: "/work/out".into(),
+                label: "stdout".into(),
+            })
+        );
+
+        app.detail.select_tab("stderr");
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('l'))),
+            Command::Shell(Shell::Page {
+                path: "/work/err".into(),
+                label: "stderr".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn o_needs_a_node_to_connect_to() {
+        let mut app = app();
+        assert_eq!(app.handle_key(key(KeyCode::Char('o'))), Command::None);
+
+        let mut loaded = loaded(&app, "100", "RUNNING");
+        loaded
+            .detail
+            .as_mut()
+            .unwrap()
+            .raw
+            .insert("NodeList".to_string(), "gpu[01-04]".to_string());
+        app.apply_detail(loaded);
+
+        // A multi-node job connects to the first of them.
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('o'))),
+            Command::Shell(Shell::Ssh {
+                node: "gpu01".into()
+            })
+        );
+    }
+
+    #[test]
+    fn b_asks_for_the_batch_script() {
+        let mut app = app();
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('b'))),
+            Command::ViewScript {
+                job_id: "100".into()
+            }
+        );
+    }
+
+    #[test]
+    fn reloading_the_config_reports_what_changed() {
+        let mut app = app();
+        let changes = app.apply_config(Config {
+            days: 21,
+            editor: "nvim".into(),
+            ..Config::default()
+        });
+
+        assert!(
+            changes.iter().any(|c| c.contains("days: 7 → 21")),
+            "{changes:?}"
+        );
+        assert!(changes.iter().any(|c| c.contains("editor")), "{changes:?}");
+        assert_eq!(app.config.days, 21);
+    }
+
+    #[test]
+    fn reloading_with_no_changes_says_so() {
+        let mut app = app();
+        assert!(app.apply_config(Config::default()).is_empty());
     }
 
     #[test]

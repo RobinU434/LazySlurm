@@ -198,6 +198,16 @@ impl Slurm {
         &self.config
     }
 
+    /// The control socket of the live SSH session, if there is one.
+    ///
+    /// Anything the app shells out to in remote mode must ride the connection
+    /// that is already authenticated; opening a fresh one would prompt for the
+    /// verification code again.
+    pub fn session_control_path(&self) -> Option<String> {
+        // Filled in by P8, when the SSH session exists.
+        None
+    }
+
     /// Replace the configuration, as the `,` live-reload does.
     pub fn set_config(&mut self, config: Config) {
         self.config = config;

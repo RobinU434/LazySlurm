@@ -51,6 +51,8 @@ pub enum Event {
         tab: &'static str,
         content: String,
     },
+    /// A batch script is ready to be shown.
+    OpenScript(std::path::PathBuf),
     /// Something to write to the command log.
     Log(String, Option<String>),
 }

@@ -443,6 +443,37 @@ pub fn lines(frame: &mut Frame, area: Rect, content: &[Line<'static>], offset: u
     frame.render_widget(Paragraph::new(content[start..end].to_vec()), area);
 }
 
+/// Draw a modal dialog, centred over whatever is behind it.
+pub fn modal(frame: &mut Frame, area: Rect, title: &str, content: &[Line<'static>], danger: bool) {
+    let widest = content
+        .iter()
+        .map(Line::width)
+        .chain(std::iter::once(title.len()))
+        .max()
+        .unwrap_or(0) as u16;
+    let box_area = super::layout::centered(
+        area,
+        (widest + 4).min(area.width),
+        (content.len() as u16 + 2).min(area.height),
+    );
+
+    frame.render_widget(Clear, box_area);
+    let border = if danger {
+        Style::new().fg(ratatui::style::Color::Red)
+    } else {
+        theme::border_focused()
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(border)
+        .title(Line::from(Span::styled(title.to_string(), theme::title_focused())).centered());
+
+    let inner = block.inner(box_area);
+    frame.render_widget(block, box_area);
+    lines(frame, inner, content, 0);
+}
+
 /// Draw the help overlay, centred over whatever is behind it.
 pub fn help_overlay(frame: &mut Frame, area: Rect, content: &[Line<'static>]) {
     let widest = content.iter().map(Line::width).max().unwrap_or(0) as u16;

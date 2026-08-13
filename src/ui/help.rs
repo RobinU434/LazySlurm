@@ -42,6 +42,17 @@ pub enum Action {
     SwitchPane,
     CycleWindow,
     Back,
+    Cancel,
+    ForceCancel,
+    MultiSelect,
+    EditJob,
+    Resubmit,
+    ViewScript,
+    EditStdout,
+    EditStderr,
+    PageLog,
+    SshToNode,
+    EditConfig,
 }
 
 /// One key combination.
@@ -207,6 +218,12 @@ pub const GLOBAL: &[Binding] = &[
         keys: &[Key::plain(KeyCode::BackTab)],
     },
     Binding {
+        display: ",",
+        description: "edit the config file in your editor",
+        action: Action::EditConfig,
+        keys: &[Key::plain(KeyCode::Char(','))],
+    },
+    Binding {
         display: "q",
         description: "quit",
         action: Action::Quit,
@@ -357,6 +374,48 @@ pub const JOBS: &[Binding] = &[
         action: Action::OpenUsage,
         keys: &[Key::plain(KeyCode::Char('U'))],
     },
+    Binding {
+        display: "c",
+        description: "cancel the selected job(s), with a confirmation",
+        action: Action::Cancel,
+        keys: &[Key::plain(KeyCode::Char('c'))],
+    },
+    Binding {
+        display: "Shift+C",
+        description: "force cancel — SIGKILL, no confirmation",
+        action: Action::ForceCancel,
+        keys: &[Key::plain(KeyCode::Char('C'))],
+    },
+    Binding {
+        display: "Ctrl+V",
+        description: "multi-select mode; Up/Down extends the range",
+        action: Action::MultiSelect,
+        keys: &[Key::ctrl(KeyCode::Char('v'))],
+    },
+    Binding {
+        display: "u",
+        description: "edit a pending job: runtime, partition, nodes, CPUs, memory",
+        action: Action::EditJob,
+        keys: &[Key::plain(KeyCode::Char('u'))],
+    },
+    Binding {
+        display: "s",
+        description: "resubmit a terminated job from its original script",
+        action: Action::Resubmit,
+        keys: &[Key::plain(KeyCode::Char('s'))],
+    },
+    Binding {
+        display: "b",
+        description: "view the job's sbatch script, read-only",
+        action: Action::ViewScript,
+        keys: &[Key::plain(KeyCode::Char('b'))],
+    },
+    Binding {
+        display: "o",
+        description: "SSH to the job's compute node (suspends the TUI)",
+        action: Action::SshToNode,
+        keys: &[Key::plain(KeyCode::Char('o'))],
+    },
 ];
 
 /// Keys for the detail panel.
@@ -384,6 +443,24 @@ pub const DETAIL: &[Binding] = &[
         description: "scroll down / up",
         action: Action::ScrollDown,
         keys: &[Key::plain(KeyCode::Down), Key::plain(KeyCode::Char('j'))],
+    },
+    Binding {
+        display: "l",
+        description: "open the active log in the pager — / searches, F follows",
+        action: Action::PageLog,
+        keys: &[Key::plain(KeyCode::Char('l'))],
+    },
+    Binding {
+        display: "e",
+        description: "open stdout in your editor",
+        action: Action::EditStdout,
+        keys: &[Key::plain(KeyCode::Char('e'))],
+    },
+    Binding {
+        display: "Shift+E",
+        description: "open stderr in your editor",
+        action: Action::EditStderr,
+        keys: &[Key::plain(KeyCode::Char('E'))],
     },
 ];
 
@@ -585,10 +662,15 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_quits_but_a_plain_c_does_not() {
+    fn a_modifier_makes_a_different_key() {
+        // Ctrl+C quits; a bare c cancels a job. Confusing the two would be
+        // expensive in exactly one direction.
         let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert_eq!(lookup(Context::Jobs, &ctrl_c), Some(Action::Quit));
-        assert_eq!(lookup(Context::Jobs, &press(KeyCode::Char('c'))), None);
+        assert_eq!(
+            lookup(Context::Jobs, &press(KeyCode::Char('c'))),
+            Some(Action::Cancel)
+        );
     }
 
     #[test]
