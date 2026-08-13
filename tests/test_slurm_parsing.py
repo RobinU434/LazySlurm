@@ -9,6 +9,7 @@ Async functions are exercised by monkeypatching the transport layer
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -859,3 +860,11 @@ def test_as_int_truncates_floats_slurm_reports():
     assert slurm._as_int("") == 0
     assert slurm._as_int("N/A") == 0
 
+
+
+def test_importing_slurm_does_not_touch_the_ssh_dir():
+    # The control dir is created at the point of use, not at import time.
+    assert isinstance(slurm._SSH_CONTROL_DIR, Path)
+    assert not any(
+        "ControlPath" in opt for opt in slurm._SSH_OPTS
+    ), "multiplexing options must be added per call, not baked in at import"

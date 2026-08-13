@@ -34,24 +34,32 @@ _config: Config = Config()
 # does not use these — it runs everything through the one session in ssh.py.
 # Multiplexing still matters here: the first call opens a master connection and
 # the rest reuse it, turning many handshakes per poll into one.
-_SSH_CONTROL_DIR = os.path.join(os.path.expanduser("~"), ".ssh", "cm-lazyslurm")
-try:
-    os.makedirs(_SSH_CONTROL_DIR, mode=0o700, exist_ok=True)
-except OSError:
-    _SSH_CONTROL_DIR = ""
+_SSH_CONTROL_DIR = Path.home() / ".ssh" / "cm-lazyslurm"
 
 _SSH_OPTS = [
     "-o", "StrictHostKeyChecking=no",
     "-o", "ConnectTimeout=3",
     "-o", "BatchMode=yes",
 ]
-if _SSH_CONTROL_DIR:
-    _SSH_OPTS += [
+_SSH_TIMEOUT = 8  # seconds
+
+
+def _control_opts() -> list[str]:
+    """Multiplexing options, creating the control dir at the point of use.
+
+    Importing this module must not touch ``~/.ssh`` — only a local-mode hop to
+    a compute node needs the directory. If it cannot be created, drop the
+    options and let each hop open its own connection.
+    """
+    try:
+        _SSH_CONTROL_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError:
+        return []
+    return [
         "-o", "ControlMaster=auto",
         "-o", "ControlPersist=60s",
-        "-o", f"ControlPath={os.path.join(_SSH_CONTROL_DIR, '%C')}",
+        "-o", f"ControlPath={_SSH_CONTROL_DIR / '%C'}",
     ]
-_SSH_TIMEOUT = 8  # seconds
 
 # Options for the login-node -> compute-node hop in remote mode. That inner ssh
 # runs on the cluster, so it must never prompt: BatchMode makes it fail fast.
@@ -164,7 +172,7 @@ async def _ssh_cmd(node: str, remote_cmd: str) -> tuple[str, int]:
         return stdout, rc
     try:
         proc = await asyncio.create_subprocess_exec(
-            "ssh", *_SSH_OPTS, node, remote_cmd,
+            "ssh", *_SSH_OPTS, *_control_opts(), node, remote_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
