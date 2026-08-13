@@ -19,6 +19,9 @@ classifiers = [
 ]
 dependencies = [
     "textual>=0.86",
+    # Writing config.toml has to preserve the template's comments; tomllib and
+    # a hand-rolled serialiser both destroy them.
+    "tomlkit>=0.12",
 ]
 
 [dependency-groups]

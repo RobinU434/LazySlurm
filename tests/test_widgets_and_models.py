@@ -153,12 +153,39 @@ def test_jobdetail_gres_from_tres():
 # ---------------------------------------------------------------------------
 
 
-def test_toml_value_formatting():
-    assert cfg._toml_value("hello") == '"hello"'
-    assert cfg._toml_value(True) == "true"
-    assert cfg._toml_value(False) == "false"
-    assert cfg._toml_value(["a", "b"]) == '["a", "b"]'
-    assert cfg._toml_value(5) == "5"
+def test_save_preserves_comments_and_unknown_keys(tmp_path, monkeypatch):
+    monkeypatch.setattr(cfg, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "CONFIG_FILE", tmp_path / "config.toml")
+    (tmp_path / "config.toml").write_text(
+        "# LazySlurm configuration\n"
+        "editor = \"nvim\"   # my editor\n"
+        "# refresh = 5.0\n"
+        "future_setting = 1\n"
+    )
+
+    cfg.set_partition_order(["gpu", "cpu"])
+
+    text = (tmp_path / "config.toml").read_text()
+    assert "# LazySlurm configuration" in text
+    assert "# my editor" in text
+    assert "# refresh = 5.0" in text
+    assert "future_setting" in text
+    reloaded = cfg.load()
+    assert reloaded["partition_order"] == ["gpu", "cpu"]
+    assert reloaded["editor"] == "nvim"
+
+
+def test_save_writes_types_toml_can_parse(tmp_path, monkeypatch):
+    monkeypatch.setattr(cfg, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "CONFIG_FILE", tmp_path / "config.toml")
+
+    cfg.save({"editor": "vim", "no_gpu": True, "days": 5,
+              "partition_order": ["a", "b"], "partition_colors": {"gpu": "green"}})
+
+    assert cfg.load() == {
+        "editor": "vim", "no_gpu": True, "days": 5,
+        "partition_order": ["a", "b"], "partition_colors": {"gpu": "green"},
+    }
 
 
 def test_log_cache_round_trip(tmp_path, monkeypatch):

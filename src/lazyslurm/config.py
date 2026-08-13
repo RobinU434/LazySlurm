@@ -7,7 +7,10 @@ import os
 import time
 from pathlib import Path
 
-# Use tomllib (3.11+) for reading, fall back to manual parsing for writing
+import tomlkit
+
+# Use tomllib (3.11+) for reading; tomlkit does the writing, because it is the
+# only one of the two that preserves the file's comments and layout.
 try:
     import tomllib
 except ImportError:
@@ -30,30 +33,29 @@ def load() -> dict:
         return {}
 
 
+def _template_text() -> str:
+    """The packaged commented template, or "" if it cannot be read."""
+    try:
+        from importlib.resources import files
+        return files("lazyslurm").joinpath("templ", "config.toml").read_text()
+    except (OSError, ModuleNotFoundError):
+        return ""  # packaged template unavailable; start from an empty file
+
+
 def save(data: dict) -> None:
-    """Save persistent config as TOML."""
+    """Write ``data`` into config.toml, keeping the rest of the file intact.
+
+    The file is edited, not regenerated: ~38 of the template's 41 lines are
+    comments documenting every setting, and they are the only in-product
+    reference for options like ``partition_colors``. Keys the loader does not
+    know about survive for the same reason.
+    """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    lines: list[str] = []
+    existing = CONFIG_FILE.read_text() if CONFIG_FILE.exists() else _template_text()
+    doc = tomlkit.parse(existing)
     for key, value in data.items():
-        if isinstance(value, dict):
-            lines.append(f"\n[{key}]")
-            for k, v in value.items():
-                lines.append(f"{k} = {_toml_value(v)}")
-        else:
-            lines.append(f"{key} = {_toml_value(value)}")
-    CONFIG_FILE.write_text("\n".join(lines) + "\n")
-
-
-def _toml_value(v) -> str:
-    """Format a Python value as a TOML literal."""
-    if isinstance(v, list):
-        items = ", ".join(f'"{i}"' if isinstance(i, str) else str(i) for i in v)
-        return f"[{items}]"
-    if isinstance(v, str):
-        return f'"{v}"'
-    if isinstance(v, bool):
-        return "true" if v else "false"
-    return str(v)
+        doc[key] = value
+    CONFIG_FILE.write_text(tomlkit.dumps(doc))
 
 
 def get_partition_order() -> list[str] | None:
