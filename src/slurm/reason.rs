@@ -12,7 +12,10 @@ use crate::model::PriorityInfo;
 
 /// Reason codes matched exactly.
 const EXACT: &[(&str, &str)] = &[
-    ("Resources", "waiting for enough free nodes to become available"),
+    (
+        "Resources",
+        "waiting for enough free nodes to become available",
+    ),
     ("Priority", "other jobs are ahead of it in the queue"),
     ("Dependency", "waiting for another job to finish"),
     (
@@ -59,7 +62,10 @@ const PREFIXES: &[(&str, &str)] = &[
     ("QOSMaxNode", "you are at your QOS limit for nodes"),
     ("QOSMaxMem", "you are at your QOS limit for memory"),
     ("QOSMaxJobs", "you are at your QOS limit for running jobs"),
-    ("QOSMaxSubmit", "you are at your QOS limit for submitted jobs"),
+    (
+        "QOSMaxSubmit",
+        "you are at your QOS limit for submitted jobs",
+    ),
     ("QOSMaxWall", "its time limit is longer than the QOS allows"),
     ("QOSGrp", "your QOS group is at its resource limit"),
     ("QOSMin", "it asks for less than the QOS minimum"),

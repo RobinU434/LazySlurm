@@ -172,7 +172,11 @@ pub async fn cancel_job(runner: &dyn CommandRunner, job_id: &str, force: bool) -
 
     let output = runner.run(&args).await;
     if output.code == 0 {
-        let kind = if force { "force-cancelled" } else { "cancelled" };
+        let kind = if force {
+            "force-cancelled"
+        } else {
+            "cancelled"
+        };
         Outcome::ok(format!("Job {job_id} {kind}."))
     } else {
         Outcome::failed(format!(
@@ -470,8 +474,13 @@ mod tests {
     #[tokio::test]
     async fn unchecked_resubmit_never_looks_at_the_filesystem() {
         let runner = StubRunner::with_stdout("Submitted batch job 999");
-        let outcome =
-            resubmit_job(&runner, "sbatch /gone/job.sh", "/work", ScriptFallback::Unchecked).await;
+        let outcome = resubmit_job(
+            &runner,
+            "sbatch /gone/job.sh",
+            "/work",
+            ScriptFallback::Unchecked,
+        )
+        .await;
         assert!(outcome.success);
         assert_eq!(
             runner.only_call(),

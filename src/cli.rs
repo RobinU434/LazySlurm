@@ -253,8 +253,7 @@ mod tests {
     #[test]
     fn an_explicit_user_survives_a_remote_target() {
         let mut config = Config::default();
-        args_from(&["--remote", "rvy895@login.hpc.edu", "--user", "someone"])
-            .apply_to(&mut config);
+        args_from(&["--remote", "rvy895@login.hpc.edu", "--user", "someone"]).apply_to(&mut config);
         assert_eq!(config.user, "someone");
     }
 

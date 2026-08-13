@@ -37,10 +37,7 @@ fn tail_file_capped(path: &Path, tail_lines: usize, max_bytes: u64) -> std::io::
     let mut position = file.seek(SeekFrom::End(0))?;
     let mut data: Vec<u8> = Vec::new();
 
-    while position > 0
-        && count_newlines(&data) <= tail_lines
-        && (data.len() as u64) < max_bytes
-    {
+    while position > 0 && count_newlines(&data) <= tail_lines && (data.len() as u64) < max_bytes {
         let step = TAIL_BLOCK.min(position);
         position -= step;
         file.seek(SeekFrom::Start(position))?;
@@ -207,16 +204,15 @@ mod tests {
     #[test]
     fn keeps_a_final_line_without_a_newline() {
         let path = temp_file("no-newline.out", "first\nlast line, no newline");
-        assert_eq!(
-            tail_file(&path, 2).unwrap(),
-            "first\nlast line, no newline"
-        );
+        assert_eq!(tail_file(&path, 2).unwrap(), "first\nlast line, no newline");
     }
 
     #[test]
     fn never_splits_a_line_mid_way() {
         // Lines much longer than one 64 KiB read block.
-        let content: String = (0..5).map(|i| format!("{i}:{}\n", "x".repeat(100_000))).collect();
+        let content: String = (0..5)
+            .map(|i| format!("{i}:{}\n", "x".repeat(100_000)))
+            .collect();
         let path = temp_file("long-lines.out", &content);
 
         let out = tail_file(&path, 2).unwrap();

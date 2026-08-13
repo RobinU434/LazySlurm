@@ -5,6 +5,7 @@
 //! live here rather than in globals, so tests can have as many independent
 //! instances as they like.
 
+use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -88,8 +89,11 @@ const SACCT_STATS_FORMAT: &str = "--format=JobID,TotalCPU,Elapsed,ReqMem,AllocTR
 const SPRIO_FORMAT: &str = "--format=%i|%Y|%A|%F|%J|%P|%Q";
 
 /// Selectable windows for the usage panel.
-pub const USAGE_WINDOWS: [UsageWindow; 3] =
-    [UsageWindow::Month, UsageWindow::Last30Days, UsageWindow::Year];
+pub const USAGE_WINDOWS: [UsageWindow; 3] = [
+    UsageWindow::Month,
+    UsageWindow::Last30Days,
+    UsageWindow::Year,
+];
 
 /// A time span the account-usage panel can report over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -118,7 +122,10 @@ impl UsageWindow {
         let date = match self {
             Self::Month => today.with_day(1).unwrap_or(today),
             Self::Last30Days => today - Duration::days(30),
-            Self::Year => today.with_month(1).and_then(|d| d.with_day(1)).unwrap_or(today),
+            Self::Year => today
+                .with_month(1)
+                .and_then(|d| d.with_day(1))
+                .unwrap_or(today),
         };
         date.format("%Y-%m-%d").to_string()
     }
@@ -210,7 +217,14 @@ impl Slurm {
     /// The user's current jobs, newest first, with array tasks kept together.
     pub async fn running_jobs(&self) -> Vec<RunningJob> {
         let user = self.config.effective_user();
-        let mut args = vec!["squeue", "-u", &user, SQUEUE_FORMAT, "--noheader", "--sort=-i"];
+        let mut args = vec![
+            "squeue",
+            "-u",
+            &user,
+            SQUEUE_FORMAT,
+            "--noheader",
+            "--sort=-i",
+        ];
         if !self.config.partition.is_empty() {
             args.extend(["-p", &self.config.partition]);
         }
@@ -309,8 +323,12 @@ impl Slurm {
         let work_dir = raw.get("WorkDir").cloned().unwrap_or_default();
         let job_name = raw.get("JobName").cloned().unwrap_or_default();
 
-        let stdout_path = self.guess_log_path(&work_dir, job_id, "out", &job_name).await;
-        let mut stderr_path = self.guess_log_path(&work_dir, job_id, "err", &job_name).await;
+        let stdout_path = self
+            .guess_log_path(&work_dir, job_id, "out", &job_name)
+            .await;
+        let mut stderr_path = self
+            .guess_log_path(&work_dir, job_id, "err", &job_name)
+            .await;
         // Many clusters merge stdout and stderr into one .out file.
         if stderr_path.is_none() {
             stderr_path = stdout_path.clone();
@@ -371,7 +389,14 @@ impl Slurm {
     pub async fn job_stats(&self, job_id: &str) -> Option<JobStats> {
         let step = format!("{job_id}.batch");
         // Bound to locals so the slices outlive the borrows `join!` holds.
-        let sstat_args = ["sstat", "-j", &step, SSTAT_FORMAT, "--noheader", "--parsable2"];
+        let sstat_args = [
+            "sstat",
+            "-j",
+            &step,
+            SSTAT_FORMAT,
+            "--noheader",
+            "--parsable2",
+        ];
         let sacct_args = [
             "sacct",
             "-j",
@@ -396,8 +421,7 @@ impl Slurm {
             (None, None) => None,
             (live, accounting) => {
                 let had_live = live.is_some();
-                let mut stats =
-                    live.unwrap_or_else(|| JobStats::empty(job_id, StatsSource::Sacct));
+                let mut stats = live.unwrap_or_else(|| JobStats::empty(job_id, StatsSource::Sacct));
 
                 if let Some(fields) = accounting {
                     apply_accounting(&mut stats, &fields);
@@ -572,9 +596,9 @@ impl Slurm {
         let mut jobs = parse::partition_jobs(&output.stdout);
         jobs.sort_by(|a, b| {
             let running = |job: &PartitionJob| job.state != "RUNNING";
-            running(a)
-                .cmp(&running(b))
-                .then_with(|| crate::model::sort_key(&b.job_id).cmp(&crate::model::sort_key(&a.job_id)))
+            running(a).cmp(&running(b)).then_with(|| {
+                crate::model::sort_key(&b.job_id).cmp(&crate::model::sort_key(&a.job_id))
+            })
         });
         jobs
     }
@@ -658,7 +682,9 @@ impl Slurm {
         if output.code != 0 {
             let text = output.stderr.to_lowercase();
             if text.contains("not found") || text.contains("no such file") {
-                self.availability.sprio_missing.store(true, Ordering::Relaxed);
+                self.availability
+                    .sprio_missing
+                    .store(true, Ordering::Relaxed);
             }
             return None;
         }
@@ -671,7 +697,7 @@ impl Slurm {
 
 /// Sort newest first, keeping each array's tasks together and ascending.
 fn sort_newest_first<T>(items: &mut [T], id: impl Fn(&T) -> &str) {
-    items.sort_by(|a, b| crate::model::sort_key(id(b)).cmp(&crate::model::sort_key(id(a))));
+    items.sort_by_key(|item| Reverse(crate::model::sort_key(id(item))));
 }
 
 /// Fold sacct's numbers into stats that may already hold live sstat counters.
@@ -927,8 +953,10 @@ mod tests {
         let runner = StubRunner::new(|args| {
             let stdout = match args[0] {
                 "sstat" => "00:10:00|2.5GHz|1.2G|2.4G|8G|9G|100M|200M|150M|250M|node01|0",
-                _ => "123|02:00:00|01:00:00|16Gn|cpu=8,gres/gpu=2|cpu=8|8|1|1|04:00:00|\n\
-                      123.batch|01:00:00|01:00:00|||||1|1||7.5G",
+                _ => {
+                    "123|02:00:00|01:00:00|16Gn|cpu=8,gres/gpu=2|cpu=8|8|1|1|04:00:00|\n\
+                      123.batch|01:00:00|01:00:00|||||1|1||7.5G"
+                }
             };
             Output {
                 stdout: stdout.to_string(),
@@ -981,7 +1009,9 @@ mod tests {
     #[tokio::test]
     async fn latches_missing_sprio() {
         let slurm = Slurm::new(
-            Box::new(StubRunner::new(|_| Output::failure("sprio: command not found"))),
+            Box::new(StubRunner::new(|_| {
+                Output::failure("sprio: command not found")
+            })),
             Config::default(),
         );
         assert!(slurm.sprio_available());

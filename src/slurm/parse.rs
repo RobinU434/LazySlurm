@@ -637,7 +637,10 @@ mod tests {
             "JobId=123 JobName=train WorkDir=/work Command=/work/job.sh\n",
             "   SubmitLine=sbatch --array=1-4 --time=1:00:00 job.sh\n",
         ));
-        assert_eq!(parsed["SubmitLine"], "sbatch --array=1-4 --time=1:00:00 job.sh");
+        assert_eq!(
+            parsed["SubmitLine"],
+            "sbatch --array=1-4 --time=1:00:00 job.sh"
+        );
         assert_eq!(parsed["Command"], "/work/job.sh");
         assert_eq!(parsed["JobId"], "123");
     }

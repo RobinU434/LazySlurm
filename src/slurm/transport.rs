@@ -119,10 +119,12 @@ pub(crate) mod testing {
     use super::*;
     use std::sync::Mutex;
 
+    /// Decides what to reply with, given the argv it was handed.
+    type Responder = Box<dyn Fn(&[&str]) -> Output + Send + Sync>;
+
     /// Records the commands it was asked to run and answers from a script.
     pub struct StubRunner {
-        /// Called with the argv; returns the output to reply with.
-        responder: Box<dyn Fn(&[&str]) -> Output + Send + Sync>,
+        responder: Responder,
         calls: Mutex<Vec<Vec<String>>>,
         remote: bool,
     }
@@ -164,7 +166,11 @@ pub(crate) mod testing {
         /// is itself usually the assertion a test wants.
         pub fn only_call(&self) -> Vec<String> {
             let calls = self.calls();
-            assert_eq!(calls.len(), 1, "expected exactly one command, got {calls:?}");
+            assert_eq!(
+                calls.len(),
+                1,
+                "expected exactly one command, got {calls:?}"
+            );
             calls.into_iter().next().unwrap()
         }
     }

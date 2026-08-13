@@ -213,11 +213,7 @@ mod tests {
     #[case("drained*", "drained", true)]
     #[case("down*", "down", true)]
     #[case("allocated", "allocated", false)]
-    fn strips_state_flags(
-        #[case] state: &str,
-        #[case] base: &str,
-        #[case] unresponsive: bool,
-    ) {
+    fn strips_state_flags(#[case] state: &str, #[case] base: &str, #[case] unresponsive: bool) {
         let node = NodeInfo {
             state: state.into(),
             ..NodeInfo::default()

@@ -25,7 +25,11 @@ async fn main() {
     }
 
     let jobs = slurm.running_jobs().await;
-    println!("\n{} active job(s) for {}", jobs.len(), slurm.config().effective_user());
+    println!(
+        "\n{} active job(s) for {}",
+        jobs.len(),
+        slurm.config().effective_user()
+    );
     for job in jobs.iter().take(20) {
         println!(
             "  {:<14} {:<20} {:<10} {:<10} {}",

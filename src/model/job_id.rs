@@ -210,14 +210,14 @@ mod tests {
     #[test]
     fn sorts_arrays_ascending_within_a_descending_list() {
         let mut ids = vec!["100", "200_2", "200_0", "200_1", "150"];
-        ids.sort_by(|a, b| sort_key(b).cmp(&sort_key(a)));
+        ids.sort_by_key(|id| std::cmp::Reverse(sort_key(id)));
         assert_eq!(ids, vec!["200_0", "200_1", "200_2", "150", "100"]);
     }
 
     #[test]
     fn unparseable_ids_sort_last() {
         let mut ids = vec!["garbage", "100", "200"];
-        ids.sort_by(|a, b| sort_key(b).cmp(&sort_key(a)));
+        ids.sort_by_key(|id| std::cmp::Reverse(sort_key(id)));
         assert_eq!(ids, vec!["200", "100", "garbage"]);
     }
 }
