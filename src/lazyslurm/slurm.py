@@ -1327,7 +1327,9 @@ def parse_sinfo(stdout: str) -> list[PartitionInfo]:
                 gres=gres,
             )
             by_name[name] = part
-        elif gres and gres not in part.gres:
+        # Membership over the specs collected so far, not a substring test on
+        # the joined string: "gpu:a100:8" is a substring of "gpu:a100:80".
+        elif gres and gres not in part.gres.split(","):
             part.gres = f"{part.gres},{gres}" if part.gres else gres
         part.nodes_alloc += n_a
         part.nodes_idle += n_i

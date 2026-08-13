@@ -482,6 +482,25 @@ def test_parse_sinfo_aggregates_rows_per_partition():
     assert parts["maint"].avail == "down"
 
 
+def test_parse_sinfo_keeps_a_gres_that_prefixes_another():
+    # "gpu:a100:8" is a substring of "gpu:a100:80" but a distinct config.
+    out = (
+        "gpu|up|4/0/0/4|100/0/0/100|1-00:00:00|gpu:a100:80\n"
+        "gpu|up|2/0/0/2|50/0/0/50|1-00:00:00|gpu:a100:8\n"
+    )
+    part = slurm.parse_sinfo(out)[0]
+    assert part.gres == "gpu:a100:80,gpu:a100:8"
+    assert part.nodes_aiot == "6/0/0/6"
+
+
+def test_parse_sinfo_still_dedupes_identical_gres():
+    out = (
+        "gpu|up|4/0/0/4|100/0/0/100|1-00:00:00|gpu:a100:8\n"
+        "gpu|up|2/0/0/2|50/0/0/50|1-00:00:00|gpu:a100:8\n"
+    )
+    assert slurm.parse_sinfo(out)[0].gres == "gpu:a100:8"
+
+
 def test_parse_sinfo_tolerates_short_rows():
     # The cluster bar's older 3-field format must still parse.
     parts = slurm.parse_sinfo("gpu|up|10/5/0/15")
