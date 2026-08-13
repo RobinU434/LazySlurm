@@ -86,8 +86,10 @@ PANELS: tuple[Panel, ...] = (
             Key("Ctrl+V", "multi-select mode; Up/Down extends the range", ("ctrl+v",)),
             Key("u", "edit a pending job: runtime, partition, nodes, CPUs, memory", ("u",)),
             Key("s", "resubmit a terminated job from its original script", ("s",)),
+            Key("S", "resubmit it with different time/memory/CPUs (2x after TIMEOUT/OOM)", ("S",)),
             Key("b", "view the job's sbatch script, read-only", ("b",)),
-            Key("o", "SSH to the job's compute node (suspends the TUI)", ("o",)),
+            Key("o", "Open a shell on the job's compute node (suspends the TUI)", ("o",)),
+            Key("O", "Same, with the other access method (ssh <-> srun)", ("O",)),
         ),
         notes=(
             "Multi-select applies c, Shift+C and u to every selected job.",

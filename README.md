@@ -125,6 +125,7 @@ Press `?` at any time for this list inside the app:
 | `Shift+C` | **Force cancel** — sends SIGKILL immediately, no confirmation |
 | `Ctrl+V` | Toggle multi-select mode (vim-visual style). Use Up/Down to extend the selection range from an anchor row, then press `c` or `Shift+C` to cancel all selected jobs. Press `Ctrl+V` again to exit. Detail panels freeze on the last single-selected job. |
 | `s` | Resubmit a terminated job using its original sbatch script (with confirmation) |
+| `Shift+S` | [Resubmit with different resources](#resubmit-with-more-resources) — opens the editor prefilled from the job, suggesting 2x after a TIMEOUT or OOM |
 | `u` | Edit a **pending** job's properties: runtime, partition, nodes, CPUs, memory. Works on a multi-selection too |
 | `Shift+U` | Open the [account usage panel](#account-usage) — CPU-hours and your fairshare |
 | `p` | Open the [partition monitor](#partition-monitor) — per-partition load and every user's jobs. `Escape` or `p` returns |
@@ -132,7 +133,8 @@ Press `?` at any time for this list inside the app:
 | `l` | Open the active log tab (stdout or stderr) in a **pager** — the way to read a huge log |
 | `e` | Open the job's **stdout** log in an external editor (suspends TUI) |
 | `Shift+E` | Open the job's **stderr** log in an external editor |
-| `o` | SSH to the selected job's compute node. Suspends the TUI; type `exit` to return |
+| `o` | Open a shell on the selected job's compute node. Suspends the TUI; type `exit` to return. The mechanism is [configurable](#interactive-shell-ssh-vs-srun) — SSH by default |
+| `Shift+O` | The same, using the *other* access method (`ssh` ↔ `srun`) for this one shell |
 | `,` | Edit config file (`~/.config/lazyslurm/config.toml`) in your editor |
 | `r` | Force refresh all job data |
 | `?` | Help for **the panel you are in** — job tables, Job Details, Job Metadata, partition monitor, node view or account usage. Other panels are listed at the bottom (also closes with `Escape`) |
@@ -543,6 +545,46 @@ in the editor, and cleaned up when the editor closes.
 If the configured editor is not found on your system, an error is shown in the Command
 Log (e.g., `editor 'code' not found — set 'editor' in config.toml`).
 
+### Interactive shell: ssh vs srun
+
+Press `o` to get a shell on the compute node running the selected job. There are two
+ways to do that, and they land you in genuinely different places:
+
+```toml
+interactive_shell = "ssh"    # "ssh" (default) | "srun"
+```
+
+**`ssh` — the machine.** You get a normal login shell on the node, *outside* the job's
+cgroup. `CUDA_VISIBLE_DEVICES` is unset, `nvidia-smi` shows **every GPU on the node**
+rather than the one you allocated, and anything you start there is not capped by the
+job's CPU or memory limits — so a heavy process competes with your job instead of being
+contained by it. In exchange it adds no job step, so it cannot skew the
+[efficiency report](#stats), and it either connects or fails fast.
+
+**`srun` — the allocation.** LazySlurm runs `srun --overlap --jobid=<id> --pty bash`, so
+the shell lands inside the job's cgroup: correct `CUDA_VISIBLE_DEVICES`, correct
+resource limits, the same environment the job sees. The costs are real, though: the
+shell appears in `sacct` as a job step, and an idle debugging shell drags the job's
+reported CPU efficiency down. It also needs Slurm ≥ 20.11 for `--overlap`, and can block
+while negotiating the step launch.
+
+So: **use `ssh` to poke at the machine, `srun` to debug inside your allocation.** If
+`nvidia-smi` shows you more GPUs than you asked for, that is the `ssh` path working as
+designed — switch to `srun` for that shell.
+
+You do not have to choose once and live with it: `o` uses the configured method and
+`Shift+O` uses the other one, for a single shell.
+
+Two cases where you may *have* to use `srun`:
+
+- Your cluster runs `pam_slurm_adm`, which refuses SSH to a compute node without an
+  allocation there.
+- You are reproducing something that depends on the job's environment or limits.
+
+`srun` needs a live allocation, so it only applies to a **running** job. On anything
+else LazySlurm falls back to `ssh` and says so in the Command Log. If the step launch
+fails, it reports the exit status rather than silently connecting you somewhere else.
+
 ### Job Completion Notifications
 
 When a running job finishes (completes, fails, times out, etc.), LazySlurm:
@@ -597,6 +639,31 @@ Resubmit (**`s`**) runs the job's original sbatch command. If the script file it
 longer exists, LazySlurm substitutes the archived copy and says so in the Command Log. Not
 available in remote mode, where the archive is local but `sbatch` runs on the login node.
 
+### Resubmit with more resources
+
+The loop after a failure is usually "run it again, but bigger" — more time after a
+TIMEOUT, more memory after an OOM kill. `u` cannot help there: Slurm fixes a job's
+allocation once it starts, so the property editor only works on jobs still queued.
+
+**`Shift+S`** opens that same editor for a *terminated* job, prefilled with what the job
+actually had, and submits with the changed fields as sbatch flags:
+
+```
+sbatch --chdir /work --time=4:00:00 --mem=16G job.sh
+```
+
+- Fields map to `--time`, `--partition`, `--nodes`, `--cpus-per-task` and `--mem`.
+- An override **replaces** the same option in the original submit line rather than being
+  appended next to it, so the command log shows exactly what was requested.
+- A field left blank keeps whatever the original line had. Options after the script name
+  belong to the script and are never touched.
+- After a **TIMEOUT** the runtime field is prefilled with double the old limit, and after
+  **OUT_OF_MEMORY** the memory field with double the old request. They are suggestions —
+  overwrite or clear them.
+- The full `sbatch` line is written to the Command Log before it runs.
+
+The [archived-script fallback](#resubmit-fallback) applies here too.
+
 ### Cache files
 
 | File | Purpose |
@@ -604,7 +671,7 @@ available in remote mode, where the archive is local but `sbatch` runs on the lo
 | `~/.config/lazyslurm/log_cache.json` | Cached `StdOut`/`StdErr` paths, work dir, and submit command per job ID |
 | `~/.config/lazyslurm/scripts/<job_id>.sh` | Archived sbatch scripts, mode `600` (they often contain tokens and private paths) |
 
-Both are pruned on startup using `cache_max_age_days` (default 30, `null` to never prune).
+Both are pruned on startup using `cache_max_age_days` (default 30, `0` to never prune).
 Set `script_cache_dir` in `config.toml` to archive scripts somewhere else.
 
 > Earlier versions shipped a `lazyslurm-daemon` that polled for log paths in the background.
@@ -658,7 +725,8 @@ requested twice:
 |---------|---------------------------|
 | Slurm commands, log reads | Written into the shared shell channel |
 | Live CPU/GPU tabs | The hop to the compute node is made **from the login node**, inside the session |
-| SSH to node (`o`) | A `ProxyCommand` over the session's control socket (not `-J`) |
+| Shell on a node (`o`), `interactive_shell = "ssh"` | A `ProxyCommand` over the session's control socket (not `-J`) |
+| Shell on a node (`o`), `interactive_shell = "srun"` | `srun --pty` run **on the login node**, inside the session |
 | Fetching a log for the editor (`e`) | `scp` over the session's control socket |
 
 The control socket lives in `~/.ssh/cm-lazyslurm/`. If you already have a master

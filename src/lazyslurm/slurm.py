@@ -23,6 +23,7 @@ from lazyslurm.models import (
     PriorityInfo,
     RunningJob,
     UsageRow,
+    parse_duration,
     parse_mem_bytes,
 )
 
@@ -528,6 +529,55 @@ async def _file_exists(path: str) -> bool:
         _, _, rc = await _run_remote(f"test -f {shlex.quote(path)}")
         return rc == 0
     return await asyncio.to_thread(os.path.isfile, path)
+
+
+# ---------------------------------------------------------------------------
+# Interactive shell on a compute node (the `o` key)
+# ---------------------------------------------------------------------------
+
+# The two ways to get a shell on a job's node, and why a user would pick one:
+#
+#   ssh   Lands on the machine, outside the job's cgroup. No CUDA_VISIBLE_DEVICES,
+#         all node GPUs visible, nothing capped by the job's limits. Adds no job
+#         step, so it cannot skew the efficiency report the tool also shows, and
+#         it either connects or fails fast rather than blocking on Slurm state.
+#   srun  Lands inside the allocation, so the environment matches what the job
+#         sees. Costs a job step in sacct — an idle debugging shell drags the
+#         job's reported CPU efficiency down — needs Slurm >= 20.11 for
+#         --overlap, and can block negotiating the step launch. Required on
+#         clusters where pam_slurm_adm refuses SSH without an allocation.
+INTERACTIVE_SHELLS: tuple[str, ...] = ("ssh", "srun")
+
+
+def interactive_shell_cmd(
+    method: str,
+    node: str,
+    job_id: str = "",
+    remote: str = "",
+    control_opt: str = "",
+    shell: str = "bash",
+) -> str:
+    """Build the command that opens an interactive shell on a compute node.
+
+    Pure string building, so the choice is testable without a terminal. In
+    remote mode both paths ride the already-authenticated master socket:
+    ``ssh`` hops with a ProxyCommand (``-J`` would open a second connection and
+    ask for the 2FA code again), and ``srun`` runs on the login node itself.
+    """
+    def join(*parts: str) -> str:
+        return " ".join(p for p in parts if p)
+
+    if method == "srun":
+        srun = f"srun --overlap --jobid={shlex.quote(job_id)} --pty {shlex.quote(shell)}"
+        if remote:
+            # -t forces a pty on the login node, which srun --pty needs.
+            return join("ssh", "-t", control_opt, shlex.quote(remote), shlex.quote(srun))
+        return srun
+
+    if remote:
+        proxy = join("ssh", control_opt, "-W %h:%p", shlex.quote(remote))
+        return join("ssh", "-o", shlex.quote("ProxyCommand=" + proxy), shlex.quote(node))
+    return join("ssh", shlex.quote(node))
 
 
 # ---------------------------------------------------------------------------
@@ -1202,13 +1252,137 @@ def _script_token_index(tokens: list[str]) -> int | None:
     return found
 
 
+# EDITABLE_FIELDS key -> the sbatch flag and its aliases. The aliases matter
+# because an override has to *replace* the same setting in the original submit
+# line, and the user may have written it in any of these spellings.
+_SBATCH_FLAGS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "time_limit": ("--time", ("--time", "-t")),
+    "partition": ("--partition", ("--partition", "-p")),
+    "nodes": ("--nodes", ("--nodes", "-N")),
+    "cpus": ("--cpus-per-task", ("--cpus-per-task", "-c")),
+    "memory": ("--mem", ("--mem",)),
+}
+
+
+def _drop_flag(tokens: list[str], aliases: tuple[str, ...], limit: int) -> list[str]:
+    """Remove every occurrence of ``aliases`` from ``tokens[:limit]``.
+
+    Covers the three spellings sbatch accepts: ``--time=1:00``, ``--time 1:00``
+    and the short ``-t1:00``. Only options before the script are touched —
+    anything after it belongs to the script, not to sbatch.
+    """
+    out: list[str] = []
+    skip_next = False
+    for i, tok in enumerate(tokens):
+        if skip_next:
+            skip_next = False
+            continue
+        if i < limit:
+            if tok in aliases:
+                # Separate form: this token and its value both go.
+                skip_next = True
+                continue
+            if any(tok.startswith(a + "=") for a in aliases):
+                continue
+            if any(len(a) == 2 and tok.startswith(a) and len(tok) > 2 for a in aliases):
+                continue
+        out.append(tok)
+    return out
+
+
+def build_resubmit_tokens(
+    tokens: list[str], overrides: dict[str, str] | None,
+) -> list[str]:
+    """Apply resource overrides to an sbatch token list.
+
+    Each override replaces the same option in the original line rather than
+    being appended next to it — sbatch would take the later one, but leaving
+    both in makes the command log lie about what was requested. A blank value
+    means "keep whatever the original had", so it changes nothing.
+    """
+    if not overrides:
+        return tokens
+    for key, value in overrides.items():
+        value = value.strip()
+        if not value or key not in _SBATCH_FLAGS:
+            continue
+        flag, aliases = _SBATCH_FLAGS[key]
+        if key == "memory":
+            # squeue writes a trailing n/c (per-node / per-cpu); sbatch takes
+            # the plain size, suffix and all ("40G", "4000M", "512").
+            value = value.strip().rstrip("nc") or value.strip()
+        limit = _script_token_index(tokens)
+        tokens = _drop_flag(tokens, aliases, len(tokens) if limit is None else limit)
+        limit = _script_token_index(tokens)
+        at = len(tokens) if limit is None else limit
+        tokens = tokens[:at] + [f"{flag}={value}"] + tokens[at:]
+    return tokens
+
+
+def suggest_resubmit_overrides(
+    state: str, current: dict[str, str],
+) -> dict[str, str]:
+    """What to change after a failure, as EDITABLE_FIELDS-keyed values.
+
+    A job that hit its wall clock wants more time; one the OOM killer took
+    wants more memory. Doubling is the convention the user would have applied
+    by hand. Only ever a prefilled suggestion — the editor shows it as the
+    field's value, so it can be overridden or cleared.
+    """
+    upper = (state or "").upper()
+    if upper.startswith("TIMEOUT"):
+        seconds = parse_duration(current.get("time_limit", ""))
+        if seconds:
+            return {"time_limit": format_walltime(seconds * 2)}
+    if upper.startswith("OUT_OF_MEMORY") or upper.startswith("OOM"):
+        mb = _memory_mb(current.get("memory", ""))
+        if mb:
+            return {"memory": f"{int(mb * 2)}M"}
+    return {}
+
+
+def format_walltime(seconds: float) -> str:
+    """Seconds as the ``D-HH:MM:SS`` / ``HH:MM:SS`` sbatch --time accepts.
+
+    Not models.format_duration, which renders ``6:37:27`` for humans and drops
+    the day field that Slurm needs for anything past 24 hours.
+    """
+    total = max(0, int(seconds))
+    days, rest = divmod(total, 86400)
+    hours, rest = divmod(rest, 3600)
+    minutes, secs = divmod(rest, 60)
+    stamp = f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{days}-{stamp}" if days else stamp
+
+
+def _memory_mb(value: str) -> float:
+    """A memory string in MB, or 0 when it does not parse."""
+    text = (value or "").strip().rstrip("nc")
+    if not text:
+        return 0.0
+    suffix = text[-1].upper()
+    factor = _MEM_SUFFIX_MB.get(suffix)
+    number = text[:-1] if factor else text
+    try:
+        return float(number) * (factor or 1)
+    except ValueError:
+        return 0.0
+
+
 async def resubmit_job(
-    command: str, work_dir: str, job_id: str | None = None,
+    command: str,
+    work_dir: str,
+    job_id: str | None = None,
+    overrides: dict[str, str] | None = None,
 ) -> tuple[bool, str]:
     """Resubmit a job using its original sbatch command. Returns (success, msg).
 
     `command` is either a script path (from scontrol Command=) or a full
     sbatch command line (from sacct SubmitLine=, e.g. "sbatch --array=1-4 job.sh").
+
+    `overrides` maps EDITABLE_FIELDS keys to new resource values ("run it again,
+    but with more time"); each replaces the same option in the original line,
+    and a blank one changes nothing.
 
     If `job_id` is given and the original script file is gone, falls back to the
     archived copy of the script (see archive_batch_script) so a job whose script
@@ -1242,6 +1416,7 @@ async def resubmit_job(
         note = f" (original script missing — submitted archived copy {archived})"
         tokens[idx] = str(archived)
 
+    tokens = build_resubmit_tokens(tokens, overrides)
     args = (["--chdir", work_dir] if work_dir else []) + tokens
 
     stdout, stderr, rc = await _run_cmd("sbatch", *args)

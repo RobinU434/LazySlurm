@@ -136,3 +136,54 @@ def test_multi_job_edit_starts_blank():
             assert app.result == {"time_limit": "8:00:00"}
 
     asyncio.run(scenario())
+
+
+def test_prefill_shows_a_suggestion_but_diffs_against_the_job():
+    """A suggested value must come back as a change, not be filtered out.
+
+    ``action_submit`` returns only fields that differ from ``current``, so a
+    suggestion prefilled *into* current would submit nothing at all.
+    """
+
+    async def scenario():
+        app = _Harness()
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.push_screen(
+                EditJobScreen(
+                    ["123"],
+                    current=dict(_CURRENT),
+                    prefill={"time_limit": "2:00:00"},
+                    title="resubmit job.123",
+                ),
+                callback=lambda r: setattr(app, "result", r),
+            )
+            await pilot.pause()
+            screen = app.screen
+            assert screen.query_one("#edit-time_limit", Input).value == "2:00:00"
+            assert screen.query_one("#edit-memory", Input).value == "40G"  # unchanged
+            rendered = re.sub(r"<[^>]+>", "", app.export_screenshot()).replace("&#160;", " ")
+            assert "resubmit job.123" in rendered
+
+            await pilot.press("ctrl+s")
+            await pilot.pause()
+            # Only the suggested field is a change; the rest matched the job.
+            assert app.result == {"time_limit": "2:00:00"}
+
+    asyncio.run(scenario())
+
+
+def test_escape_returns_nothing_so_a_resubmit_cannot_fire_by_accident():
+    async def scenario():
+        app = _Harness()
+        async with app.run_test(size=(80, 24)) as pilot:
+            app.push_screen(
+                EditJobScreen(["123"], current=dict(_CURRENT),
+                              prefill={"time_limit": "2:00:00"}),
+                callback=lambda r: setattr(app, "result", r),
+            )
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            assert app.result == {}   # falsy: the caller must not submit
+
+    asyncio.run(scenario())

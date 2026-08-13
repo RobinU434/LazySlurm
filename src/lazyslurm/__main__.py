@@ -21,6 +21,39 @@ _CONFIG_KEYS = {
     "partition_order": ("partition_order", list),
 }
 
+# Settings that exist only in the config file — no CLI equivalent. Together with
+# _CONFIG_KEYS this is the whole vocabulary of config.toml, and the one place to
+# add a key so that both the reader and the unknown-key check see it.
+_FILE_ONLY_KEYS = frozenset({
+    "partition_colors",
+    "editor",
+    "pager",
+    "max_name_width",
+    "max_partition_width",
+    "abbreviate_states",
+    "collapse_arrays",
+    "cache_max_age_days",
+    "script_cache_dir",
+    "interactive_shell",
+})
+
+KNOWN_CONFIG_KEYS = frozenset(_CONFIG_KEYS) | _FILE_ONLY_KEYS
+
+
+def unknown_config_keys(saved: dict) -> list[str]:
+    """Warnings for config-file keys nothing reads — a typo, or a rename.
+
+    Such a key is silently inert today, which is the hardest kind of config
+    problem to diagnose because the file looks right. Reported, never rejected:
+    one typo must not cost the user every other setting they configured.
+    Nested tables are checked by table name only.
+    """
+    return [
+        f"ignoring unknown setting: {key}"
+        for key in sorted(saved)
+        if key not in KNOWN_CONFIG_KEYS
+    ]
+
 
 def parse_cache_max_age(raw: object) -> int | None:
     """Resolve ``cache_max_age_days`` from config. None means "never prune".
@@ -39,6 +72,22 @@ def parse_cache_max_age(raw: object) -> int | None:
     except (TypeError, ValueError):
         return 30
     return days if days > 0 else None
+
+
+def parse_interactive_shell(raw: object) -> tuple[str, str]:
+    """Validate ``interactive_shell``. Returns (value, warning or "").
+
+    An unrecognised value falls back to the default rather than failing, but
+    says so — silently ignoring it would leave `o` doing the opposite of what
+    the file asks for.
+    """
+    from lazyslurm.slurm import INTERACTIVE_SHELLS
+
+    value = str(raw).strip().lower()
+    if value in INTERACTIVE_SHELLS:
+        return value, ""
+    options = " | ".join(INTERACTIVE_SHELLS)
+    return "ssh", f"interactive_shell: {raw!r} is not one of {options} — using ssh"
 
 
 def main() -> None:
@@ -183,6 +232,12 @@ def main() -> None:
     collapse_arrays = bool(saved.get("collapse_arrays", True))
     cache_max_age_days = parse_cache_max_age(saved.get("cache_max_age_days", 30))
     script_cache_dir = os.path.expanduser(str(saved.get("script_cache_dir", "")))
+    interactive_shell, shell_warning = parse_interactive_shell(
+        saved.get("interactive_shell", "ssh")
+    )
+    warnings = unknown_config_keys(saved)
+    if shell_warning:
+        warnings.append(shell_warning)
 
     config = Config(
         refresh=float(resolved["refresh"]),
@@ -202,10 +257,15 @@ def main() -> None:
         collapse_arrays=collapse_arrays,
         cache_max_age_days=cache_max_age_days,
         script_cache_dir=script_cache_dir,
+        interactive_shell=interactive_shell,
     )
 
     from lazyslurm.app import LazySlurmApp
-    app = LazySlurmApp(config=config, config_overrides=overrides)
+    app = LazySlurmApp(
+        config=config,
+        config_overrides=overrides,
+        config_warnings=warnings,
+    )
     app.run()
 
 

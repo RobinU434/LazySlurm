@@ -26,6 +26,10 @@ class Config:
     collapse_arrays: bool = True  # fold a job array's tasks into one expandable row
     cache_max_age_days: int | None = 30  # prune cache entries older than this (None = never)
     script_cache_dir: str = ""  # where to archive sbatch scripts ("" = <config_dir>/scripts)
+    # How `o` opens a shell on a job's node: "ssh" (outside the job's cgroup,
+    # accounting-neutral) or "srun" (inside it, but adds a job step). See
+    # INTERACTIVE_SHELLS in slurm.py for the trade-off.
+    interactive_shell: str = "ssh"
 
 
 def _array_ranges(job_id: str) -> list[tuple[int, int, int]]:

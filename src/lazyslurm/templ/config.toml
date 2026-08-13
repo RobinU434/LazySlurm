@@ -14,6 +14,14 @@
 # editor = "vim"             # text editor for viewing logs and config
 # pager = "less"             # pager for browsing whole logs with 'l' ("less", "more", "bat")
 
+# How 'o' opens a shell on a job's compute node. 'O' always uses the other one.
+#   ssh  = the machine itself: no CUDA_VISIBLE_DEVICES, all node GPUs visible,
+#          nothing capped by the job's limits, but adds no job step
+#   srun = inside the allocation: correct GPUs and resource limits, but the
+#          step shows up in sacct and lowers the job's reported CPU efficiency
+# Use srun if your cluster's pam_slurm_adm refuses ssh to compute nodes.
+# interactive_shell = "ssh"  # "ssh" (default) | "srun"
+
 # Column display settings
 # max_name_width = 16        # max characters for job name column (0 = unlimited)
 # max_partition_width = 16   # max characters for partition column (0 = unlimited)
