@@ -6,6 +6,7 @@ import asyncio
 import os
 import shlex
 from datetime import datetime, timedelta
+from typing import Callable
 from pathlib import Path
 
 from lazyslurm.ssh import PromptCallback, SSHSession, quote_argv
@@ -85,6 +86,22 @@ def set_config(config: Config) -> None:
     """Set the module-level config (called once at app startup)."""
     global _config
     _config = config
+
+
+# Where this module reports things the user should know about — set to the
+# app's command log at startup. Without it, failures here have nowhere to go.
+_notice_cb: Callable[[str, str], None] | None = None
+
+
+def set_notice_callback(callback: Callable[[str, str], None] | None) -> None:
+    """Route notices (action, detail) to the app's command log."""
+    global _notice_cb
+    _notice_cb = callback
+
+
+def _notice(action: str, detail: str = "") -> None:
+    if _notice_cb is not None:
+        _notice_cb(action, detail)
 
 
 # ---------------------------------------------------------------------------
@@ -368,8 +385,11 @@ async def get_job_detail(job_id: str) -> JobDetail | None:
         # failure here must never stop detail loading.
         try:
             await archive_batch_script(job_id)
-        except Exception:
-            pass
+        except (OSError, asyncio.TimeoutError, ValueError) as exc:
+            # Never let archiving break detail loading — but say so, because
+            # this is the only window in which the script can still be saved,
+            # and the user would otherwise discover the gap days later.
+            _notice("archive script", f"{job_id}: {exc}")
         return JobDetail(
             job_id=job_id,
             raw=raw,

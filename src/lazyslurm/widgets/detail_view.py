@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from textual.app import ComposeResult
+from textual.css.query import NoMatches
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Static, TabbedContent, TabPane, RichLog
 
@@ -113,8 +114,8 @@ class DetailView(Vertical):
     def load_gpu(self, content: str) -> None:
         try:
             self.query_one("#gpu-content", Static).update(content)
-        except Exception:
-            pass  # GPU tab not present
+        except NoMatches:
+            pass  # GPU tab not present (--no-gpu / --no-live)
 
     @staticmethod
     def _efficiency_section(stats: JobStats) -> str:
@@ -276,6 +277,6 @@ class DetailView(Vertical):
         self.query_one("#cpu-content", Static).update("")
         try:
             self.query_one("#gpu-content", Static).update("")
-        except Exception:
-            pass
+        except NoMatches:
+            pass  # GPU tab not present (--no-gpu / --no-live)
         self.query_one("#stats-content", Static).update("")

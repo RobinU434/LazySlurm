@@ -29,7 +29,8 @@ def load() -> dict:
     try:
         with open(CONFIG_FILE, "rb") as f:
             return tomllib.load(f)
-    except Exception:
+    except (OSError, tomllib.TOMLDecodeError):
+        # A broken or unreadable config must not stop the app from starting.
         return {}
 
 
@@ -101,7 +102,8 @@ def _load_log_cache() -> dict:
         return {}
     try:
         return json.loads(LOG_CACHE_FILE.read_text())
-    except Exception:
+    except (OSError, ValueError):
+        # Truncated or corrupt cache — it is a cache, so rebuild it.
         return {}
 
 

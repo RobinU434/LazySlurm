@@ -11,6 +11,7 @@ from pathlib import Path
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.css.query import NoMatches
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widgets import DataTable, Footer, Input, RichLog, Static
@@ -742,6 +743,7 @@ class LazySlurmApp(App):
 
     def on_mount(self) -> None:
         slurm.set_config(self.config)
+        slurm.set_notice_callback(self._log)
         set_partition_colors(self.config.partition_colors)
         set_display_config(
             max_name=self.config.max_name_width,
@@ -931,8 +933,8 @@ class LazySlurmApp(App):
                 stderr=asyncio.subprocess.DEVNULL,
             )
             await proc.wait()
-        except Exception:
-            pass
+        except (OSError, asyncio.CancelledError):
+            pass  # no notify-send on this box, or the app is shutting down
 
     # ------------------------------------------------------------------
     # Sparkline resource history
@@ -1066,8 +1068,8 @@ class LazySlurmApp(App):
         detail_view.load_cpu("[dim]Press \\[r] or wait for auto-refresh[/]")
         try:
             detail_view.load_gpu("[dim]Press \\[r] or wait for auto-refresh[/]")
-        except Exception:
-            pass
+        except NoMatches:
+            pass  # GPU tab not present (--no-gpu / --no-live)
         metadata_view.load_detail(
             detail,
             priority if isinstance(priority, PriorityInfo) else None,

@@ -7,6 +7,7 @@ from typing import NamedTuple
 
 from textual.message import Message
 from textual.widgets import DataTable
+from textual.widgets.data_table import CellDoesNotExist, RowDoesNotExist
 from rich.text import Text
 
 from lazyslurm.config import base_job_id
@@ -230,7 +231,9 @@ def _row_keys(table: DataTable) -> list[str]:
                 table.cursor_coordinate._replace(row=i, column=0)
             )
             order.append(str(row_key.value))
-        except Exception:
+        except CellDoesNotExist:
+            # The table shrank under us between row_count and this lookup;
+            # what we have so far is the order that still exists.
             break
     return order
 
@@ -257,8 +260,8 @@ def _apply_diff(table: DataTable, new_data: dict[str, tuple], force: bool = Fals
             try:
                 idx = table.get_row_index(old_selected)
                 table.move_cursor(row=idx)
-            except Exception:
-                pass
+            except RowDoesNotExist:
+                pass  # the previously selected row is gone; leave the cursor
         return
 
     # No structural changes — just update changed cells in place
@@ -270,8 +273,8 @@ def _apply_diff(table: DataTable, new_data: dict[str, tuple], force: bool = Fals
                 # str() only compares text content, not Rich styles
                 if repr(current) != repr(value):
                     table.update_cell(key, col_key, value)
-            except Exception:
-                pass
+            except (CellDoesNotExist, RowDoesNotExist):
+                pass  # row removed by a concurrent rebuild; next poll redraws it
 
 
 class JobSelected(Message):
@@ -365,8 +368,8 @@ class _BaseJobTable(DataTable):
             return None
         try:
             row_key, _ = self.coordinate_to_cell_key(self.cursor_coordinate)
-        except Exception:
-            return None
+        except CellDoesNotExist:
+            return None  # cursor is outside the table (empty or mid-rebuild)
         key = str(row_key.value)
         return None if key == _PLACEHOLDER_KEY else key
 
