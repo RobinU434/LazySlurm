@@ -29,6 +29,14 @@ background SSH connection that handles two-factor authentication once at startup
   <img src="https://raw.githubusercontent.com/RobinU434/LazySlurm/main/img/main.png" alt="LazySlurm main view" width="100%">
 </p>
 
+**Jump to:** [Installation](#installation) · [Quick Start](#quick-start) ·
+[Layout](#layout) · [Key Bindings](#key-bindings) · [Detail Tabs](#detail-tabs) ·
+[Metadata Tabs](#metadata-tabs) · [Features](#features) · [Job Cache](#job-cache) ·
+[Remote Mode](#remote-mode) · [Configuration](#configuration) ·
+[CLI Reference](#cli-reference) · [Requirements](#requirements)
+
+Every section below folds open — the headings are the menu.
+
 ## Installation
 
 Requires Python 3.10+ and access to Slurm CLI tools (`squeue`, `sacct`, `scontrol`).
@@ -105,6 +113,9 @@ Press `?` at any time for this list inside the app:
 
 ### Navigation
 
+<details open>
+<summary>Moving between panels, tabs and rows</summary>
+
 | Key | Action |
 |-----|--------|
 | `Up` / `Down` | Navigate job list (wraps between Active and Terminated). The selected job's details update immediately. |
@@ -115,7 +126,12 @@ Press `?` at any time for this list inside the app:
 | `Enter` | In the filter bar: accept the filter and move the cursor onto the matches (the filter stays in force) |
 | `Escape` | In the filter bar: abandon the filter and close the bar |
 
+</details>
+
 ### Actions
+
+<details open>
+<summary>Every key that does something to a job</summary>
 
 | Key | Action |
 |-----|--------|
@@ -141,31 +157,51 @@ Press `?` at any time for this list inside the app:
 | `?` | Help for **the panel you are in** — job tables, Job Details, Job Metadata, partition monitor, node view or account usage. Other panels are listed at the bottom (also closes with `Escape`) |
 | `q` | Quit |
 
+</details>
+
 ## Detail Tabs
 
 Select a job in either table (Up/Down) and use `[` / `]` to switch between these tabs:
 
 ### stdout / stderr
 
+<details>
+<summary>How the log files are found, including for old jobs</summary>
+
 Displays the tail of the job's standard output and error log files. LazySlurm finds log
 files by reading `StdOut` / `StdErr` from `scontrol show job`. For older jobs no longer
 in Slurm's memory, it checks the **log path cache** first (see
-[Log Path Cache](#log-path-cache)), then falls back to searching the working directory
+[Log Path Cache](#log-paths)), then falls back to searching the working directory
 for common patterns (`slurm-JOBID.out`, `JOBNAME-JOBID.out`, `logs/` subdirectory, etc).
 
+</details>
+
 ### cpu
+
+<details>
+<summary>Live process listing from the job's node</summary>
 
 Live process listing from the job's compute node, similar to `top`. Shows PID, %CPU,
 %MEM, RSS, VSZ, elapsed time, and command name. Auto-refreshes while the tab is active.
 
+</details>
+
 ### gpu
+
+<details>
+<summary>nvidia-smi for the job's own GPUs only</summary>
 
 Live `nvidia-smi` output showing **only the GPUs allocated to the selected job**. Uses
 `srun --overlap --jobid` to run nvidia-smi inside the job's cgroup, so GPU visibility
 is automatically restricted to the job's allocation. The header shows
 `CUDA_VISIBLE_DEVICES` for confirmation. Auto-refreshes while the tab is active.
 
+</details>
+
 ### stats
+
+<details>
+<summary>Efficiency, sizing hints and the resource sparklines</summary>
 
 Accounting statistics from `sstat` (running jobs) and `sacct`, starting with what the job
 used against what it reserved:
@@ -199,27 +235,49 @@ Then the raw accounting fields:
 
 <img src="https://raw.githubusercontent.com/RobinU434/LazySlurm/main/img/stats.png" alt="Resource stats with sparkline history" width="100%">
 
+</details>
+
 ## Metadata Tabs
 
 Use `(` / `)` to switch between these tabs:
 
 ### Resources
 
+<details>
+<summary>What the job asked for and what it got</summary>
+
 Partition, node count, CPUs, memory, GPU/GRES allocation, TRES, time limit, runtime,
 account, and QoS.
 
+</details>
+
 ### Submission
+
+<details>
+<summary>Working directory, script and submit line</summary>
 
 Submit time, start/end times, working directory, stdout/stderr paths, and the original
 submit command.
 
+</details>
+
 ### Raw
+
+<details>
+<summary>The unparsed scontrol output</summary>
 
 All key-value pairs from `scontrol show job` or `sacct`, displayed verbatim.
 
-## Visual Features
+</details>
+
+## Features
+
+One heading per feature — open the ones you want.
 
 ### Column Width Limits
+
+<details>
+<summary>Keep long job names from eating the table</summary>
 
 Job names and partition names are truncated to 16 characters by default (with `…` when
 truncated). This keeps the tables compact. Configure via `config.toml`:
@@ -231,7 +289,12 @@ max_partition_width = 10  # narrower partition column
 
 Set to `0` for unlimited width.
 
+</details>
+
 ### State Abbreviations
+
+<details>
+<summary>COMPLETED -> COMP, and the full mapping</summary>
 
 For compact displays, enable abbreviated state names in the Terminated Jobs table:
 
@@ -249,13 +312,23 @@ abbreviate_states = true
 | NODE_FAIL | NFAIL |
 | PREEMPTED | PREEMPT |
 
+</details>
+
 ### Color-Coded Partitions
+
+<details>
+<summary>Automatic colors, and how to override them</summary>
 
 Each partition is assigned a consistent color across both job tables. Colors are
 deterministic (based on the partition name) so they stay stable across sessions. You can
 override colors in the config file (see [Configuration](#configuration)).
 
+</details>
+
 ### Color-Coded Job States
+
+<details>
+<summary>What each color means, in both tables</summary>
 
 **Active Jobs** (Job ID column):
 
@@ -276,7 +349,12 @@ override colors in the config file (see [Configuration](#configuration)).
 | CANCELLED | Dim grey |
 | PREEMPTED | Dim yellow |
 
+</details>
+
 ### Cluster Overview Bar
+
+<details>
+<summary>The one-line summary at the top</summary>
 
 The top line shows a summary of your jobs and cluster partitions:
 
@@ -293,7 +371,12 @@ Partition format is `name:A/I/O/T`:
 | **O** | Other — nodes that are down, drained, or in maintenance |
 | **T** | Total — total nodes in the partition |
 
+</details>
+
 ### Filtering
+
+<details>
+<summary>Filter syntax: fields, comparisons and aliases</summary>
 
 `/` opens the filter bar. Plain words search the job id, name and partition (and state,
 in the Terminated table) as before, and `key:value` terms narrow by field. Terms are
@@ -327,7 +410,12 @@ that matches nothing says **no jobs match** instead of showing an empty table.
 `gpu:` only applies to the Active table: sacct rows carry no GRES, so the term matches
 nothing among terminated jobs.
 
+</details>
+
 ### Job Arrays
+
+<details>
+<summary>A 40-task array as one expandable row</summary>
 
 A 40-task array would otherwise fill the table with 40 near-identical rows, so tasks of
 one array are folded into a single row:
@@ -355,12 +443,22 @@ base id.
 
 Turn it off with `collapse_arrays = false` in `config.toml` to get one row per task again.
 
+</details>
+
 ### Bookmarks
+
+<details>
+<summary>Pin the jobs you keep coming back to</summary>
 
 Press `m` to bookmark any job. Bookmarked jobs are pinned to the top of their table with
 a ★ prefix. Bookmarks persist for the duration of the session.
 
+</details>
+
 ### Account Usage
+
+<details>
+<summary>CPU-hours per user and your fair-share factor</summary>
 
 Press `Shift+U` for what the allocation has cost so far and what it is doing to your
 priority:
@@ -392,7 +490,12 @@ with `loading usage...` and fills in when the data arrives. Nothing here runs in
 loop — it is fetched on open, on `r`, and when the window changes. On a cluster without
 Slurm accounting the panel says so rather than showing an empty table.
 
+</details>
+
 ### Partition Monitor
+
+<details>
+<summary>Cluster-wide load and every user's jobs</summary>
 
 Press `p` for a full-screen view of the cluster's partitions. The main job tables only
 ever show **your** jobs — this screen shows everyone's, so you can see what a partition is
@@ -426,7 +529,12 @@ leave. `--partition-order` also orders this table. Note that `sinfo --summarize`
 one row per node *configuration*, so partitions with mixed hardware are summed into a
 single row here.
 
+</details>
+
 ### Node View
+
+<details>
+<summary>Per-node state, load, memory and GPU occupancy</summary>
 
 Press `Enter` on a partition to see its individual nodes:
 
@@ -452,7 +560,12 @@ who you would be sharing it with. `Up`/`Down` moves between nodes and the job li
 Older Slurm versions that do not support the `GresUsed` output field fall back
 automatically to a shorter query; everything except the GPU column still works.
 
+</details>
+
 ### Edit Pending Jobs
+
+<details>
+<summary>Retune runtime, partition and resources before a job starts</summary>
 
 Press `u` on a pending job to open the property editor:
 
@@ -481,7 +594,12 @@ With a `Ctrl+V` multi-selection active, `u` edits all selected pending jobs at o
 the fields start **blank** and only the ones you fill in are applied to every job —
 non-pending jobs in the selection are skipped and listed in the Command Log.
 
+</details>
+
 ### View sbatch Script
+
+<details>
+<summary>Read the script back, even after Slurm forgets it</summary>
 
 Press `b` to open the selected job's sbatch script in your editor, read-only. Works on
 pending, running, and terminated jobs. The TUI suspends while the editor is open.
@@ -500,7 +618,12 @@ share one script: `123_11`, `123_[1-40]`, and `123` all resolve to the same file
 longer produce one; pressing `b` reports that the script is unavailable. See
 [Job Cache](#job-cache) for the cache location and `script_cache_dir`.
 
+</details>
+
 ### Reading Big Logs
+
+<details>
+<summary>Open a multi-gigabyte log instantly, and search it</summary>
 
 The stdout/stderr tabs show the **last 500 lines**, read by seeking backwards from the end
 of the file — a 200 MB log tails as fast as an empty one, and the panel never blocks the
@@ -533,7 +656,12 @@ get their equivalent end-of-file flag. An unknown pager is run with no flags.
 If a log has no line break in its last 4 MB — a progress bar writing `\r` forever — the
 tail is cut there and the panel says so; press `l` to see the file properly.
 
+</details>
+
 ### Open Logs in Editor
+
+<details>
+<summary>Your editor, local or remote</summary>
 
 Press `e` to open the selected job's stdout log in an external text editor, or
 `Shift+E` for stderr. The TUI suspends while the editor is open and resumes when you
@@ -551,7 +679,12 @@ in the editor, and cleaned up when the editor closes.
 If the configured editor is not found on your system, an error is shown in the Command
 Log (e.g., `editor 'code' not found — set 'editor' in config.toml`).
 
+</details>
+
 ### Interactive shell: ssh vs srun
+
+<details>
+<summary>Why nvidia-smi may show more GPUs than you allocated</summary>
 
 Press `o` to get a shell on the compute node running the selected job. There are two
 ways to do that, and they land you in genuinely different places:
@@ -591,14 +724,24 @@ Two cases where you may *have* to use `srun`:
 else LazySlurm falls back to `ssh` and says so in the Command Log. If the step launch
 fails, it reports the exit status rather than silently connecting you somewhere else.
 
+</details>
+
 ### Job Completion Notifications
+
+<details>
+<summary>Bell, desktop notification, log line</summary>
 
 When a running job finishes (completes, fails, times out, etc.), LazySlurm:
 - Rings the terminal bell
 - Attempts a desktop notification via `notify-send` (Linux)
 - Logs the event in the Command Log panel
 
+</details>
+
 ### Command Log
+
+<details>
+<summary>What LazySlurm ran, and what came back</summary>
 
 The bottom-right panel shows a timestamped log of all actions and their results:
 
@@ -612,6 +755,8 @@ The bottom-right panel shows a timestamped log of all actions and their results:
 14:24:01 job completed
   >>> 2465485 COMPLETED
 ```
+
+</details>
 
 ## Job Cache
 
@@ -629,23 +774,41 @@ scontrol show config | grep MinJobAge
 
 ### Batch scripts
 
+<details>
+<summary>Archived so an old job's script is still readable</summary>
+
 Archived as text under the base job ID, so all tasks of an array share one file. See
 [View sbatch Script](#view-sbatch-script) for the `b` keybinding and its limitations.
 
+</details>
+
 ### Log paths
+
+<details>
+<summary>Remembered, so logs outlive scontrol</summary>
 
 Log paths are cached the same way, into `log_cache.json`, whenever you select a job that
 Slurm still knows about. For older jobs LazySlurm falls back to guessing from filename
 patterns (`slurm-JOBID.out`, `JOBNAME-JOBID.out`, `logs/` subdirectories), which can fail
 if you use custom `--output`/`--error` names.
 
+</details>
+
 ### Resubmit fallback
+
+<details>
+<summary>What happens when the original script is gone</summary>
 
 Resubmit (**`s`**) runs the job's original sbatch command. If the script file it names no
 longer exists, LazySlurm substitutes the archived copy and says so in the Command Log. Not
 available in remote mode, where the archive is local but `sbatch` runs on the login node.
 
+</details>
+
 ### Resubmit with more resources
+
+<details>
+<summary>Run it again, but bigger</summary>
 
 The loop after a failure is usually "run it again, but bigger" — more time after a
 TIMEOUT, more memory after an OOM kill. `u` cannot help there: Slurm fixes a job's
@@ -670,7 +833,12 @@ sbatch --chdir /work --time=4:00:00 --mem=16G job.sh
 
 The [archived-script fallback](#resubmit-fallback) applies here too.
 
+</details>
+
 ### Cache files
+
+<details>
+<summary>Where the cache lives and when it is pruned</summary>
 
 | File | Purpose |
 |------|---------|
@@ -684,6 +852,8 @@ Set `script_cache_dir` in `config.toml` to archive scripts somewhere else.
 > It has been removed — caching now happens inline. A leftover
 > `~/.config/lazyslurm/daemon.pid` is inert and can be deleted.
 
+</details>
+
 ## Remote Mode
 
 Run LazySlurm on your local machine while monitoring a remote cluster:
@@ -693,6 +863,9 @@ lazyslurm --remote user@login.hpc.edu
 ```
 
 ### One connection, opened once
+
+<details>
+<summary>One SSH session for the whole run</summary>
 
 LazySlurm opens a **single SSH session in the background at startup** and runs everything
 through it. It does not spawn `ssh` per Slurm call:
@@ -708,7 +881,12 @@ Commands are serialized on the channel, so they queue rather than interleave. If
 channel dies (network drop, remote logout), the next command reopens it automatically, and
 only re-authenticates if the master itself is gone. The session is closed when you quit.
 
+</details>
+
 ### Two-factor authentication
+
+<details>
+<summary>Answered once, at startup</summary>
 
 Because the master owns a pty, whatever the cluster asks at login is captured and shown to
 you in a modal instead of being lost:
@@ -739,7 +917,12 @@ The control socket lives in `~/.ssh/cm-lazyslurm/`. If you already have a master
 connection to that host, it is reused and you are not prompted at all — passwordless keys
 therefore still connect with no interaction.
 
+</details>
+
 ### Other remote notes
+
+<details>
+<summary>Defaults and limits worth knowing</summary>
 
 When using `--remote user@host`, the username is automatically used as the default
 `--user` for Slurm queries (no need to specify both).
@@ -750,6 +933,8 @@ machine while `sbatch` runs on the login node.
 **Login node warning**: If the local or remote hostname contains "login", LazySlurm shows
 a warning popup reminding you to be mindful of resource usage on shared login nodes.
 
+</details>
+
 ## Configuration
 
 LazySlurm stores persistent settings in `~/.config/lazyslurm/config.toml` (respects
@@ -757,6 +942,9 @@ LazySlurm stores persistent settings in `~/.config/lazyslurm/config.toml` (respe
 or you can create it by hand.
 
 ### Example config file
+
+<details>
+<summary>Every setting, with its default</summary>
 
 ```toml
 # All CLI arguments can be set here as defaults.
@@ -802,7 +990,12 @@ fat = "magenta"
 debug = "dim"
 ```
 
+</details>
+
 ### CLI vs config file
+
+<details>
+<summary>Which wins, and what gets logged</summary>
 
 All CLI arguments can be set in the config file. The precedence is:
 
@@ -811,7 +1004,12 @@ All CLI arguments can be set in the config file. The precedence is:
 When a CLI argument overrides a config file value that differs, the override is logged in
 the Command Log panel at startup.
 
+</details>
+
 ### Partition order
+
+<details>
+<summary>Pin the partitions you care about first</summary>
 
 To set a custom partition order for the cluster bar:
 
@@ -820,9 +1018,14 @@ To set a custom partition order for the cluster bar:
 lazyslurm --partition-order gpu,cpu,fat
 ```
 
+</details>
+
 ## CLI Reference
 
 ### lazyslurm
+
+<details>
+<summary>Every flag, with defaults</summary>
 
 ```
 lazyslurm [-h] [-r SEC] [-d N] [-u USER] [-p PARTITION]
@@ -840,34 +1043,7 @@ lazyslurm [-h] [-r SEC] [-d N] [-u USER] [-p PARTITION]
 | `--partition-order` | Comma-separated partition display order for cluster bar | (sinfo order) |
 | `-H`, `--remote` | SSH target for remote mode (e.g. `user@login.hpc.edu`) | (local) |
 
-## Development
-
-```bash
-uv sync --group dev        # test dependencies
-uv run pytest              # the suite
-```
-
-### Coverage
-
-```bash
-uv run pytest --cov                        # terminal report, missing lines listed
-uv run pytest --cov --cov-report=html      # browsable report in htmlcov/index.html
-uv run pytest --cov --cov-report=xml       # coverage.xml, for external tools
-```
-
-Settings live under `[tool.coverage.*]` in `pyproject.toml`: branch coverage is on,
-fully-covered files are collapsed, and the run fails below **68%** — a floor to catch a
-drop, not a target. Raise it as coverage rises. Coverage is opt-in, so a plain
-`uv run pytest` stays fast.
-
-Where it stands today (~70% overall): the parsing and model layers are well covered
-(`models.py` 97%, `slurm.py` 82%, `job_table.py` 92%), while `app.py` sits at ~43%
-because much of it is key handlers that shell out to an editor, a pager or SSH. The
-useful next targets are the widget render paths, which need no cluster.
-
-Four tests fail outside a Slurm environment and are not related to the code under test:
-two need an `sstat` binary on `PATH`, two assert a hardcoded local time. Coverage
-numbers here include those failures.
+</details>
 
 ## Requirements
 
