@@ -73,6 +73,13 @@ the command, the import package and the config directory are all `lazyslurm`.
 
 ### Fixed
 
+- **The job list on the partition and node screens jumped to the top every refresh**
+  ([#43](https://github.com/RobinU434/LazySlurm/issues/43)). Those panes are rebuilt on
+  the refresh timer, and rebuilding resets the cursor — so on a busy partition the list
+  could not be browsed at all: every scroll was undone within seconds. The cursor is now
+  tracked by row key, so it also *follows* its job when rows above it disappear. The
+  account usage table had the same bug, visible only on `r`/`w`. All four tables now
+  share one `KeyedTable` base instead of a per-table copy of the logic.
 - **Blank fields in the detail panels** ([#22](https://github.com/RobinU434/LazySlurm/issues/22)).
   `sacct` emits empty columns rather than omitting them, so eleven accessors returned
   `""` instead of falling back to the other spelling of the field. Cancelled and failed
