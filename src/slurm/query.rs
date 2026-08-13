@@ -204,8 +204,7 @@ impl Slurm {
     /// that is already authenticated; opening a fresh one would prompt for the
     /// verification code again.
     pub fn session_control_path(&self) -> Option<String> {
-        // Filled in by P8, when the SSH session exists.
-        None
+        self.runner.control_path()
     }
 
     /// Replace the configuration, as the `,` live-reload does.

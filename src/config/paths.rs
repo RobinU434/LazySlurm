@@ -81,10 +81,24 @@ fn home_dir() -> PathBuf {
 /// Config values are typed by hand and `~/scratch/scripts` is the natural way to
 /// write a path; nothing else expands it for us.
 pub fn expand_tilde(path: &str) -> String {
+    expand_tilde_within(path, &home_dir())
+}
+
+/// [`expand_tilde`], with the home directory given rather than looked up.
+///
+/// Split out so it can be tested without setting `HOME`, which is process-wide
+/// and races with every other test in the binary.
+fn expand_tilde_within(path: &str, home: &Path) -> String {
     match path.strip_prefix('~') {
         Some(rest) => {
             let rest = rest.strip_prefix('/').unwrap_or(rest);
-            home_dir().join(rest).to_string_lossy().into_owned()
+            // A bare `~` is the home directory itself; joining "" onto a path
+            // would leave a trailing separator.
+            if rest.is_empty() {
+                home.to_string_lossy().into_owned()
+            } else {
+                home.join(rest).to_string_lossy().into_owned()
+            }
         }
         None => path.to_string(),
     }
@@ -145,10 +159,14 @@ mod tests {
 
     #[test]
     fn expands_a_leading_tilde() {
-        std::env::set_var("HOME", "/home/tester");
-        assert_eq!(expand_tilde("~/scratch"), "/home/tester/scratch");
-        assert_eq!(expand_tilde("/absolute"), "/absolute");
-        assert_eq!(expand_tilde("relative"), "relative");
+        let home = Path::new("/home/tester");
+        assert_eq!(
+            expand_tilde_within("~/scratch", home),
+            "/home/tester/scratch"
+        );
+        assert_eq!(expand_tilde_within("~", home), "/home/tester");
+        assert_eq!(expand_tilde_within("/absolute", home), "/absolute");
+        assert_eq!(expand_tilde_within("relative", home), "relative");
     }
 
     #[test]

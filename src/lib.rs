@@ -17,6 +17,7 @@ pub mod cli;
 pub mod config;
 pub mod model;
 pub mod slurm;
+pub mod ssh;
 pub mod startup;
 pub mod ui;
 

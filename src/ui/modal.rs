@@ -21,6 +21,8 @@ pub enum Outcome {
     Dismissed,
     /// Closed, and this should happen.
     Accepted(Request),
+    /// Closed with an answer for whoever is waiting on it.
+    Answered(Option<String>),
 }
 
 /// Something the app should ask Slurm to do.
@@ -43,6 +45,8 @@ pub enum Request {
 
 /// An open dialog.
 pub enum Modal {
+    /// The cluster is asking something during login.
+    SshPrompt(SshPrompt),
     ConfirmCancel {
         ids: Vec<String>,
     },
@@ -58,6 +62,7 @@ impl Modal {
     /// Handle one keystroke.
     pub fn handle_key(&mut self, key: KeyEvent) -> Outcome {
         match self {
+            Self::SshPrompt(prompt) => prompt.handle_key(key),
             Self::ConfirmCancel { ids } => match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => Outcome::Accepted(Request::Cancel {
                     ids: std::mem::take(ids),
@@ -86,6 +91,7 @@ impl Modal {
     /// The dialog's title and body.
     pub fn view(&self) -> (String, Vec<Line<'static>>) {
         match self {
+            Self::SshPrompt(prompt) => prompt.view(),
             Self::ConfirmCancel { ids } => {
                 let title = if ids.len() == 1 {
                     format!(" Cancel job {} ", ids[0])
@@ -138,6 +144,69 @@ fn confirm_prompt() -> Line<'static> {
         Span::styled("Escape", theme::bold()),
         Span::raw(" to abort."),
     ])
+}
+
+/// Whatever the cluster asked for during login.
+///
+/// The label is the server's own prompt text, forwarded verbatim, so it reads
+/// exactly as it would in a terminal — "Verification code:", "Duo passcode:",
+/// whatever that cluster happens to say.
+pub struct SshPrompt {
+    host: String,
+    question: String,
+    /// Whether to mask what is typed.
+    secret: bool,
+    answer: String,
+}
+
+impl SshPrompt {
+    pub fn new(host: impl Into<String>, question: impl Into<String>, secret: bool) -> Self {
+        Self {
+            host: host.into(),
+            question: question.into(),
+            secret,
+            answer: String::new(),
+        }
+    }
+
+    /// What the user has typed so far.
+    pub fn answer(&self) -> &str {
+        &self.answer
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) -> Outcome {
+        match key.code {
+            KeyCode::Enter => Outcome::Answered(Some(std::mem::take(&mut self.answer))),
+            // Escape gives up on the connection entirely.
+            KeyCode::Esc => Outcome::Answered(None),
+            KeyCode::Backspace => {
+                self.answer.pop();
+                Outcome::Continue
+            }
+            KeyCode::Char(character) => {
+                self.answer.push(character);
+                Outcome::Continue
+            }
+            _ => Outcome::Continue,
+        }
+    }
+
+    fn view(&self) -> (String, Vec<Line<'static>>) {
+        let shown = if self.secret {
+            "•".repeat(self.answer.chars().count())
+        } else {
+            self.answer.clone()
+        };
+        (
+            format!(" ssh {} ", self.host),
+            vec![
+                Line::raw(self.question.clone()),
+                Line::from(vec![Span::raw(shown), Span::styled("█", theme::dim())]),
+                Line::raw(""),
+                Line::from(Span::styled("enter send   esc cancel", theme::dim())),
+            ],
+        )
+    }
 }
 
 /// The job editor: one line per editable property.

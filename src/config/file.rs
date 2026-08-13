@@ -297,12 +297,19 @@ mod tests {
 
     #[test]
     fn expands_a_tilde_in_the_script_cache_dir() {
-        std::env::set_var("HOME", "/home/tester");
+        // Asserted against the real home rather than a planted one: setting HOME
+        // is process-wide and would race with every other test in the binary.
         let mut config = Config::default();
         FileConfig::parse(r#"script_cache_dir = "~/scratch/scripts""#)
             .unwrap()
             .apply_to(&mut config);
-        assert_eq!(config.script_cache_dir, "/home/tester/scratch/scripts");
+
+        assert!(
+            !config.script_cache_dir.starts_with('~'),
+            "{}",
+            config.script_cache_dir
+        );
+        assert!(config.script_cache_dir.ends_with("scratch/scripts"));
     }
 
     #[test]

@@ -4,8 +4,10 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use lazyslurm::cli::Args;
-use lazyslurm::slurm::{LocalRunner, Slurm};
+use lazyslurm::slurm::{CommandRunner, LocalRunner, Slurm};
+use lazyslurm::ssh::{RemoteRunner, SshSession};
 use lazyslurm::startup::Settings;
+use lazyslurm::ui::app::RemoteSession;
 use lazyslurm::ui::{run, App};
 
 #[tokio::main]
@@ -19,14 +21,40 @@ async fn main() -> ExitCode {
     notes.extend(settings.prune_caches());
     notes.extend(settings.overrides.iter().map(|entry| entry.to_string()));
 
-    // TODO(P8): a remote target needs the SSH session as its transport.
+    // Remote mode runs every command through one SSH session; local mode spawns
+    // the Slurm binaries directly. Nothing above the transport knows which.
+    let (runner, session): (Box<dyn CommandRunner>, _) = if settings.config.is_remote() {
+        let (prompts, prompt_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let session = Arc::new(SshSession::new(settings.config.remote.clone()).with_prompt(
+            Arc::new(move |question, secret| {
+                let prompts = prompts.clone();
+                Box::pin(async move {
+                    // The modal lives on the main loop, so the question goes
+                    // there and the answer comes back down a oneshot.
+                    let (reply, answer) = tokio::sync::oneshot::channel();
+                    if prompts.send((question, secret, reply)).is_err() {
+                        return None;
+                    }
+                    answer.await.unwrap_or(None)
+                })
+            }),
+        ));
+        (
+            Box::new(RemoteRunner::new(session.clone())),
+            Some((session, prompt_receiver)),
+        )
+    } else {
+        (Box::new(LocalRunner), None)
+    };
+
     let slurm = Arc::new(
-        Slurm::new(Box::new(LocalRunner), settings.config.clone())
-            .with_cache(Arc::new(settings.log_cache())),
+        Slurm::new(runner, settings.config.clone()).with_cache(Arc::new(settings.log_cache())),
     );
 
     let app = App::new(settings.config.clone());
-    match run(slurm, app, settings, notes).await {
+    let remote = session.map(|(session, prompts)| RemoteSession { session, prompts });
+
+    match run(slurm, app, settings, notes, remote).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             // The terminal has been restored by now, so this is visible.

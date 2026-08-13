@@ -28,7 +28,7 @@ use super::help::{self, Action, Context};
 use super::job_table::JobTable;
 use super::layout::main_layout;
 use super::metadata::MetadataView;
-use super::modal::{EditModal, Modal, Outcome, Request};
+use super::modal::{EditModal, Modal, Outcome, Request, SshPrompt};
 use super::render::{self, LogEntry, TableStyle};
 use super::screens::{NodeScreen, Pane, PartitionScreen, UsageScreen};
 use super::terminal::{install_panic_hook, Session};
@@ -202,6 +202,8 @@ pub struct App {
     shown_work_dir: String,
     /// The open dialog, if any. It takes every key while it is up.
     modal: Option<Modal>,
+    /// Where the answer to an SSH prompt has to go.
+    ssh_reply: Option<tokio::sync::oneshot::Sender<Option<String>>>,
     /// Where a multi-select range started, and in which table.
     multiselect: Option<(Panel, String)>,
     selected_ids: BTreeSet<String>,
@@ -239,6 +241,7 @@ impl App {
             shown_submit: None,
             shown_work_dir: String::new(),
             modal: None,
+            ssh_reply: None,
             multiselect: None,
             selected_ids: BTreeSet::new(),
         };
@@ -498,6 +501,14 @@ impl App {
                     self.modal = None;
                     self.exit_multiselect();
                     Command::Run(request)
+                }
+                Outcome::Answered(answer) => {
+                    self.modal = None;
+                    // Whoever asked is blocked on this; send it and move on.
+                    if let Some(reply) = self.ssh_reply.take() {
+                        let _ = reply.send(answer);
+                    }
+                    Command::None
                 }
             };
         }
@@ -865,6 +876,18 @@ impl App {
     fn push_multiselect(&mut self) {
         self.active.set_multiselected(self.selected_ids.clone());
         self.completed.set_multiselected(self.selected_ids.clone());
+    }
+
+    /// Ask the user whatever the cluster is asking.
+    pub fn ask_ssh(
+        &mut self,
+        question: String,
+        secret: bool,
+        reply: tokio::sync::oneshot::Sender<Option<String>>,
+    ) {
+        let host = self.config.remote.clone();
+        self.modal = Some(Modal::SshPrompt(SshPrompt::new(host, question, secret)));
+        self.ssh_reply = Some(reply);
     }
 
     /// Adopt a reloaded configuration, reporting what changed.
@@ -1327,11 +1350,19 @@ pub async fn run(
     mut app: App,
     settings: Settings,
     notes: Vec<String>,
+    remote: Option<RemoteSession>,
 ) -> Result<()> {
+    let (session_handle, prompts) = match remote {
+        Some(remote) => (Some(remote.session), Some(remote.prompts)),
+        None => (None, None),
+    };
     install_panic_hook();
     let mut session = Session::enter()?;
     let mut events = Events::start();
 
+    if let Some(prompts) = prompts {
+        spawn_prompt_bridge(prompts, events.sender());
+    }
     for note in notes {
         app.log(note, None);
     }
@@ -1342,7 +1373,19 @@ pub async fn run(
     } else {
         app.log("auto-refresh", Some("disabled (refresh=0)".into()));
     }
-    spawn_poll(slurm.clone(), events.sender());
+
+    // Remote mode authenticates before anything else: the 2FA prompt has to be
+    // answered up front, not in the middle of the first poll.
+    match &session_handle {
+        Some(ssh) => {
+            app.log(
+                format!("ssh {}", app.config.remote),
+                Some("opening session...".into()),
+            );
+            spawn_connect(ssh.clone(), events.sender());
+        }
+        None => spawn_poll(slurm.clone(), events.sender()),
+    }
 
     session.terminal().draw(|frame| app.draw(frame))?;
 
@@ -1352,6 +1395,16 @@ pub async fn run(
                 Command::Quit => break,
                 Command::Refresh => {
                     app.log("refresh", None);
+                    // In remote mode a dropped or refused session is retried
+                    // here — the user's only way back after cancelling or
+                    // mistyping a verification code.
+                    if let Some(ssh) = &session_handle {
+                        if !ssh.connected().await {
+                            spawn_connect(ssh.clone(), events.sender());
+                            session.terminal().draw(|frame| app.draw(frame))?;
+                            continue;
+                        }
+                    }
                     if app.top_screen().is_some() {
                         spawn_screen_load(&slurm, &app, events.sender());
                     } else {
@@ -1425,6 +1478,22 @@ pub async fn run(
                     },
                 )?;
             }
+            Event::SshPrompt {
+                question,
+                secret,
+                reply,
+            } => app.ask_ssh(question, secret, reply),
+            Event::SshConnected(result) => match result {
+                Ok(message) => {
+                    app.log("ssh", Some(message));
+                    spawn_poll(slurm.clone(), events.sender());
+                }
+                Err(error) => {
+                    app.log("ssh", Some(error));
+                    // `r` is the only way back after a cancelled or mistyped code.
+                    app.log("ssh", Some("press r to retry".into()));
+                }
+            },
             Event::Log(action, result) => app.log(action, result),
             Event::Resize => {}
         }
@@ -1518,6 +1587,47 @@ fn spawn_detail_load(slurm: &Arc<Slurm>, app: &mut App, settings: &Settings, sen
             priority,
             sprio_available: slurm.sprio_available(),
         })));
+    });
+}
+
+/// Questions the SSH session needs answered, and where to send the answers.
+pub type PromptRequest = (String, bool, tokio::sync::oneshot::Sender<Option<String>>);
+
+/// The remote connection, and the channel its prompts arrive on.
+pub struct RemoteSession {
+    pub session: Arc<crate::ssh::SshSession>,
+    pub prompts: tokio::sync::mpsc::UnboundedReceiver<PromptRequest>,
+}
+
+/// Forward the session's questions onto the app's own event channel.
+///
+/// The SSH session runs on its own task while the modal lives on the main loop,
+/// so the question crosses over here and the answer goes back down a oneshot.
+fn spawn_prompt_bridge(
+    mut prompts: tokio::sync::mpsc::UnboundedReceiver<PromptRequest>,
+    sender: Sender,
+) {
+    tokio::spawn(async move {
+        while let Some((question, secret, reply)) = prompts.recv().await {
+            if sender
+                .send(Event::SshPrompt {
+                    question,
+                    secret,
+                    reply,
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+}
+
+/// Open the SSH session, reporting the outcome when it finishes.
+fn spawn_connect(session: Arc<crate::ssh::SshSession>, sender: Sender) {
+    tokio::spawn(async move {
+        let result = session.connect().await;
+        let _ = sender.send(Event::SshConnected(result));
     });
 }
 

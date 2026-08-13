@@ -55,6 +55,15 @@ pub trait CommandRunner: Send + Sync {
     fn is_remote(&self) -> bool {
         false
     }
+
+    /// The control socket of the live connection, if there is one.
+    ///
+    /// Anything the app shells out to — the pager, the editor's scp, `o` — must
+    /// ride the connection that is already authenticated. Opening a fresh one
+    /// would ask for the verification code all over again.
+    fn control_path(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Shared ownership of a runner, so a caller can keep inspecting one after
@@ -66,6 +75,10 @@ impl<T: CommandRunner + ?Sized> CommandRunner for std::sync::Arc<T> {
 
     fn is_remote(&self) -> bool {
         (**self).is_remote()
+    }
+
+    fn control_path(&self) -> Option<String> {
+        (**self).control_path()
     }
 }
 

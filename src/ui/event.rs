@@ -53,6 +53,16 @@ pub enum Event {
     },
     /// A batch script is ready to be shown.
     OpenScript(std::path::PathBuf),
+    /// The cluster is asking for a password or a verification code.
+    ///
+    /// The answer goes back down `reply`; the SSH session is waiting on it.
+    SshPrompt {
+        question: String,
+        secret: bool,
+        reply: tokio::sync::oneshot::Sender<Option<String>>,
+    },
+    /// The SSH session finished connecting.
+    SshConnected(Result<String, String>),
     /// Something to write to the command log.
     Log(String, Option<String>),
 }
