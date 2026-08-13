@@ -8,6 +8,7 @@ from typing import NamedTuple
 from textual.message import Message
 from textual.widgets import DataTable
 from textual.widgets.data_table import CellDoesNotExist, RowDoesNotExist
+from rich.cells import cell_len, set_cell_size
 from rich.text import Text
 
 from lazyslurm.config import base_job_id
@@ -94,10 +95,18 @@ def set_display_config(
 
 
 def _truncate(text: str, max_width: int) -> str:
-    """Truncate text to max_width, adding … if truncated."""
-    if max_width <= 0 or len(text) <= max_width:
+    """Truncate text to max_width *terminal columns*, adding … if truncated.
+
+    Not len(): that counts code points, and a terminal lays out columns. A CJK
+    job name is twice as wide as its length suggests and would overflow its
+    column, pushing every column to its right out of alignment; a name with
+    combining marks is narrower and would be cut early. set_cell_size also
+    refuses to split a double-width character down the middle, which slicing
+    happily does.
+    """
+    if max_width <= 0 or cell_len(text) <= max_width:
         return text
-    return text[:max_width - 1] + "…"
+    return set_cell_size(text, max_width - 1) + "…"
 
 
 def _partition_style(partition: str) -> str:

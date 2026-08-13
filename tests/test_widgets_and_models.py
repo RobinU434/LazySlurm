@@ -504,3 +504,45 @@ def test_parse_interactive_shell_validates_and_warns():
     value, warning = parse_interactive_shell("telnet")
     assert value == "ssh"                      # falls back, never fails
     assert "telnet" in warning and "ssh | srun" in warning
+
+
+# ---------------------------------------------------------------------------
+# _truncate measures terminal columns, not code points (#37)
+# ---------------------------------------------------------------------------
+
+
+def test_truncate_counts_columns_not_characters():
+    from rich.cells import cell_len
+
+    # Four CJK characters are eight columns wide, so a 5-column budget fits
+    # two of them plus the ellipsis.
+    assert job_table._truncate("実験実験", 5) == "実験…"
+    assert cell_len(job_table._truncate("実験実験", 4)) <= 4
+
+
+def test_truncate_never_overflows_its_column():
+    from rich.cells import cell_len
+
+    for text in ("実験-sweep", "🚀-run", "éxperiment", "plain-name", "実"):
+        for width in range(1, 14):
+            out = job_table._truncate(text, width)
+            assert cell_len(out) <= max(width, cell_len(text)), (text, width, out)
+            if cell_len(text) > width:
+                assert cell_len(out) <= width, (text, width, out)
+
+
+def test_truncate_leaves_text_that_fits_alone():
+    # A name that fits must come back byte-identical, not padded.
+    assert job_table._truncate("実験", 4) == "実験"
+    assert job_table._truncate("train", 5) == "train"
+    assert job_table._truncate("train", 0) == "train"   # 0 = no limit
+
+
+def test_truncate_does_not_split_a_wide_character_in_half():
+    from rich.cells import cell_len
+
+    # An odd budget cannot fit half of a 2-column character; the result still
+    # has to occupy exactly the space the column reserves.
+    out = job_table._truncate("実験実験", 4)
+    assert cell_len(out) == 4
+    assert "\ufffd" not in out
