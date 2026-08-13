@@ -7,7 +7,9 @@
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Cell, Paragraph, Row as TableRow, Table};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Cell, Paragraph, Row as TableRow, Table, TableState,
+};
 use ratatui::Frame;
 
 use crate::config::Config;
@@ -88,19 +90,23 @@ where
             if index % 2 == 1 {
                 table_row = table_row.style(theme::stripe());
             }
-            if index == table.selected_index() {
-                table_row = table_row.style(if style.focused {
-                    theme::cursor()
-                } else {
-                    theme::cursor_unfocused()
-                });
-            }
             table_row
         })
         .collect();
 
-    let widget = Table::new(rows, column_widths(columns, &cells)).header(header);
-    frame.render_widget(widget, inner);
+    let widget = Table::new(rows, column_widths(columns, &cells))
+        .header(header)
+        .row_highlight_style(if style.focused {
+            theme::cursor()
+        } else {
+            theme::cursor_unfocused()
+        });
+
+    // Rendered with state so ratatui scrolls the viewport to keep the cursor
+    // visible: a table with more jobs than rows would otherwise leave the
+    // selection off-screen, with no way to tell where it had got to.
+    let mut state = TableState::new().with_selected(Some(table.selected_index()));
+    frame.render_stateful_widget(widget, inner, &mut state);
 }
 
 /// Size each column to its widest cell, leaving the flexible one the remainder.
@@ -547,6 +553,39 @@ mod tests {
         assert!(output.contains("×10"), "{output}");
         // The tally replaces the elapsed column.
         assert!(output.contains("pend"), "{output}");
+    }
+
+    #[test]
+    fn scrolls_to_keep_the_cursor_visible() {
+        // More jobs than the panel has rows: the selection must still be drawn.
+        let mut table = JobTable::new(true);
+        table.set_jobs(
+            (0..100)
+                .map(|index| running(&format!("{}", 1000 + index), "job", "RUNNING", "gpu"))
+                .collect(),
+        );
+        table.select_edge(true); // the last row
+
+        let output = draw(&table, 60, 10);
+        assert!(
+            output.contains("1099"),
+            "the cursor scrolled out of view:\n{output}"
+        );
+        // And the top of the list has scrolled away.
+        assert!(!output.contains("1000"), "{output}");
+    }
+
+    #[test]
+    fn shows_the_top_of_the_list_before_the_cursor_moves() {
+        let mut table = JobTable::new(true);
+        table.set_jobs(
+            (0..100)
+                .map(|index| running(&format!("{}", 1000 + index), "job", "RUNNING", "gpu"))
+                .collect(),
+        );
+
+        let output = draw(&table, 60, 10);
+        assert!(output.contains("1000"), "{output}");
     }
 
     #[test]
