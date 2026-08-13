@@ -3,7 +3,7 @@
 Tracks progress against [RUST_PORT_PLAN.md](RUST_PORT_PLAN.md). One line per work
 item; update as you go, so a resumed session knows where it stopped.
 
-**Branch:** `rust-dev` · **Tests:** 478 passing · **Last updated:** 2026-08-13
+**Branch:** `rust-dev` · **Tests:** 527 passing · **Last updated:** 2026-08-13
 
 `lazyslurm` now starts, draws the main screen and quits. Verified end to end in
 a pty as well as by full-screen `TestBackend` draws.
@@ -32,7 +32,7 @@ comparison against a real cluster.
 | P3 | Config file, on-disk caches, CLI resolution | **done** |
 | P4 | Job tables, filtering, arrays, main screen | **done** |
 | P5 | Detail / metadata / help panels | **done** |
-| P6 | Partition, node and usage screens | not started |
+| P6 | Partition, node and usage screens | **done** |
 | P7 | Actions wired to the UI, editor/pager shell-outs | not started |
 | P8 | Remote mode over one SSH session | not started |
 | P9 | Polish and release | not started |
@@ -138,6 +138,23 @@ Detail loading is debounced 200 ms and generation-stamped. A superseded load
 checks the generation before asking Slurm anything, so arrowing through a list
 costs one set of commands rather than one per row.
 
+### P6 — full-screen panels
+- `slurm/live.rs` — `node_processes` and `gpu_status`, the only two queries that
+  reach a compute node rather than Slurm.
+- `ui/simple_table.rs` — the ungrouped tables (partitions, nodes, other users'
+  jobs, usage rows), sharing the cursor-follows-its-row rule.
+- `ui/screens.rs` — the three panels, their summary bars and their bars.
+- `ui/app.rs` — a screen stack. Keys route to the top screen, which carries its
+  own help context, so `Up` means "next partition" there and "next job" on the
+  main view without either knowing about the other.
+
+Two rules worth keeping when extending this:
+
+- **Replies are dropped when they no longer match the cursor.** A slow `sreport`
+  or a stale partition job list must not overwrite what is on screen.
+- **Live tabs fetch only while showing.** Each is an SSH round trip to a compute
+  node; paying for it behind a hidden tab is waste.
+
 ## Divergences
 
 Seven, all recorded in [DIVERGENCES.md](DIVERGENCES.md) with reasoning. One (#4)
@@ -150,22 +167,24 @@ a blank where the fallback field has the answer. Worth fixing in the Python too.
 - **Opportunistic script archiving on detail load.** `archive_batch_script` and
   the store are both in place; hooking it into the detail-load path is P7, where
   the UI decides when to spend the extra call.
-- **The cpu and gpu tabs are empty.** They need `get_node_processes` and
-  `get_gpu_status`, which are P6's live monitoring — the panes and tabs are in
-  place and only want feeding.
+- **`g`/`G`** are bound on the job tables only. The full-screen panels do not
+  advertise them and do not handle them; add to their binding tables if wanted.
 
 ## Next steps
 
-P6 — the full-screen panels:
+P7 — actions wired to the UI. Everything below already exists in
+`slurm/action.rs` and only needs keys, confirmation modals and the terminal
+suspend helper (`ui/terminal.rs::suspended`, written in P4 for this):
 
-1. A screen stack (`Vec<Screen>`) with key routing to the top screen, replacing
-   Textual's `push_screen`/`pop_screen`.
-2. The partition monitor (`p`), the node view (`Enter` on a partition), and the
-   account usage panel (`Shift+U`, `w` to cycle the window). Every table needs
-   the same cursor-preservation rule the job tables have.
-3. Live cpu/gpu monitoring, which also fills the detail panel's empty tabs.
-   Fetch only while the relevant tab is open, as the Python does.
+1. A modal layer: confirm-cancel, confirm-resubmit, the job editor, and the SSH
+   password prompt P8 needs. `layout::centered` and `render::help_overlay`
+   already show the shape.
+2. `c` cancel with confirmation, `Shift+C` force-cancel **without** one, `Ctrl+V`
+   multi-select, `u` edit a pending job, `s` resubmit, `b` view the batch script.
+3. `e`/`Shift+E` editor, `l` pager, `o` SSH to the node, `,` edit config and
+   live-reload. All suspend the terminal; in remote mode the pager runs *on the
+   cluster* and the editor scp's the file down.
+4. Hook opportunistic script archiving into the detail-load path.
 
-The `slurm` layer already has every query these need — `partitions`,
-`partition_nodes`, `node_jobs`, `partition_jobs`, `account_usage`, `fairshare`.
-This is rendering and key routing, not new Slurm work.
+Watch for issues #39 and #40 while doing step 3: the Python's remote pager and
+scp quoting are both wrong, and the Rust must not copy them.
