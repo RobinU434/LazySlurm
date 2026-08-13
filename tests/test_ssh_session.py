@@ -9,6 +9,9 @@ and error-reporting helpers are tested directly.
 from __future__ import annotations
 
 import asyncio
+import threading
+import pty
+import contextlib
 import os
 import sys
 
@@ -429,3 +432,127 @@ def test_no_callback_means_batchmode_so_it_cannot_hang():
 
     interactive = SSHSession("user@login", prompt_cb=lambda *_: None)
     assert "BatchMode=yes" not in interactive._master_argv()
+
+
+# ---------------------------------------------------------------------------
+# The auth pump must not leak a thread per second of silence (#52)
+# ---------------------------------------------------------------------------
+
+
+def _pump_session(monkeypatch, answers=None):
+    """A session with a short poll interval and `ssh -O check` stubbed out."""
+    import lazyslurm.ssh as ssh_mod
+
+    monkeypatch.setattr(ssh_mod, "_AUTH_POLL_SECONDS", 0.02)
+    asked: list[tuple[str, bool]] = []
+    queue = list(answers or ["123456"])
+
+    async def prompt_cb(prompt, secret):
+        asked.append((prompt, secret))
+        return queue.pop(0) if queue else None
+
+    session = SSHSession("test@localhost", prompt_cb=prompt_cb)
+
+    async def _never_alive():
+        return False
+
+    monkeypatch.setattr(session, "_master_alive", _never_alive)
+    return session, asked
+
+
+def _drive(session, body):
+    """Run the pump against a real pty; `body(child_fd)` plays ssh's side.
+
+    The child side is closed *before* the event loop shuts down. A reader
+    thread blocked in os.read() cannot be cancelled, and asyncio.run() waits
+    for the default executor on its way out — so leaving the pty open makes a
+    leak deadlock the test instead of failing it.
+
+    Returns (whatever body returned, threads still alive at its peak).
+    """
+    parent_fd, child_fd = pty.openpty()
+    peak = {}
+
+    async def scenario():
+        base = threading.active_count()
+        task = asyncio.create_task(session._drive_master_auth(parent_fd))
+        try:
+            return await body(child_fd)
+        finally:
+            peak["extra"] = threading.active_count() - base
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            os.close(child_fd)          # EOF: unblocks every pending read
+            await asyncio.sleep(0.05)
+
+    try:
+        out = asyncio.run(scenario())
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(parent_fd)
+    return out, peak["extra"]
+
+
+def test_silence_does_not_leak_one_thread_per_poll(monkeypatch):
+    """asyncio.wait_for cannot cancel a thread already blocked in os.read.
+
+    Starting a fresh read each poll left every previous one blocked on the same
+    fd, so a slow 2FA login burned a thread per second out of the shared default
+    executor — the one slurm.py also uses for log reads and file checks.
+    """
+    session, _ = _pump_session(monkeypatch)
+
+    async def stay_quiet(_child_fd):
+        await asyncio.sleep(0.5)        # ~25 polls, with ssh saying nothing
+        return None
+
+    _, extra = _drive(session, stay_quiet)
+    assert extra <= 1, f"{extra} threads blocked on the pty after 0.5s of silence"
+
+
+def test_a_prompt_after_silence_is_still_answered(monkeypatch):
+    """The prompt has to reach the pump, not a read nobody is awaiting."""
+    session, asked = _pump_session(monkeypatch, answers=["424242"])
+
+    async def quiet_then_prompt(child_fd):
+        await asyncio.sleep(0.3)
+        os.write(child_fd, b"Verification code: ")
+        for _ in range(200):
+            if asked:
+                break
+            await asyncio.sleep(0.01)
+        # Bounded: if the prompt was swallowed there is nothing to read back,
+        # and this has to fail rather than block.
+        try:
+            return await asyncio.wait_for(
+                asyncio.get_running_loop().run_in_executor(
+                    None, os.read, child_fd, 64
+                ),
+                timeout=1.0,
+            )
+        except asyncio.TimeoutError:
+            return b""
+
+    answer, _ = _drive(session, quiet_then_prompt)
+    assert asked, "the prompt written after a quiet period was never seen"
+    assert asked[0][0].startswith("Verification code:")
+    assert asked[0][1] is True                      # a code is a secret
+    assert b"424242" in answer                      # answered back into the pty
+
+
+def test_prompt_arriving_immediately_still_works(monkeypatch):
+    """The no-silence path must be unaffected by the change."""
+    session, asked = _pump_session(monkeypatch, answers=["hunter2"])
+
+    async def prompt_at_once(child_fd):
+        os.write(child_fd, b"user@login's password: ")
+        for _ in range(200):
+            if asked:
+                break
+            await asyncio.sleep(0.01)
+        return None
+
+    _drive(session, prompt_at_once)
+    assert asked and asked[0][0].endswith("password:")
+    assert asked[0][1] is True

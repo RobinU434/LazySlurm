@@ -85,6 +85,11 @@ def _control_path(host: str) -> str:
     return str(_CONTROL_DIR / f"{digest}.sock")
 
 
+# How long the auth pump waits for the master to say something before looping
+# back to re-check whether it is up. Short in tests, so a slow login is fast.
+_AUTH_POLL_SECONDS = 1.0
+
+
 class SSHSession:
     """One persistent SSH connection, shared by every remote command."""
 
@@ -201,9 +206,20 @@ class SSHSession:
         return argv
 
     async def _drive_master_auth(self, fd: int) -> tuple[bool, str]:
-        """Pump the master's pty: forward prompts out, write answers back."""
+        """Pump the master's pty: forward prompts out, write answers back.
+
+        One read stays pending across polls. `asyncio.wait_for` cancels the
+        *future* on timeout but cannot cancel a thread already blocked inside
+        `os.read`, so starting a fresh read each poll stacked up one blocked
+        thread per second of silence — and ssh's eventual write would land in
+        whichever reader the kernel picked, quite possibly one nobody was
+        awaiting any more, losing the 2FA prompt and hanging the login.
+
+        Silence is the normal case here: a Duo push waits on a phone.
+        """
         buffer = ""
         loop = asyncio.get_running_loop()
+        pending: asyncio.Future[str] | None = None
         while True:
             if self._master is not None and self._master.returncode is not None:
                 # ssh exited: either it failed, or (rarely) the master is up
@@ -215,12 +231,17 @@ class SSHSession:
             if await self._master_alive():
                 return True, "SSH master ready"
 
-            try:
-                chunk = await asyncio.wait_for(
-                    loop.run_in_executor(None, _read_fd, fd), timeout=1.0
+            if pending is None:
+                pending = asyncio.ensure_future(
+                    loop.run_in_executor(None, _read_fd, fd)
                 )
-            except asyncio.TimeoutError:
-                continue  # nothing said yet — loop back and re-check the master
+            done, _ = await asyncio.wait({pending}, timeout=_AUTH_POLL_SECONDS)
+            if not done:
+                # Nothing said yet — loop back and re-check the master, but
+                # leave the same read pending rather than opening another.
+                continue
+            chunk = pending.result()
+            pending = None
             if not chunk:
                 if await self._master_alive():
                     return True, "SSH master ready"
