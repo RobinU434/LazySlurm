@@ -8,11 +8,11 @@ from __future__ import annotations
 
 from textual.message import Message
 from textual.widgets import DataTable
-from textual.widgets.data_table import CellDoesNotExist
 from rich.text import Text
 
 from lazyslurm.models import NodeInfo, PartitionInfo, PartitionJob
 from lazyslurm.widgets.job_table import _partition_style, _truncate
+from lazyslurm.widgets.keyed_table import KeyedTable
 
 # Load bar rendering
 _BAR_WIDTH = 10
@@ -42,7 +42,7 @@ class PartitionSelected(Message):
         self.partition = partition
 
 
-class PartitionTable(DataTable):
+class PartitionTable(KeyedTable):
     """Left panel of the partition screen: one row per partition."""
 
     COLUMNS = (
@@ -63,27 +63,13 @@ class PartitionTable(DataTable):
     def update_partitions(self, partitions: list[PartitionInfo]) -> None:
         """Rebuild the table, keeping the cursor on the same partition."""
         self._partitions = partitions
-        selected = self.get_selected_partition()
-        self.clear()
-        for part in partitions:
-            self.add_row(*self._row_for(part), key=part.name)
-        if selected:
-            for index, part in enumerate(partitions):
-                if part.name == selected:
-                    self.move_cursor(row=index)
-                    break
+        self.refill((part.name, self._row_for(part)) for part in partitions)
 
     def get_partition(self, name: str) -> PartitionInfo | None:
         return next((p for p in self._partitions if p.name == name), None)
 
     def get_selected_partition(self) -> str | None:
-        if self.row_count == 0:
-            return None
-        try:
-            row_key, _ = self.coordinate_to_cell_key(self.cursor_coordinate)
-            return str(row_key.value)
-        except CellDoesNotExist:
-            return None  # cursor is outside the table (empty or mid-rebuild)
+        return self.selected_key()
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         name = str(event.row_key.value) if event.row_key else self.get_selected_partition()
@@ -121,7 +107,7 @@ _NODE_STATE_STYLES: dict[str, str] = {
 }
 
 
-class NodeTable(DataTable):
+class NodeTable(KeyedTable):
     """Top panel of the node screen: one row per node of a partition."""
 
     COLUMNS = (
@@ -142,27 +128,13 @@ class NodeTable(DataTable):
     def update_nodes(self, nodes: list[NodeInfo]) -> None:
         """Rebuild, keeping the cursor on the same node."""
         self._node_infos = nodes
-        selected = self.get_selected_node()
-        self.clear()
-        for node in nodes:
-            self.add_row(*self._row_for(node), key=node.name)
-        if selected:
-            for index, node in enumerate(nodes):
-                if node.name == selected:
-                    self.move_cursor(row=index)
-                    break
+        self.refill((node.name, self._row_for(node)) for node in nodes)
 
     def get_node(self, name: str) -> NodeInfo | None:
         return next((n for n in self._node_infos if n.name == name), None)
 
     def get_selected_node(self) -> str | None:
-        if self.row_count == 0:
-            return None
-        try:
-            row_key, _ = self.coordinate_to_cell_key(self.cursor_coordinate)
-            return str(row_key.value)
-        except CellDoesNotExist:
-            return None  # cursor is outside the table (empty or mid-rebuild)
+        return self.selected_key()
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         name = str(event.row_key.value) if event.row_key else self.get_selected_node()
@@ -213,7 +185,7 @@ class NodeSelected(Message):
         self.node = node
 
 
-class PartitionJobTable(DataTable):
+class PartitionJobTable(KeyedTable):
     """Right panel of the partition screen: all users' jobs on a partition."""
 
     COLUMNS = ("Job ID", "User", "Name", "State", "Time", "Limit", "N", "CPUs", "GRES", "Node/Reason")
@@ -230,10 +202,14 @@ class PartitionJobTable(DataTable):
         self.zebra_stripes = True
 
     def update_jobs(self, jobs: list[PartitionJob]) -> None:
+        """Rebuild, keeping the cursor on the same job.
+
+        This list is polled on the refresh timer, so without that it jumps
+        back to the top every few seconds and a busy partition cannot be read
+        at all.
+        """
         self._jobs = jobs
-        self.clear()
-        for job in jobs:
-            self.add_row(*self._row_for(job), key=job.job_id)
+        self.refill((job.job_id, self._row_for(job)) for job in jobs)
 
     def _row_for(self, job: PartitionJob) -> tuple:
         mine = self.user and job.user == self.user
