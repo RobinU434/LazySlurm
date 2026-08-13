@@ -6,11 +6,16 @@
 //! turns that state into cells and nothing more.
 
 pub mod app;
+pub mod detail;
 pub mod event;
 pub mod filter;
+pub mod help;
 pub mod job_table;
 pub mod layout;
+pub mod log_pane;
+pub mod metadata;
 pub mod render;
+pub mod tabs;
 pub mod terminal;
 pub mod text;
 pub mod theme;

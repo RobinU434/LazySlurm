@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
-use crate::model::{CompletedJob, RunningJob};
+use crate::model::{CompletedJob, JobDetail, JobStats, PriorityInfo, RunningJob};
 
 /// How long the input reader waits before checking whether it should stop.
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -22,6 +22,8 @@ pub enum Event {
     Tick,
     /// A poll of the job lists finished.
     Jobs(Box<JobsLoaded>),
+    /// A job's details finished loading.
+    Detail(Box<DetailLoaded>),
     /// Something to write to the command log.
     Log(String, Option<String>),
 }
@@ -32,6 +34,20 @@ pub struct JobsLoaded {
     pub running: Vec<RunningJob>,
     pub completed: Vec<CompletedJob>,
     pub partitions: Vec<String>,
+}
+
+/// Everything the right-hand panels need about one job.
+#[derive(Debug)]
+pub struct DetailLoaded {
+    /// Which selection asked for this. Anything older is dropped on arrival.
+    pub generation: u64,
+    pub job_id: String,
+    pub detail: Option<JobDetail>,
+    pub stdout: String,
+    pub stderr: String,
+    pub stats: Option<JobStats>,
+    pub priority: Option<PriorityInfo>,
+    pub sprio_available: bool,
 }
 
 /// The sending half of the event channel.

@@ -41,6 +41,41 @@ pub fn truncate(text: &str, max_width: usize) -> String {
     out
 }
 
+/// Break `text` into lines that each fit within `columns` display columns.
+///
+/// Hard-wraps rather than breaking on word boundaries: job logs are full of
+/// paths, stack traces and progress bars, where breaking mid-token loses less
+/// than reflowing would. An existing line short enough to fit is left alone.
+pub fn wrap(text: &str, columns: usize) -> Vec<String> {
+    if columns == 0 {
+        return text.lines().map(str::to_string).collect();
+    }
+
+    let mut wrapped = Vec::new();
+    for line in text.lines() {
+        if width(line) <= columns {
+            wrapped.push(line.to_string());
+            continue;
+        }
+
+        let mut current = String::new();
+        let mut used = 0;
+        for character in line.chars() {
+            let advance = UnicodeWidthChar::width(character).unwrap_or(0);
+            if used + advance > columns && !current.is_empty() {
+                wrapped.push(std::mem::take(&mut current));
+                used = 0;
+            }
+            current.push(character);
+            used += advance;
+        }
+        if !current.is_empty() {
+            wrapped.push(current);
+        }
+    }
+    wrapped
+}
+
 /// Pad `text` on the right to `columns` display columns.
 pub fn pad(text: &str, columns: usize) -> String {
     let mut out = text.to_string();
@@ -98,6 +133,35 @@ mod tests {
         let text = "e\u{0301}xperiment";
         assert_eq!(width(text), 10);
         assert_eq!(truncate(text, 10), text);
+    }
+
+    #[test]
+    fn wraps_long_lines_and_leaves_short_ones() {
+        assert_eq!(wrap("short\nalso short", 20), vec!["short", "also short"]);
+        assert_eq!(
+            wrap("abcdefghij", 4),
+            vec!["abcd", "efgh", "ij"],
+            "hard-wraps at the column budget"
+        );
+    }
+
+    #[test]
+    fn wrapping_never_splits_a_wide_character() {
+        // Three columns cannot hold two ideographs, so the second moves down.
+        assert_eq!(wrap("実験実験", 3), vec!["実", "験", "実", "験"]);
+        for line in wrap("実験実験", 5) {
+            assert!(width(&line) <= 5);
+        }
+    }
+
+    #[test]
+    fn a_zero_width_means_no_wrapping() {
+        assert_eq!(wrap("a long line here", 0), vec!["a long line here"]);
+    }
+
+    #[test]
+    fn wrapping_preserves_blank_lines_between_paragraphs() {
+        assert_eq!(wrap("one\n\ntwo", 10), vec!["one", "", "two"]);
     }
 
     #[test]

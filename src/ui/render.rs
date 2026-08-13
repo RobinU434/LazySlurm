@@ -8,7 +8,7 @@ use ratatui::layout::{Constraint, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Borders, Cell, Paragraph, Row as TableRow, Table, TableState,
+    Block, BorderType, Borders, Cell, Clear, Paragraph, Row as TableRow, Table, TableState,
 };
 use ratatui::Frame;
 
@@ -409,6 +409,54 @@ pub fn footer(frame: &mut Frame, area: Rect, keys: &[(&str, &str)]) {
         spans.push(Span::styled((*description).to_string(), theme::dim()));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Draw a bordered panel with a tab strip, and return the area below it.
+pub fn tabbed_panel(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    strip: &super::tabs::TabStrip,
+    focused: bool,
+) -> Rect {
+    let block = panel(title, focused);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.height == 0 {
+        return inner;
+    }
+    let tab_row = Rect { height: 1, ..inner };
+    super::tabs::render(frame, tab_row, strip);
+
+    Rect {
+        y: inner.y + 1,
+        height: inner.height - 1,
+        ..inner
+    }
+}
+
+/// Draw pre-styled lines, scrolled by `offset`.
+pub fn lines(frame: &mut Frame, area: Rect, content: &[Line<'static>], offset: usize) {
+    let start = offset.min(content.len());
+    let end = (start + area.height as usize).min(content.len());
+    frame.render_widget(Paragraph::new(content[start..end].to_vec()), area);
+}
+
+/// Draw the help overlay, centred over whatever is behind it.
+pub fn help_overlay(frame: &mut Frame, area: Rect, content: &[Line<'static>]) {
+    let widest = content.iter().map(Line::width).max().unwrap_or(0) as u16;
+    let box_area = super::layout::centered(
+        area,
+        (widest + 4).min(area.width),
+        (content.len() as u16 + 2).min(area.height),
+    );
+
+    frame.render_widget(Clear, box_area);
+    let block = panel("Help", true);
+    let inner = block.inner(box_area);
+    frame.render_widget(block, box_area);
+    lines(frame, inner, content, 0);
 }
 
 /// A panel with a single message in it, for areas not yet implemented.
