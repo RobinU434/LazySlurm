@@ -556,3 +556,96 @@ def test_prompt_arriving_immediately_still_works(monkeypatch):
     _drive(session, prompt_at_once)
     assert asked and asked[0][0].endswith("password:")
     assert asked[0][1] is True
+
+
+# ---------------------------------------------------------------------------
+# One login per connection, even while the refresh timer is firing (#56)
+# ---------------------------------------------------------------------------
+
+
+def _slow_login_session(delay=0.3):
+    """A session whose master takes `delay` seconds to authenticate.
+
+    Stands in for a 2FA login: ssh has asked for a code and the user is
+    looking at their phone. Counts how many times a login is started.
+    """
+    session = SSHSession("me@login.hpc")
+    session._use_master = True
+    done = asyncio.Event()
+    logins: list[int] = []
+
+    async def start_master():
+        logins.append(1)
+        await asyncio.sleep(delay)
+        done.set()
+        return True, "SSH master ready"
+
+    async def master_alive():
+        return done.is_set()
+
+    async def start_channel():
+        return True, "SSH channel open"
+
+    async def exchange(command):
+        return "ok", "", 0
+
+    session._start_master = start_master
+    session._master_alive = master_alive
+    session._start_channel = start_channel
+    session._exchange = exchange
+    return session, logins, done
+
+
+def test_polls_during_a_slow_login_do_not_ask_for_a_second_code(monkeypatch):
+    """The refresh timer must not start a rival ssh master.
+
+    connect() assigns the session before authenticating, so a poll arriving
+    mid-login found "not connected", called _reconnect(), saw no live master
+    and started another one — a second one-time-password prompt per tick.
+    """
+    session, logins, done = _slow_login_session()
+    monkeypatch.setattr(type(session), "connected", property(lambda s: done.is_set()))
+
+    async def scenario():
+        connect = asyncio.create_task(session.connect())
+
+        async def poll(n):
+            await asyncio.sleep(0.05 * n)      # refresh ticks during the login
+            await session.run("squeue -u me")
+
+        await asyncio.gather(connect, *(poll(n) for n in range(1, 5)))
+
+    _run(scenario())
+    assert len(logins) == 1, f"{len(logins)} logins for one connect"
+
+
+def test_a_poll_during_the_login_still_runs_afterwards(monkeypatch):
+    """Waiting for the login is the point; the command must not be dropped."""
+    session, _, done = _slow_login_session()
+    monkeypatch.setattr(type(session), "connected", property(lambda s: done.is_set()))
+
+    async def scenario():
+        connect = asyncio.create_task(session.connect())
+        await asyncio.sleep(0.05)
+        out, _, rc = await session.run("squeue -u me")
+        await connect
+        return out, rc
+
+    out, rc = _run(scenario())
+    assert (out, rc) == ("ok", 0)
+
+
+def test_a_genuinely_dead_master_is_still_restarted(monkeypatch):
+    """The lock must not stop a real reconnect after the connection drops."""
+    session, logins, done = _slow_login_session(delay=0)
+
+    async def scenario():
+        await session.connect()
+        assert len(logins) == 1
+        # The master dies and the channel with it.
+        done.clear()
+        monkeypatch.setattr(type(session), "connected", property(lambda s: False))
+        await session.run("squeue -u me")
+
+    _run(scenario())
+    assert len(logins) == 2, "a dropped connection has to re-authenticate"
