@@ -131,3 +131,25 @@ key the feature stops one step short of being usable.
 
 **Affects:** `src/ui/app.rs::handle_search_key`. Filed against the Python as
 draft 22.
+
+---
+
+## 8. The pty is read by one long-lived thread
+
+**Python:** the auth pump starts a fresh `run_in_executor(_read_fd, fd)` on every
+loop iteration and wraps it in `asyncio.wait_for(..., timeout=1.0)`. The timeout
+cancels the future but cannot cancel the thread, which stays blocked in
+`os.read`. Every quiet second leaks another reader on the same descriptor, and
+when ssh finally writes, the data may be delivered to one whose future nobody is
+awaiting — losing the prompt.
+
+**Rust:** one reader thread pumps the pty into a channel for the lifetime of the
+process. The pump times out on the *channel*, where an expired wait cannot
+consume anything: unread output simply stays queued.
+
+**Why:** this is a correctness difference, not a style one. Under the Python's
+arrangement a two-factor prompt can be swallowed and the login then hangs until
+the 120-second connect timeout, and the leaked threads exhaust the default
+executor that `read_log_file` and `_file_exists` also use.
+
+**Affects:** `src/ssh/pty.rs`. Filed against the Python as draft 26.

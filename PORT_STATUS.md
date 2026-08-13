@@ -206,7 +206,7 @@ in both directions (issues #39, #40).
 
 ## Divergences
 
-Seven, all recorded in [DIVERGENCES.md](DIVERGENCES.md) with reasoning. One (#4)
+Eight, all recorded in [DIVERGENCES.md](DIVERGENCES.md) with reasoning. One (#4)
 is a genuine Python bug the port surfaced: `JobDetail`'s accessors fall back on
 key *presence* rather than a non-empty value, so an empty `sacct` column can show
 a blank where the fallback field has the answer. Worth fixing in the Python too.
