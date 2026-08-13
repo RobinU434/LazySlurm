@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 
@@ -194,7 +195,9 @@ class NodeInfo:
     cpus_other: int = 0
     cpus_total: int = 0
     memory_mb: int = 0  # configured
-    free_mem_mb: int = 0
+    # None when the node has not reported it — sinfo says "N/A" for a node that
+    # is down or unreachable, which is not the same as "no memory free".
+    free_mem_mb: int | None = None
     cpu_load: float = 0.0  # absolute load average, as Slurm reports it
     gres: str = ""  # configured
     gres_used: str = ""
@@ -219,12 +222,19 @@ class NodeInfo:
         return self.cpu_load / self.cpus_total if self.cpus_total else 0.0
 
     @property
-    def mem_used_mb(self) -> int:
+    def mem_used_mb(self) -> int | None:
+        """Memory in use, or None when the node has not reported free memory."""
+        if self.free_mem_mb is None:
+            return None
         return max(self.memory_mb - self.free_mem_mb, 0)
 
     @property
-    def mem_used(self) -> float:
-        return self.mem_used_mb / self.memory_mb if self.memory_mb else 0.0
+    def mem_used(self) -> float | None:
+        """Fraction of memory in use, or None when that is unknown."""
+        used = self.mem_used_mb
+        if used is None or not self.memory_mb:
+            return None
+        return used / self.memory_mb
 
     @property
     def gpus_total(self) -> int:
@@ -640,9 +650,15 @@ def sizing_hint(eff: Efficiency) -> str:
         if cores < eff.cpu_alloc:
             suggestions.append(f"--cpus-per-task={cores}")
     if eff.walltime is not None and eff.walltime < 0.5 and eff.time_limit > 0:
-        target = eff.elapsed * 1.5
-        hours, rest = divmod(int(target), 3600)
-        suggestions.append(f"--time={hours:02d}:{rest // 60:02d}:00")
+        # Round *up* to the next whole minute, and never below what the job
+        # already used: truncating put a job that ran under 40s at
+        # "--time=00:00:00", which Slurm reads as no limit at all — the
+        # opposite of the advice. The extra minute keeps a short job from
+        # being killed by the suggestion meant to help it.
+        target = max(eff.elapsed * 1.5, eff.elapsed + 60)
+        minutes = max(1, math.ceil(target / 60))
+        hours, mins = divmod(minutes, 60)
+        suggestions.append(f"--time={hours:02d}:{mins:02d}:00")
     if not suggestions:
         return ""
     return "next time try " + " ".join(suggestions)

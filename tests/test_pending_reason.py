@@ -227,10 +227,18 @@ class _Harness(App):
         yield Static("host")
 
 
+# The estimated start has to fall on *today*, or format_start_estimate prefixes
+# the date and every "~21:20" assertion below stops matching. Pinning it to a
+# fixed date made these tests fail on every machine from the next day onward.
+_START = datetime.now().replace(hour=21, minute=20, second=9, microsecond=0)
+_START_RAW = _START.strftime("%Y-%m-%dT%H:%M:%S")
+_START_HHMM = f"~{_START:%H:%M}"
+
+
 def _detail(state="PENDING", **raw) -> JobDetail:
     base = {
         "JobId": "4815201", "JobState": state, "Partition": "gpu",
-        "Reason": "Priority", "StartTime": "2026-08-12T21:20:09",
+        "Reason": "Priority", "StartTime": _START_RAW,
         "SubmitTime": "2026-08-12T03:11:44", "NumCPUs": "4",
     }
     base.update(raw)
@@ -263,7 +271,7 @@ def test_pending_tab_shows_reason_start_and_breakdown():
             assert _tab_visible(view)
             assert "ahead of it" in text          # plain-language reason
             assert "reason code: Priority" in text  # the raw code is still there
-            assert "~21:20" in text                 # estimated start
+            assert _START_HHMM in text              # estimated start
             assert "#3 of 4 pending in gpu" in text
             assert "Fair-share" in text and "Age" in text
 
@@ -312,7 +320,7 @@ def test_pending_tab_without_sprio_says_why_it_is_missing():
             await pilot.pause()
             text = _pending_text(view)
             assert "does not run sprio" in text
-            assert "~21:20" in text        # the rest still works
+            assert _START_HHMM in text     # the rest still works
 
     _run(scenario())
 
