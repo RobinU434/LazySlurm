@@ -61,6 +61,15 @@ the command, the import package and the config directory are all `lazyslurm`.
   they actually defend against, and a batch script that could not be archived says so in
   the Command Log instead of disappearing
   ([#31](https://github.com/RobinU434/LazySlurm/issues/31)).
+- **`Enter` in the filter bar accepts the filter** ([#38](https://github.com/RobinU434/LazySlurm/issues/38)).
+  It closes the bar, keeps the query, and puts the cursor back on the matching rows.
+  `Escape` still abandons the filter. Previously every way out of the bar cleared the
+  query, so the rows a filter found could not be reached from the keyboard.
+- **`Tab` cycles the three panels** — job tables → Job Details → Job Metadata → job
+  tables — instead of walking every focusable widget in the layout. `Shift+Tab` goes the
+  other way. `action_focus_next_right` never actually moved focus before; the panel it
+  claimed to focus was reached only by Textual's default widget cycling
+  ([#38](https://github.com/RobinU434/LazySlurm/issues/38)).
 
 ### Fixed
 
@@ -82,6 +91,20 @@ the command, the import package and the config directory are all `lazyslurm`.
   ([#29](https://github.com/RobinU434/LazySlurm/issues/29)).
 - `slurm.py` defined `_as_int` twice, so the definition sitting next to the stats code
   was not the one that ran ([#24](https://github.com/RobinU434/LazySlurm/issues/24)).
+- **Job names with CJK, emoji or combining marks broke column alignment**
+  ([#37](https://github.com/RobinU434/LazySlurm/issues/37)). Truncation counted code
+  points where a terminal lays out columns, so `実験-sweep` overflowed its column and
+  pushed everything to its right out of line. Width is now measured in terminal columns,
+  and a double-width character is never split down the middle.
+- **Reading a remote log failed on a path containing an apostrophe**
+  ([#39](https://github.com/RobinU434/LazySlurm/issues/39)). The "file not found" message
+  was built on the cluster, with the path interpolated into a single-quoted `echo`, so
+  `/work/bens'runs/x.out` closed the quote early and the rest was parsed as shell words.
+  The message is a local UI string now, and the path reaches `tail` as one quoted word.
+- **Opening a remote log in the editor failed on a path containing a space**
+  ([#40](https://github.com/RobinU434/LazySlurm/issues/40)). A remote `scp` path passes
+  through two shells and was quoted for only one, so `/work/my runs/x.out` was re-split
+  on the far side. The failure message now also names the path.
 
 ## 0.2.1 — 2026-08-12
 
