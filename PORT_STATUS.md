@@ -3,7 +3,7 @@
 Tracks progress against [RUST_PORT_PLAN.md](RUST_PORT_PLAN.md). One line per work
 item; update as you go, so a resumed session knows where it stopped.
 
-**Branch:** `rust-dev` · **Tests:** 527 passing · **Last updated:** 2026-08-13
+**Branch:** `rust-dev` · **Tests:** 556 passing · **Last updated:** 2026-08-13
 
 `lazyslurm` now starts, draws the main screen and quits. Verified end to end in
 a pty as well as by full-screen `TestBackend` draws.
@@ -33,7 +33,7 @@ comparison against a real cluster.
 | P4 | Job tables, filtering, arrays, main screen | **done** |
 | P5 | Detail / metadata / help panels | **done** |
 | P6 | Partition, node and usage screens | **done** |
-| P7 | Actions wired to the UI, editor/pager shell-outs | not started |
+| P7 | Actions wired to the UI, editor/pager shell-outs | **done** |
 | P8 | Remote mode over one SSH session | not started |
 | P9 | Polish and release | not started |
 
@@ -155,6 +155,19 @@ Two rules worth keeping when extending this:
 - **Live tabs fetch only while showing.** Each is an SSH round trip to a compute
   node; paying for it behind a hidden tab is waste.
 
+### P7 — actions
+- `ui/modal.rs` — confirm-cancel, confirm-resubmit, the job editor. A modal owns
+  its keys and returns what the user decided; it never acts, which is what makes
+  the destructive paths testable without anything that could reach a cluster.
+- Keys: `c`, `Shift+C`, `Ctrl+V`, `u`, `s`, `b`, `o`, `e`, `Shift+E`, `l`, `,`.
+- Shell-outs go through `terminal::suspended`, written in P4 for this.
+
+**Remote-mode quoting is done properly rather than ported.** The pager runs on
+the cluster with each argument quoted for the remote shell and the whole command
+quoted again for the local one; `ssh` hops through the live session's control
+socket rather than `-J`. Those are Python issues #39 and #40 — do not copy that
+code back.
+
 ## Divergences
 
 Seven, all recorded in [DIVERGENCES.md](DIVERGENCES.md) with reasoning. One (#4)
@@ -164,27 +177,31 @@ a blank where the fallback field has the answer. Worth fixing in the Python too.
 
 ## Still deferred
 
-- **Opportunistic script archiving on detail load.** `archive_batch_script` and
-  the store are both in place; hooking it into the detail-load path is P7, where
-  the UI decides when to spend the extra call.
 - **`g`/`G`** are bound on the job tables only. The full-screen panels do not
   advertise them and do not handle them; add to their binding tables if wanted.
 
 ## Next steps
 
-P7 — actions wired to the UI. Everything below already exists in
-`slurm/action.rs` and only needs keys, confirmation modals and the terminal
-suspend helper (`ui/terminal.rs::suspended`, written in P4 for this):
+P8 — remote mode, the last feature phase. Read `reference/python/src/lazyslurm/ssh.py`
+in full first; its module docstring explains the design, and every part of it is
+load-bearing.
 
-1. A modal layer: confirm-cancel, confirm-resubmit, the job editor, and the SSH
-   password prompt P8 needs. `layout::centered` and `render::help_overlay`
-   already show the shape.
-2. `c` cancel with confirmation, `Shift+C` force-cancel **without** one, `Ctrl+V`
-   multi-select, `u` edit a pending job, `s` resubmit, `b` view the batch script.
-3. `e`/`Shift+E` editor, `l` pager, `o` SSH to the node, `,` edit config and
-   live-reload. All suspend the terminal; in remote mode the pager runs *on the
-   cluster* and the editor scp's the file down.
-4. Hook opportunistic script archiving into the detail-load path.
+1. `ssh/pty.rs` — spawn `ssh -N -M` **on a pty**. That is the whole trick: ssh
+   writes prompts to `/dev/tty`, so with plain pipes the 2FA question never
+   reaches us. Use `nix::pty::openpty`, and read it from a blocking task
+   (mirroring the Python's `run_in_executor`) rather than fighting `AsyncFd`.
+2. `ssh/mod.rs` — the auth pump (prompt regexes, answer, clear the buffer so the
+   same prompt is not re-matched), the multiplexed shell channel, and `run()`
+   with its marker framing and 20s timeout.
+3. A `RemoteRunner` implementing `CommandRunner`. Nothing above the transport
+   changes — that was the point of the trait.
+4. Wire `Slurm::session_control_path`, which currently returns `None`. The
+   editor, pager and `o` all need it to ride the authenticated connection.
+5. The SSH prompt modal, crossing tasks: send the prompt on the event channel
+   with a `oneshot::Sender` for the reply, and let the main loop own the modal.
 
-Watch for issues #39 and #40 while doing step 3: the Python's remote pager and
-scp quoting are both wrong, and the Rust must not copy them.
+`r` must retry a failed or dropped session — it is the user's only way back
+after cancelling or mistyping a code.
+
+Port `tests/test_ssh_session.py` (431 lines); it overrides the channel argv to
+run a local `/bin/sh`, and that seam ports cleanly.
