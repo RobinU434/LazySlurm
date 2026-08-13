@@ -101,8 +101,19 @@ def set_notice_callback(callback: Callable[[str, str], None] | None) -> None:
 
 
 def _notice(action: str, detail: str = "") -> None:
-    if _notice_cb is not None:
+    """Best-effort report to the UI. Never fails the command it describes.
+
+    The callback writes into a widget, so it can raise if the app is being torn
+    down or was replaced — and a note about a command must not be able to break
+    that command. Broad on purpose: whatever the UI does here, the caller's job
+    is more important than the message.
+    """
+    if _notice_cb is None:
+        return
+    try:
         _notice_cb(action, detail)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -151,15 +162,33 @@ async def disconnect_remote() -> None:
         _session = None
 
 
+# Commands already reported as unavailable, so a missing binary is mentioned
+# once rather than on every poll.
+_missing_commands: set[str] = set()
+
+
 async def _run_cmd(*args: str) -> tuple[str, str, int]:
-    """Run a command locally, or in the shared SSH session in remote mode."""
+    """Run a command locally, or in the shared SSH session in remote mode.
+
+    A missing Slurm binary comes back as rc=127 with a message, the same shape
+    as any other failure — every caller already treats a non-zero rc as "no
+    data". Raising instead took the whole app down on the first poll, which is
+    what running LazySlurm off a cluster used to do.
+    """
     if _config.remote:
         return await _run_remote(quote_argv(args))
-    proc = await asyncio.create_subprocess_exec(
-        *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except (FileNotFoundError, PermissionError, OSError) as exc:
+        reason = getattr(exc, "strerror", None) or str(exc)
+        if args and args[0] not in _missing_commands:
+            _missing_commands.add(args[0])
+            _notice("command unavailable", f"{args[0]}: {reason}")
+        return "", f"{args[0] if args else 'command'}: {reason}", 127
     stdout, stderr = await proc.communicate()
     return (
         stdout.decode(errors="replace"),

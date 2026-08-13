@@ -879,6 +879,9 @@ class LazySlurmApp(App):
         await self._poll_jobs()
 
     async def on_unmount(self) -> None:
+        # Drop the notice hook first: it points at this app's command log, and
+        # anything logged after the widgets are gone would query a dead screen.
+        slurm.set_notice_callback(None)
         await slurm.disconnect_remote()
 
     # ------------------------------------------------------------------

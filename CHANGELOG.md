@@ -73,6 +73,14 @@ the command, the import package and the config directory are all `lazyslurm`.
 
 ### Fixed
 
+- **Starting off a cluster crashed instead of explaining**
+  ([#54](https://github.com/RobinU434/LazySlurm/issues/54)). With no Slurm commands on
+  `PATH`, the first poll raised `FileNotFoundError: 'squeue'` and dumped a traceback over
+  the TUI. LazySlurm now checks before starting and exits with a message that points at
+  `--remote`, and a command that goes missing while it runs degrades to an empty panel
+  with one line in the Command Log rather than taking the app down. In remote mode the
+  only local requirement is `ssh`.
+
 - **A slow SSH login leaked a thread per second, and could swallow the 2FA prompt**
   ([#52](https://github.com/RobinU434/LazySlurm/issues/52)). The auth pump started a
   fresh pty read every second; `asyncio.wait_for` cancels the future on timeout but

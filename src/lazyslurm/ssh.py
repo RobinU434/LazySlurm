@@ -141,13 +141,20 @@ class SSHSession:
         return True, f"Connected to {self.host}"
 
     async def _master_alive(self) -> bool:
-        """Ask ssh whether the multiplexing master is up (`ssh -O check`)."""
-        proc = await asyncio.create_subprocess_exec(
-            "ssh", "-o", f"ControlPath={self.control_path}",
-            "-O", "check", self.host,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
+        """Ask ssh whether the multiplexing master is up (`ssh -O check`).
+
+        False when ssh itself is missing: the caller reports "cannot connect",
+        which is true and useful, rather than raising out of the poll loop.
+        """
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ssh", "-o", f"ControlPath={self.control_path}",
+                "-O", "check", self.host,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+        except OSError:
+            return False
         return await proc.wait() == 0
 
     async def _start_master(self) -> tuple[bool, str]:
