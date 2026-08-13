@@ -13,7 +13,10 @@
 //! Nothing below `ui` knows that a terminal exists, which is what keeps the
 //! interesting logic unit-testable.
 
+pub mod cli;
+pub mod config;
 pub mod model;
+pub mod slurm;
 
 /// The crate version, as published to both crates.io and PyPI.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
