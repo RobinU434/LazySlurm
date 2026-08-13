@@ -3,7 +3,7 @@
 Tracks progress against [RUST_PORT_PLAN.md](RUST_PORT_PLAN.md). One line per work
 item; update as you go, so a resumed session knows where it stopped.
 
-**Branch:** `rust-dev` · **Tests:** 417 passing · **Last updated:** 2026-08-13
+**Branch:** `rust-dev` · **Tests:** 478 passing · **Last updated:** 2026-08-13
 
 `lazyslurm` now starts, draws the main screen and quits. Verified end to end in
 a pty as well as by full-screen `TestBackend` draws.
@@ -31,7 +31,7 @@ comparison against a real cluster.
 | P2 | Slurm command layer: parsers, transport, queries, actions | **done** |
 | P3 | Config file, on-disk caches, CLI resolution | **done** |
 | P4 | Job tables, filtering, arrays, main screen | **done** |
-| P5 | Detail / metadata / help panels | not started |
+| P5 | Detail / metadata / help panels | **done** |
 | P6 | Partition, node and usage screens | not started |
 | P7 | Actions wired to the UI, editor/pager shell-outs | not started |
 | P8 | Remote mode over one SSH session | not started |
@@ -123,9 +123,24 @@ Keys so far: `q` quit, `/` filter (`Enter` accepts, `Esc` abandons), `r`
 refresh, `m` bookmark, `Enter` expand an array, `↑`/`↓`/`j`/`k` with wrapping
 between the two tables, `g`/`G` for the ends.
 
+### P5 — the right-hand column
+- `tabs.rs` — a tab strip whose visible set can change, remembering the active
+  tab by name.
+- `log_pane.rs` — replaces `RichLog`; follows the newest line until the user
+  scrolls up.
+- `detail.rs` — stdout/stderr/cpu/gpu/stats, with the efficiency report ported
+  literally.
+- `metadata.rs` — Resources, Submission, Pending, Raw.
+- `help.rs` — **bindings and help from one table**, so they cannot drift. Add a
+  key by adding a `Binding`; it is documented by construction.
+
+Detail loading is debounced 200 ms and generation-stamped. A superseded load
+checks the generation before asking Slurm anything, so arrowing through a list
+costs one set of commands rather than one per row.
+
 ## Divergences
 
-Four, all recorded in [DIVERGENCES.md](DIVERGENCES.md) with reasoning. One (#4)
+Seven, all recorded in [DIVERGENCES.md](DIVERGENCES.md) with reasoning. One (#4)
 is a genuine Python bug the port surfaced: `JobDetail`'s accessors fall back on
 key *presence* rather than a non-empty value, so an empty `sacct` column can show
 a blank where the fallback field has the answer. Worth fixing in the Python too.
@@ -135,26 +150,22 @@ a blank where the fallback field has the answer. Worth fixing in the Python too.
 - **Opportunistic script archiving on detail load.** `archive_batch_script` and
   the store are both in place; hooking it into the detail-load path is P7, where
   the UI decides when to spend the extra call.
-- **`Tab` / `Shift+Tab`** are unbound until P5 gives them somewhere to go: in
-  the Python they move between the detail and metadata panels.
-- **Detail and metadata panels** are placeholders that name the selected job.
+- **The cpu and gpu tabs are empty.** They need `get_node_processes` and
+  `get_gpu_status`, which are P6's live monitoring — the panes and tabs are in
+  place and only want feeding.
 
 ## Next steps
 
-P5 — the right-hand column:
+P6 — the full-screen panels:
 
-1. A tab strip widget (`[`/`]` and `(`/`)`), and a `LogPane` to replace
-   Textual's `RichLog`: owns its lines, wraps to width, scrolls.
-2. Detail panel: stdout, stderr, cpu, gpu, stats. The stats tab is generated
-   text — port `_efficiency_section` literally, including the `▆▆▆▁▁▁▁▁` gauges,
-   the `<1%` rule and the sizing hint.
-3. Metadata panel: Resources, Submission, Pending, Raw. The Pending tab exists
-   only while the job is pending, and the tab cycle must skip it when absent.
-4. Detail loading with a generation counter to drop stale results, and the
-   200 ms selection debounce.
-5. `help.rs` as data, plus the cross-check test that keeps it from drifting from
-   the real bindings.
+1. A screen stack (`Vec<Screen>`) with key routing to the top screen, replacing
+   Textual's `push_screen`/`pop_screen`.
+2. The partition monitor (`p`), the node view (`Enter` on a partition), and the
+   account usage panel (`Shift+U`, `w` to cycle the window). Every table needs
+   the same cursor-preservation rule the job tables have.
+3. Live cpu/gpu monitoring, which also fills the detail panel's empty tabs.
+   Fetch only while the relevant tab is open, as the Python does.
 
-**Do not port a Rich-markup parser.** Build `Line`s from styled `Span`s
-directly — the Python needs `_escape()` in `help.py` precisely because `[ / ]`
-is a keybinding that looks like markup.
+The `slurm` layer already has every query these need — `partitions`,
+`partition_nodes`, `node_jobs`, `partition_jobs`, `account_usage`, `fairshare`.
+This is rendering and key routing, not new Slurm work.

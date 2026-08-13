@@ -79,3 +79,55 @@ field has the answer.
 **Action:** the Rust behaves correctly throughout. The Python's `JobDetail`
 accessors should be changed from `raw.get(a, raw.get(b, "N/A"))` to a helper that
 skips empty values.
+
+---
+
+## 5. The CPU sparkline plots CPU
+
+**Python:** the stats tab's "CPU" series is fed `AveRSS` — average resident
+memory — while the "Memory" series is fed `MaxRSS`. Two memory readings under
+two labels, one of which claims to be CPU.
+
+**Rust:** derives a real rate. `TotalCPU` is cumulative, so the change between
+samples divided by the change in elapsed time gives core-equivalents busy over
+that interval — the same quantity the Efficiency block reports as `cpu_used`.
+
+**Why:** a flat CPU line against a rising memory line is exactly the picture that
+tells a user their job has stalled, and the Python cannot draw it. Both fields
+were already being fetched.
+
+**Affects:** `src/ui/app.rs::sample_resources`. Filed against the Python as
+issue #23.
+
+---
+
+## 6. Sampled history is evicted when a job stops running
+
+**Python:** `_resource_history` gains an entry for every job the user ever
+highlights and never drops one.
+
+**Rust:** the poll that refreshes the job list also drops history for anything no
+longer running.
+
+**Why:** the samples are only used while a job runs, so keeping them past that
+point costs memory for nothing. A week-long session on a busy account otherwise
+accumulates an entry per job ever looked at.
+
+**Affects:** `src/ui/app.rs::apply_jobs`. Filed against the Python as issue #28.
+
+---
+
+## 7. `Enter` accepts a filter
+
+**Python:** every way out of the filter bar clears it — `Escape` clears, `/`
+clears, and `Enter` has no handler at all. `Tab` leaves the filter applied but
+moves focus to the right-hand panels, which never hand focus back to a job
+table, so a filtered list cannot be reached from the keyboard.
+
+**Rust:** `Enter` closes the bar and keeps the query; `Escape` abandons it.
+
+**Why:** filtering exists in order to act on what it finds. Without an accept
+key the feature stops one step short of being usable.
+
+**Affects:** `src/ui/app.rs::handle_search_key`. Filed against the Python as
+draft 22.
