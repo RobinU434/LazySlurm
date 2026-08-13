@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from textual.widgets import DataTable
 from rich.text import Text
 
 from lazyslurm.models import UsageRow
+from lazyslurm.widgets.keyed_table import KeyedTable
 
 _BAR_WIDTH = 16
 
@@ -28,7 +28,7 @@ def format_hours(hours: float) -> str:
     return f"{hours:.1f}"
 
 
-class UsageTable(DataTable):
+class UsageTable(KeyedTable):
     """One row per user in the account, biggest consumer first."""
 
     COLUMNS = ("User", "Name", "CPU hours", "Share", "%")
@@ -49,19 +49,24 @@ class UsageTable(DataTable):
         self._rows = rows
         users = [r for r in rows if not r.is_account_total]
         total = sum(r.hours for r in users) or 1.0
-        self.clear()
-        for row in users:
-            share = row.hours / total
-            mine = self.user and row.user == self.user
-            self.add_row(
-                Text(("▸ " if mine else "") + row.user,
-                     style="bold cyan" if mine else ""),
-                Text(row.name or "", style="" if mine else "dim"),
-                format_hours(row.hours),
-                Text(share_bar(share), style="cyan" if mine else "dim"),
-                f"{share * 100:4.1f}%",
-                key=row.user or row.account,
+        self.refill(
+            (
+                row.user or row.account,
+                self._row_for(row, row.hours / total),
             )
+            for row in users
+        )
+
+    def _row_for(self, row: UsageRow, share: float) -> tuple:
+        mine = self.user and row.user == self.user
+        return (
+            Text(("▸ " if mine else "") + row.user,
+                 style="bold cyan" if mine else ""),
+            Text(row.name or "", style="" if mine else "dim"),
+            format_hours(row.hours),
+            Text(share_bar(share), style="cyan" if mine else "dim"),
+            f"{share * 100:4.1f}%",
+        )
 
     @property
     def total_hours(self) -> float:
