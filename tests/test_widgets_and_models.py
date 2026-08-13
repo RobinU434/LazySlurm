@@ -117,6 +117,26 @@ def test_jobdetail_scontrol_and_sacct_key_aliases():
     assert d2.num_cpus == "4" and d2.num_nodes == "1" and d2.qos == "lo"
 
 
+def test_jobdetail_empty_field_falls_back_to_the_alternative_spelling():
+    # sacct emits empty columns rather than omitting them, so a present-but-empty
+    # key must not win over the spelling that actually holds the value.
+    d = JobDetail(job_id="1", raw={
+        "NodeList": "", "Nodelist": "node42",
+        "NumCPUs": "", "NCPUS": "8",
+        "TRES": "", "ReqTRES": "", "AllocTRES": "cpu=4",
+        "JobState": "", "State": "CANCELLED",
+    })
+    assert d.node_list == "node42"
+    assert d.num_cpus == "8"
+    assert d.tres == "cpu=4"
+    assert d.state == "CANCELLED"
+
+
+def test_jobdetail_all_empty_gives_na():
+    d = JobDetail(job_id="1", raw={"NodeList": "", "Nodelist": ""})
+    assert d.node_list == "N/A"
+
+
 def test_jobdetail_gres_from_tres():
     d = JobDetail(job_id="1", raw={"ReqTRES": "cpu=4,mem=8G,gres/gpu=2"})
     assert "gres/gpu=2" in d.gres

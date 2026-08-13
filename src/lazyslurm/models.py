@@ -364,58 +364,72 @@ class JobDetail:
     work_dir: str = ""
     source: str = "scontrol"  # "scontrol" or "sacct"
 
+    def _first_of(self, *keys: str) -> str:
+        """First non-empty value among ``keys``, else "N/A".
+
+        scontrol and sacct spell the same field differently, and sacct emits
+        empty columns rather than omitting them — so a plain ``get`` default
+        would return "" for a present-but-empty key and never reach the
+        alternative spelling that holds the answer.
+        """
+        for key in keys:
+            value = self.raw.get(key)
+            if value:
+                return value
+        return "N/A"
+
     @property
     def submit_line(self) -> str:
         # Prefer SubmitLine (full sbatch command line) over Command (just script path)
-        return self.raw.get("SubmitLine") or self.raw.get("Command") or "N/A"
+        return self._first_of("SubmitLine", "Command")
 
     @property
     def partition(self) -> str:
-        return self.raw.get("Partition", "N/A")
+        return self._first_of("Partition")
 
     @property
     def node_list(self) -> str:
-        return self.raw.get("NodeList", self.raw.get("Nodelist", "N/A"))
+        return self._first_of("NodeList", "Nodelist")
 
     @property
     def num_cpus(self) -> str:
-        return self.raw.get("NumCPUs", self.raw.get("NCPUS", "N/A"))
+        return self._first_of("NumCPUs", "NCPUS")
 
     @property
     def num_nodes(self) -> str:
-        return self.raw.get("NumNodes", self.raw.get("NNodes", "N/A"))
+        return self._first_of("NumNodes", "NNodes")
 
     @property
     def memory(self) -> str:
-        return self.raw.get("MinMemoryNode", self.raw.get("ReqMem", "N/A"))
+        return self._first_of("MinMemoryNode", "ReqMem")
 
     @property
     def time_limit(self) -> str:
-        return self.raw.get("TimeLimit", self.raw.get("Timelimit", "N/A"))
+        return self._first_of("TimeLimit", "Timelimit")
 
     @property
     def run_time(self) -> str:
-        return self.raw.get("RunTime", self.raw.get("Elapsed", "N/A"))
+        return self._first_of("RunTime", "Elapsed")
 
     @property
     def submit_time(self) -> str:
-        return self.raw.get("SubmitTime", self.raw.get("Submit", "N/A"))
+        return self._first_of("SubmitTime", "Submit")
 
     @property
     def start_time(self) -> str:
-        return self.raw.get("StartTime", self.raw.get("Start", "N/A"))
+        return self._first_of("StartTime", "Start")
 
     @property
     def end_time(self) -> str:
-        return self.raw.get("EndTime", self.raw.get("End", "N/A"))
+        return self._first_of("EndTime", "End")
 
     @property
     def state(self) -> str:
-        return self.raw.get("JobState", self.raw.get("State", "N/A"))
+        return self._first_of("JobState", "State")
 
     @property
     def tres(self) -> str:
-        return self.raw.get("TRES", self.raw.get("ReqTRES", self.raw.get("AllocTRES", "N/A")))
+        return self._first_of("TRES", "ReqTRES", "AllocTRES")
 
     @property
     def gres(self) -> str:
@@ -428,11 +442,11 @@ class JobDetail:
 
     @property
     def account(self) -> str:
-        return self.raw.get("Account", "N/A")
+        return self._first_of("Account")
 
     @property
     def qos(self) -> str:
-        return self.raw.get("QOS", self.raw.get("QoS", "N/A"))
+        return self._first_of("QOS", "QoS")
 
 
 def parse_mem_bytes(text: str) -> float | None:
