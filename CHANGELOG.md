@@ -14,11 +14,74 @@ the command, the import package and the config directory are all `lazyslurm`.
   `Enter` expands and collapses it, and the expansion survives refreshes and filter
   changes. `c` cancels the whole array with one `scancel`, `u` edits every pending task
   in it, `m` bookmarks the group. Switch off with `collapse_arrays = false`.
+- **Resubmit with modified resources (`Shift+S`)** ([#11](https://github.com/RobinU434/LazySlurm/issues/11)).
+  The loop after a failure is "run it again, but bigger", and `u` cannot help — Slurm
+  fixes an allocation once the job starts. `Shift+S` opens the property editor for a
+  *terminated* job, prefilled from what it had, and submits the changed fields as
+  sbatch flags. After a `TIMEOUT` the runtime is prefilled with double the old limit,
+  after `OUT_OF_MEMORY` the memory with double the old request. An override replaces
+  the same option in the original submit line rather than being appended after it, so
+  the `sbatch` line written to the Command Log is what actually ran.
+- **Configurable compute-node access** ([#21](https://github.com/RobinU434/LazySlurm/issues/21)).
+  `interactive_shell = "ssh" | "srun"` chooses how `o` opens a shell on a job's node:
+  `ssh` lands on the machine (no `CUDA_VISIBLE_DEVICES`, every node GPU visible, no job
+  step), `srun` lands inside the allocation (correct GPUs and limits, but the step shows
+  up in `sacct` and lowers the job's reported efficiency). Default `ssh`, unchanged from
+  before; `Shift+O` uses the other one for a single shell. Needed on clusters where
+  `pam_slurm_adm` refuses SSH without an allocation. The README explains the trade-off.
+- **Unknown config keys are reported** ([#27](https://github.com/RobinU434/LazySlurm/issues/27)).
+  A misspelled setting used to be silently inert. It is now listed in the Command Log at
+  startup and after an in-app config reload. The file is never rejected over a typo.
+- A `py.typed` marker, so the package's annotations are visible to type checkers
+  ([#34](https://github.com/RobinU434/LazySlurm/issues/34)).
+- A one-line status bar above the key bar: refusals like "Only pending jobs can be
+  edited" no longer scroll away in the Command Log
+  ([#34](https://github.com/RobinU434/LazySlurm/issues/34)).
 
 ### Changed
 
 - The cluster bar counts array *tasks* rather than squeue rows, so a pending
   `123_[3-11]` row contributes nine pending jobs — matching what the table now shows.
+- **Saving config preserves the file** ([#25](https://github.com/RobinU434/LazySlurm/issues/25)).
+  `--partition-order` and partition colours used to rewrite `config.toml` from a dict,
+  deleting the template's ~38 lines of documentation, the original ordering and any key
+  the loader did not recognise. The file is now edited in place via `tomlkit` (a new
+  dependency).
+- **`cache_max_age_days = 0` means never** ([#26](https://github.com/RobinU434/LazySlurm/issues/26)).
+  The template documented `null = never`, which TOML cannot express; `0`, the value most
+  people would try instead, was taken literally and deleted the entire script archive on
+  the next launch. `0` and `false` now both disable pruning.
+- The stats tab's log cache is no longer rewritten in full on every job selection — the
+  write is skipped when nothing about the job changed
+  ([#33](https://github.com/RobinU434/LazySlurm/issues/33)).
+- Log-path guessing no longer probes the same candidate twice, saving two SSH round
+  trips per selection in remote mode
+  ([#32](https://github.com/RobinU434/LazySlurm/issues/32)).
+- Failures that used to be swallowed by bare `except Exception` are now narrowed to what
+  they actually defend against, and a batch script that could not be archived says so in
+  the Command Log instead of disappearing
+  ([#31](https://github.com/RobinU434/LazySlurm/issues/31)).
+
+### Fixed
+
+- **Blank fields in the detail panels** ([#22](https://github.com/RobinU434/LazySlurm/issues/22)).
+  `sacct` emits empty columns rather than omitting them, so eleven accessors returned
+  `""` instead of falling back to the other spelling of the field. Cancelled and failed
+  jobs showed a blank where the value was available all along.
+- **The stats tab's "CPU" sparkline plotted memory** ([#23](https://github.com/RobinU434/LazySlurm/issues/23)).
+  Both series were memory readings, which looked like two measurements agreeing. It now
+  plots real CPU — the `TotalCPU`/`Elapsed` delta between samples, normalised by
+  `AllocCPUS` — on a fixed 0-100% scale.
+- **A partition's GRES could go missing** ([#30](https://github.com/RobinU434/LazySlurm/issues/30)).
+  Aggregating `sinfo` rows used a substring test, so `gpu:a100:8` was dropped whenever
+  `gpu:a100:80` was already listed.
+- Sparkline history no longer grows for the lifetime of the session: entries are dropped
+  when the job stops running ([#28](https://github.com/RobinU434/LazySlurm/issues/28)).
+- Importing `lazyslurm.slurm` no longer creates a directory in `~/.ssh` as a side effect
+  — `--help`, a unit test or a docs build left one behind
+  ([#29](https://github.com/RobinU434/LazySlurm/issues/29)).
+- `slurm.py` defined `_as_int` twice, so the definition sitting next to the stats code
+  was not the one that ran ([#24](https://github.com/RobinU434/LazySlurm/issues/24)).
 
 ## 0.2.1 — 2026-08-12
 
