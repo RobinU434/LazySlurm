@@ -6,6 +6,7 @@ import asyncio
 import os
 import shlex
 from datetime import datetime, timedelta
+from typing import Callable
 from pathlib import Path
 
 from lazyslurm.ssh import PromptCallback, SSHSession, quote_argv
@@ -34,24 +35,32 @@ _config: Config = Config()
 # does not use these — it runs everything through the one session in ssh.py.
 # Multiplexing still matters here: the first call opens a master connection and
 # the rest reuse it, turning many handshakes per poll into one.
-_SSH_CONTROL_DIR = os.path.join(os.path.expanduser("~"), ".ssh", "cm-lazyslurm")
-try:
-    os.makedirs(_SSH_CONTROL_DIR, mode=0o700, exist_ok=True)
-except OSError:
-    _SSH_CONTROL_DIR = ""
+_SSH_CONTROL_DIR = Path.home() / ".ssh" / "cm-lazyslurm"
 
 _SSH_OPTS = [
     "-o", "StrictHostKeyChecking=no",
     "-o", "ConnectTimeout=3",
     "-o", "BatchMode=yes",
 ]
-if _SSH_CONTROL_DIR:
-    _SSH_OPTS += [
+_SSH_TIMEOUT = 8  # seconds
+
+
+def _control_opts() -> list[str]:
+    """Multiplexing options, creating the control dir at the point of use.
+
+    Importing this module must not touch ``~/.ssh`` — only a local-mode hop to
+    a compute node needs the directory. If it cannot be created, drop the
+    options and let each hop open its own connection.
+    """
+    try:
+        _SSH_CONTROL_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError:
+        return []
+    return [
         "-o", "ControlMaster=auto",
         "-o", "ControlPersist=60s",
-        "-o", f"ControlPath={os.path.join(_SSH_CONTROL_DIR, '%C')}",
+        "-o", f"ControlPath={_SSH_CONTROL_DIR / '%C'}",
     ]
-_SSH_TIMEOUT = 8  # seconds
 
 # Options for the login-node -> compute-node hop in remote mode. That inner ssh
 # runs on the cluster, so it must never prompt: BatchMode makes it fail fast.
@@ -62,10 +71,37 @@ _NODE_SSH_OPTS = [
 ]
 
 
+def _as_int(value: str | None) -> int:
+    """Parse a Slurm numeric field, truncating toward zero. 0 when unparsable.
+
+    Goes through ``float`` on purpose: Slurm reports CPUsLoad as ``16.02``.
+    """
+    try:
+        return int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return 0
+
+
 def set_config(config: Config) -> None:
     """Set the module-level config (called once at app startup)."""
     global _config
     _config = config
+
+
+# Where this module reports things the user should know about — set to the
+# app's command log at startup. Without it, failures here have nowhere to go.
+_notice_cb: Callable[[str, str], None] | None = None
+
+
+def set_notice_callback(callback: Callable[[str, str], None] | None) -> None:
+    """Route notices (action, detail) to the app's command log."""
+    global _notice_cb
+    _notice_cb = callback
+
+
+def _notice(action: str, detail: str = "") -> None:
+    if _notice_cb is not None:
+        _notice_cb(action, detail)
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +189,7 @@ async def _ssh_cmd(node: str, remote_cmd: str) -> tuple[str, int]:
         return stdout, rc
     try:
         proc = await asyncio.create_subprocess_exec(
-            "ssh", *_SSH_OPTS, node, remote_cmd,
+            "ssh", *_SSH_OPTS, *_control_opts(), node, remote_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -349,8 +385,11 @@ async def get_job_detail(job_id: str) -> JobDetail | None:
         # failure here must never stop detail loading.
         try:
             await archive_batch_script(job_id)
-        except Exception:
-            pass
+        except (OSError, asyncio.TimeoutError, ValueError) as exc:
+            # Never let archiving break detail loading — but say so, because
+            # this is the only window in which the script can still be saved,
+            # and the user would otherwise discover the gap days later.
+            _notice("archive script", f"{job_id}: {exc}")
         return JobDetail(
             job_id=job_id,
             raw=raw,
@@ -468,8 +507,6 @@ async def _guess_log_path(
             os.path.join(work_dir, f"{job_name}-{job_id}.{ext_out}"),
             os.path.join(work_dir, f"{job_name}_{job_id}.{ext_out}"),
             os.path.join(work_dir, f"{job_name}.{ext_out}"),
-            # sbatch --output/--error with %j pattern
-            os.path.join(work_dir, f"{job_name}-%j.{ext_out}".replace("%j", job_id)),
         ])
     # Also check logs/ subdirectory
     candidates.extend([
@@ -477,7 +514,9 @@ async def _guess_log_path(
         os.path.join(work_dir, "log", f"slurm-{job_id}.{ext_out}"),
     ])
 
-    for path in candidates:
+    # Every candidate costs a stat — a full SSH round trip in remote mode — so
+    # never probe the same path twice (the first two coincide when suffix=="out").
+    for path in dict.fromkeys(candidates):
         if await _file_exists(path):
             return path
     return None
@@ -895,13 +934,6 @@ async def get_job_stats(job_id: str) -> JobStats | None:
     return stats
 
 
-def _as_int(value: str | None) -> int:
-    try:
-        return int(str(value).strip())
-    except (TypeError, ValueError):
-        return 0
-
-
 async def _get_sstat(job_id: str) -> JobStats | None:
     """Get live resource usage for a running job via sstat."""
     stdout, _, rc = await _run_cmd(
@@ -1315,7 +1347,9 @@ def parse_sinfo(stdout: str) -> list[PartitionInfo]:
                 gres=gres,
             )
             by_name[name] = part
-        elif gres and gres not in part.gres:
+        # Membership over the specs collected so far, not a substring test on
+        # the joined string: "gpu:a100:8" is a substring of "gpu:a100:80".
+        elif gres and gres not in part.gres.split(","):
             part.gres = f"{part.gres},{gres}" if part.gres else gres
         part.nodes_alloc += n_a
         part.nodes_idle += n_i
@@ -1423,13 +1457,6 @@ _SINFO_NODE_FIELDS = (
 )
 # Fallback for Slurm versions without those -O field names; no GresUsed.
 _SINFO_NODE_FORMAT = "%N|%T|%C|%m|%e|%O|%G||%E"
-
-
-def _as_int(value: str) -> int:
-    try:
-        return int(float(value.strip()))
-    except (ValueError, AttributeError):
-        return 0
 
 
 def _as_float(value: str) -> float:

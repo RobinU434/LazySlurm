@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from textual.message import Message
 from textual.widgets import DataTable
+from textual.widgets.data_table import CellDoesNotExist
 from rich.text import Text
 
 from lazyslurm.models import NodeInfo, PartitionInfo, PartitionJob
@@ -81,8 +82,8 @@ class PartitionTable(DataTable):
         try:
             row_key, _ = self.coordinate_to_cell_key(self.cursor_coordinate)
             return str(row_key.value)
-        except Exception:
-            return None
+        except CellDoesNotExist:
+            return None  # cursor is outside the table (empty or mid-rebuild)
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         name = str(event.row_key.value) if event.row_key else self.get_selected_partition()
@@ -160,8 +161,8 @@ class NodeTable(DataTable):
         try:
             row_key, _ = self.coordinate_to_cell_key(self.cursor_coordinate)
             return str(row_key.value)
-        except Exception:
-            return None
+        except CellDoesNotExist:
+            return None  # cursor is outside the table (empty or mid-rebuild)
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         name = str(event.row_key.value) if event.row_key else self.get_selected_node()

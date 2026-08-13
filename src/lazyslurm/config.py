@@ -7,7 +7,10 @@ import os
 import time
 from pathlib import Path
 
-# Use tomllib (3.11+) for reading, fall back to manual parsing for writing
+import tomlkit
+
+# Use tomllib (3.11+) for reading; tomlkit does the writing, because it is the
+# only one of the two that preserves the file's comments and layout.
 try:
     import tomllib
 except ImportError:
@@ -26,34 +29,34 @@ def load() -> dict:
     try:
         with open(CONFIG_FILE, "rb") as f:
             return tomllib.load(f)
-    except Exception:
+    except (OSError, tomllib.TOMLDecodeError):
+        # A broken or unreadable config must not stop the app from starting.
         return {}
 
 
+def _template_text() -> str:
+    """The packaged commented template, or "" if it cannot be read."""
+    try:
+        from importlib.resources import files
+        return files("lazyslurm").joinpath("templ", "config.toml").read_text()
+    except (OSError, ModuleNotFoundError):
+        return ""  # packaged template unavailable; start from an empty file
+
+
 def save(data: dict) -> None:
-    """Save persistent config as TOML."""
+    """Write ``data`` into config.toml, keeping the rest of the file intact.
+
+    The file is edited, not regenerated: ~38 of the template's 41 lines are
+    comments documenting every setting, and they are the only in-product
+    reference for options like ``partition_colors``. Keys the loader does not
+    know about survive for the same reason.
+    """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    lines: list[str] = []
+    existing = CONFIG_FILE.read_text() if CONFIG_FILE.exists() else _template_text()
+    doc = tomlkit.parse(existing)
     for key, value in data.items():
-        if isinstance(value, dict):
-            lines.append(f"\n[{key}]")
-            for k, v in value.items():
-                lines.append(f"{k} = {_toml_value(v)}")
-        else:
-            lines.append(f"{key} = {_toml_value(value)}")
-    CONFIG_FILE.write_text("\n".join(lines) + "\n")
-
-
-def _toml_value(v) -> str:
-    """Format a Python value as a TOML literal."""
-    if isinstance(v, list):
-        items = ", ".join(f'"{i}"' if isinstance(i, str) else str(i) for i in v)
-        return f"[{items}]"
-    if isinstance(v, str):
-        return f'"{v}"'
-    if isinstance(v, bool):
-        return "true" if v else "false"
-    return str(v)
+        doc[key] = value
+    CONFIG_FILE.write_text(tomlkit.dumps(doc))
 
 
 def get_partition_order() -> list[str] | None:
@@ -99,7 +102,8 @@ def _load_log_cache() -> dict:
         return {}
     try:
         return json.loads(LOG_CACHE_FILE.read_text())
-    except Exception:
+    except (OSError, ValueError):
+        # Truncated or corrupt cache — it is a cache, so rebuild it.
         return {}
 
 
@@ -130,7 +134,7 @@ def cache_job_paths(
     if not any((stdout_path, stderr_path, command, work_dir, submit_line)):
         return
     cache = _load_log_cache()
-    entry = cache.get(job_id, {})
+    entry = dict(cache.get(job_id, {}))
     if stdout_path:
         entry["stdout"] = stdout_path
     if stderr_path:
@@ -141,13 +145,19 @@ def cache_job_paths(
         entry["submit_line"] = submit_line
     if work_dir:
         entry["workdir"] = work_dir
+    old = cache.get(job_id)
+    unchanged = old is not None and all(
+        old.get(k) == v for k, v in entry.items() if k != "ts"
+    )
+    # This runs on every job selection, and a full read-modify-write of a cache
+    # holding thousands of entries is not worth doing when nothing changed. The
+    # timestamp is still refreshed once a day so a job the user keeps visiting
+    # does not age out of the cache under their cursor.
+    if unchanged and time.time() - float(old.get("ts", 0) or 0) < 86400:
+        return
     entry["ts"] = time.time()
     cache[job_id] = entry
     _save_log_cache(cache)
-
-
-# Backwards-compatible alias
-cache_log_paths = cache_job_paths
 
 
 def get_cached_log_paths(job_id: str) -> tuple[str | None, str | None]:

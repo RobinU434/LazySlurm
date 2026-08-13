@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from textual.app import ComposeResult
+from textual.css.query import NoMatches
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Static, TabbedContent, TabPane
 
@@ -62,8 +63,8 @@ class MetadataView(Vertical):
                 if tabs.active == _PENDING_TAB:
                     tabs.active = "tab-resources"
                 tabs.hide_tab(_PENDING_TAB)
-        except Exception:
-            pass
+        except NoMatches:
+            pass  # called before the tabs are mounted
 
     def _visible_tabs(self) -> list[str]:
         tabs = self.query_one("#meta-tabs", TabbedContent)
@@ -75,8 +76,8 @@ class MetadataView(Vertical):
             try:
                 if tabs.get_tab(tab_id).display:
                     visible.append(tab_id)
-            except Exception:
-                continue
+            except NoMatches:
+                continue  # tab not mounted — treat as not visible
         return visible or _BASE_TABS
 
     def load_detail(

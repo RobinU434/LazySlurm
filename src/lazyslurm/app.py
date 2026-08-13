@@ -11,13 +11,14 @@ from pathlib import Path
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.css.query import NoMatches
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widgets import DataTable, Footer, Input, RichLog, Static
 
 from lazyslurm import help as help_topics
 from lazyslurm import slurm
-from lazyslurm.models import Config, PriorityInfo
+from lazyslurm.models import Config, PriorityInfo, parse_duration
 from lazyslurm.widgets.detail_view import DetailView, parse_mem_bytes
 from lazyslurm.widgets.job_table import ActiveJobTable, CompletedJobTable, JobSelected, set_partition_colors, set_display_config
 from lazyslurm.widgets.metadata_view import MetadataView
@@ -704,6 +705,8 @@ class LazySlurmApp(App):
         self._first_poll_done: bool = False
         # Sparkline resource history
         self._resource_history: dict[str, dict[str, list[float]]] = {}
+        # Previous (TotalCPU, Elapsed) per job — the CPU series is a delta
+        self._cpu_marker: dict[str, tuple[float, float] | None] = {}
         # Resubmit state
         self._resubmit_script: str = ""
         self._resubmit_work_dir: str = ""
@@ -720,6 +723,8 @@ class LazySlurmApp(App):
         self._multiselect_ids: set[str] = set()
         # Job ids currently being edited by EditJobScreen
         self._edit_job_ids: list[str] = []
+        # Timer clearing the status line
+        self._status_timer = None
 
     def compose(self) -> ComposeResult:
         show_gpu = not self.config.no_gpu and not self.config.no_live
@@ -736,10 +741,12 @@ class LazySlurmApp(App):
                 yield DetailView(id="detail-view", show_gpu=show_gpu)
                 yield MetadataView(id="metadata-view")
                 yield RichLog(id="command-log", wrap=True, markup=True)
+        yield Static(id="status-line")
         yield Footer()
 
     def on_mount(self) -> None:
         slurm.set_config(self.config)
+        slurm.set_notice_callback(self._log)
         set_partition_colors(self.config.partition_colors)
         set_display_config(
             max_name=self.config.max_name_width,
@@ -875,6 +882,20 @@ class LazySlurmApp(App):
         self._known_running_ids = current_ids
         self._first_poll_done = True
 
+        # Sparkline history is only ever plotted for a running job, so drop the
+        # entries of jobs that have ended — otherwise a long session accumulates
+        # one per job the user has ever highlighted.
+        self._resource_history = {
+            job_id: history
+            for job_id, history in self._resource_history.items()
+            if job_id in current_ids
+        }
+        self._cpu_marker = {
+            job_id: marker
+            for job_id, marker in self._cpu_marker.items()
+            if job_id in current_ids
+        }
+
         # Collect sparkline samples for selected running job
         if self._selected_job_id and self._selected_job_id in current_ids:
             await self._collect_resource_sample(self._selected_job_id)
@@ -915,8 +936,8 @@ class LazySlurmApp(App):
                 stderr=asyncio.subprocess.DEVNULL,
             )
             await proc.wait()
-        except Exception:
-            pass
+        except (OSError, asyncio.CancelledError):
+            pass  # no notify-send on this box, or the app is shutting down
 
     # ------------------------------------------------------------------
     # Sparkline resource history
@@ -932,14 +953,29 @@ class LazySlurmApp(App):
             hist["memory"].append(mem)
             if len(hist["memory"]) > _MAX_HISTORY:
                 hist["memory"] = hist["memory"][-_MAX_HISTORY:]
-        # Parse CPU: try total_cpu as seconds-like value, or just count samples
-        # For sparklines, use max_rss as primary metric; CPU is harder to normalize
-        # Use ave_rss as a proxy for CPU activity (non-zero means active)
-        cpu_val = parse_mem_bytes(stats.ave_rss)
-        if cpu_val is not None:
-            hist["cpu"].append(cpu_val)
-            if len(hist["cpu"]) > _MAX_HISTORY:
-                hist["cpu"] = hist["cpu"][-_MAX_HISTORY:]
+        # TotalCPU and Elapsed are both cumulative, so the ratio of their deltas
+        # since the previous sample is the core-equivalents busy over that
+        # interval — the same quantity the Efficiency block reports as cpu_used.
+        # Normalised by AllocCPUS it gives a 0-1 series: a flat CPU line under a
+        # rising memory line is what a stalled job looks like.
+        cpu_now = parse_duration(stats.total_cpu)
+        elapsed_now = parse_duration(stats.elapsed)
+        prev = self._cpu_marker.get(job_id)
+        self._cpu_marker[job_id] = (
+            (cpu_now, elapsed_now) if cpu_now is not None and elapsed_now is not None
+            else None
+        )
+        if cpu_now is None or elapsed_now is None or prev is None:
+            return
+        d_cpu, d_elapsed = cpu_now - prev[0], elapsed_now - prev[1]
+        if d_elapsed <= 0:
+            return
+        busy = d_cpu / d_elapsed
+        if stats.alloc_cpus > 0:
+            busy /= stats.alloc_cpus
+        hist["cpu"].append(max(0.0, busy))
+        if len(hist["cpu"]) > _MAX_HISTORY:
+            hist["cpu"] = hist["cpu"][-_MAX_HISTORY:]
 
     # ------------------------------------------------------------------
     # Job selection handling (debounced)
@@ -1035,8 +1071,8 @@ class LazySlurmApp(App):
         detail_view.load_cpu("[dim]Press \\[r] or wait for auto-refresh[/]")
         try:
             detail_view.load_gpu("[dim]Press \\[r] or wait for auto-refresh[/]")
-        except Exception:
-            pass
+        except NoMatches:
+            pass  # GPU tab not present (--no-gpu / --no-live)
         metadata_view.load_detail(
             detail,
             priority if isinstance(priority, PriorityInfo) else None,
@@ -1519,6 +1555,7 @@ class LazySlurmApp(App):
     def _reload_config(self) -> None:
         """Reload config from disk and apply changes live."""
         from lazyslurm import config as persistent_config
+        from lazyslurm.__main__ import parse_cache_max_age
 
         saved = persistent_config.load()
         old = self.config
@@ -1540,7 +1577,9 @@ class LazySlurmApp(App):
             max_partition_width=int(saved.get("max_partition_width", old.max_partition_width)),
             abbreviate_states=bool(saved.get("abbreviate_states", old.abbreviate_states)),
             collapse_arrays=bool(saved.get("collapse_arrays", old.collapse_arrays)),
-            cache_max_age_days=saved.get("cache_max_age_days", old.cache_max_age_days),
+            cache_max_age_days=parse_cache_max_age(
+                saved.get("cache_max_age_days", old.cache_max_age_days)
+            ),
             script_cache_dir=os.path.expanduser(
                 str(saved.get("script_cache_dir", old.script_cache_dir))
             ),
@@ -1748,11 +1787,29 @@ class LazySlurmApp(App):
         if result:
             log.write(f"  [dim]>>> {result}[/]")
 
+    # How long a status message stays on the bar above the key bar.
+    _STATUS_SECONDS = 5.0
+
     def _set_status(self, text: str) -> None:
-        """Log a message to the command log panel."""
-        if text:
-            self._log(text)
-        # Also update the footer subtitle for one-line visibility
+        """Show a user-facing message on the status line and log it.
+
+        Unlike `_log`, which traces commands, this is for things the user is
+        waiting to be told — a refusal, a result. The command log scrolls; the
+        status line holds the message where the eye already is.
+        """
+        if not text:
+            return
+        self._log(text)
+        try:
+            status = self.query_one("#status-line", Static)
+        except NoMatches:
+            return  # called before mount (or from a screen without the bar)
+        status.update(text)
+        if self._status_timer is not None:
+            self._status_timer.stop()
+        self._status_timer = self.set_timer(
+            self._STATUS_SECONDS, lambda: status.update(""),
+        )
 
 
     def action_focus_next_right(self) -> None:

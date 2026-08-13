@@ -9,6 +9,7 @@ Async functions are exercised by monkeypatching the transport layer
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -481,6 +482,25 @@ def test_parse_sinfo_aggregates_rows_per_partition():
     assert parts["maint"].avail == "down"
 
 
+def test_parse_sinfo_keeps_a_gres_that_prefixes_another():
+    # "gpu:a100:8" is a substring of "gpu:a100:80" but a distinct config.
+    out = (
+        "gpu|up|4/0/0/4|100/0/0/100|1-00:00:00|gpu:a100:80\n"
+        "gpu|up|2/0/0/2|50/0/0/50|1-00:00:00|gpu:a100:8\n"
+    )
+    part = slurm.parse_sinfo(out)[0]
+    assert part.gres == "gpu:a100:80,gpu:a100:8"
+    assert part.nodes_aiot == "6/0/0/6"
+
+
+def test_parse_sinfo_still_dedupes_identical_gres():
+    out = (
+        "gpu|up|4/0/0/4|100/0/0/100|1-00:00:00|gpu:a100:8\n"
+        "gpu|up|2/0/0/2|50/0/0/50|1-00:00:00|gpu:a100:8\n"
+    )
+    assert slurm.parse_sinfo(out)[0].gres == "gpu:a100:8"
+
+
 def test_parse_sinfo_tolerates_short_rows():
     # The cluster bar's older 3-field format must still parse.
     parts = slurm.parse_sinfo("gpu|up|10/5/0/15")
@@ -849,3 +869,38 @@ def test_cluster_summary_counts_array_tasks_not_rows():
     out = slurm.format_cluster_summary(running, [], Config(user="bob"))
     assert "2[/] running" in out   # 100 and 200_0
     assert "9[/] pending" in out   # the whole range
+
+
+def test_as_int_truncates_floats_slurm_reports():
+    # CPUsLoad comes through as "16.02"; the parser has to accept it.
+    assert slurm._as_int("16.02") == 16
+    assert slurm._as_int("8") == 8
+    assert slurm._as_int(None) == 0
+    assert slurm._as_int("") == 0
+    assert slurm._as_int("N/A") == 0
+
+
+def test_importing_slurm_does_not_touch_the_ssh_dir():
+    # The control dir is created at the point of use, not at import time.
+    assert isinstance(slurm._SSH_CONTROL_DIR, Path)
+    assert not any(
+        "ControlPath" in opt for opt in slurm._SSH_OPTS
+    ), "multiplexing options must be added per call, not baked in at import"
+
+
+def test_guess_log_path_never_probes_the_same_candidate_twice(tmp_path):
+    seen: list[str] = []
+
+    async def _fake_exists(path: str) -> bool:
+        seen.append(path)
+        return False
+
+    import lazyslurm.slurm as s
+    orig = s._file_exists
+    s._file_exists = _fake_exists
+    try:
+        asyncio.run(s._guess_log_path(str(tmp_path), "42", "out", "train"))
+    finally:
+        s._file_exists = orig
+
+    assert len(seen) == len(set(seen)), f"duplicate candidates probed: {seen}"

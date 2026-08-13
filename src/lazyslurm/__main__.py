@@ -22,6 +22,25 @@ _CONFIG_KEYS = {
 }
 
 
+def parse_cache_max_age(raw: object) -> int | None:
+    """Resolve ``cache_max_age_days`` from config. None means "never prune".
+
+    TOML has no null literal, so "never" has to be expressible some other way:
+    ``0`` and ``false`` both mean it. Taking ``0`` literally would prune every
+    cached script on the next launch, which is the opposite of what a user
+    reaching for "0 = off" intends. Anything unparsable falls back to 30 days.
+    """
+    if raw is None or raw is False or raw == 0:
+        return None
+    if raw is True:
+        return 30
+    try:
+        days = int(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 30
+    return days if days > 0 else None
+
+
 def main() -> None:
     from lazyslurm import config as persistent_config
 
@@ -162,8 +181,7 @@ def main() -> None:
     max_partition_width = int(saved.get("max_partition_width", 16))
     abbreviate_states = bool(saved.get("abbreviate_states", False))
     collapse_arrays = bool(saved.get("collapse_arrays", True))
-    raw_cache_age = saved.get("cache_max_age_days", 30)
-    cache_max_age_days = None if raw_cache_age is None else int(raw_cache_age)
+    cache_max_age_days = parse_cache_max_age(saved.get("cache_max_age_days", 30))
     script_cache_dir = os.path.expanduser(str(saved.get("script_cache_dir", "")))
 
     config = Config(

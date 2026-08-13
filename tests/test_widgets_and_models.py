@@ -117,6 +117,33 @@ def test_jobdetail_scontrol_and_sacct_key_aliases():
     assert d2.num_cpus == "4" and d2.num_nodes == "1" and d2.qos == "lo"
 
 
+def test_jobdetail_empty_field_falls_back_to_the_alternative_spelling():
+    # sacct emits empty columns rather than omitting them, so a present-but-empty
+    # key must not win over the spelling that actually holds the value.
+    d = JobDetail(job_id="1", raw={
+        "NodeList": "", "Nodelist": "node42",
+        "NumCPUs": "", "NCPUS": "8",
+        "TRES": "", "ReqTRES": "", "AllocTRES": "cpu=4",
+        "JobState": "", "State": "CANCELLED",
+    })
+    assert d.node_list == "node42"
+    assert d.num_cpus == "8"
+    assert d.tres == "cpu=4"
+    assert d.state == "CANCELLED"
+
+
+def test_jobdetail_all_empty_gives_na():
+    d = JobDetail(job_id="1", raw={"NodeList": "", "Nodelist": ""})
+    assert d.node_list == "N/A"
+
+
+def test_sparkline_fixed_scale_does_not_self_normalise():
+    # A series that is already a fraction must plot against 0-1, so half the
+    # cores busy does not look the same as all of them.
+    assert sparkline([0.5, 0.5], scale_max=1.0) == sparkline([0.5], scale_max=1.0) * 2
+    assert sparkline([0.5, 0.5], scale_max=1.0) != sparkline([1.0, 1.0], scale_max=1.0)
+
+
 def test_jobdetail_gres_from_tres():
     d = JobDetail(job_id="1", raw={"ReqTRES": "cpu=4,mem=8G,gres/gpu=2"})
     assert "gres/gpu=2" in d.gres
@@ -127,12 +154,39 @@ def test_jobdetail_gres_from_tres():
 # ---------------------------------------------------------------------------
 
 
-def test_toml_value_formatting():
-    assert cfg._toml_value("hello") == '"hello"'
-    assert cfg._toml_value(True) == "true"
-    assert cfg._toml_value(False) == "false"
-    assert cfg._toml_value(["a", "b"]) == '["a", "b"]'
-    assert cfg._toml_value(5) == "5"
+def test_save_preserves_comments_and_unknown_keys(tmp_path, monkeypatch):
+    monkeypatch.setattr(cfg, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "CONFIG_FILE", tmp_path / "config.toml")
+    (tmp_path / "config.toml").write_text(
+        "# LazySlurm configuration\n"
+        "editor = \"nvim\"   # my editor\n"
+        "# refresh = 5.0\n"
+        "future_setting = 1\n"
+    )
+
+    cfg.set_partition_order(["gpu", "cpu"])
+
+    text = (tmp_path / "config.toml").read_text()
+    assert "# LazySlurm configuration" in text
+    assert "# my editor" in text
+    assert "# refresh = 5.0" in text
+    assert "future_setting" in text
+    reloaded = cfg.load()
+    assert reloaded["partition_order"] == ["gpu", "cpu"]
+    assert reloaded["editor"] == "nvim"
+
+
+def test_save_writes_types_toml_can_parse(tmp_path, monkeypatch):
+    monkeypatch.setattr(cfg, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "CONFIG_FILE", tmp_path / "config.toml")
+
+    cfg.save({"editor": "vim", "no_gpu": True, "days": 5,
+              "partition_order": ["a", "b"], "partition_colors": {"gpu": "green"}})
+
+    assert cfg.load() == {
+        "editor": "vim", "no_gpu": True, "days": 5,
+        "partition_order": ["a", "b"], "partition_colors": {"gpu": "green"},
+    }
 
 
 def test_log_cache_round_trip(tmp_path, monkeypatch):
@@ -354,3 +408,42 @@ def test_load_bar(fraction, expected_bar, expected_style):
     assert text.plain.startswith(expected_bar)
     assert text.plain.endswith("%")
     assert text.spans[0].style == expected_style
+
+
+# ---------------------------------------------------------------------------
+# cache_max_age_days: TOML has no null, so 0/false must mean "never"
+# ---------------------------------------------------------------------------
+
+
+def test_cache_max_age_zero_means_never_not_delete_everything():
+    from lazyslurm.__main__ import parse_cache_max_age
+
+    assert parse_cache_max_age(0) is None
+    assert parse_cache_max_age(False) is None
+    assert parse_cache_max_age(None) is None
+    assert parse_cache_max_age(-1) is None
+    assert parse_cache_max_age(30) == 30
+    assert parse_cache_max_age("7") == 7
+    assert parse_cache_max_age("nonsense") == 30
+
+
+def test_cache_job_paths_skips_the_rewrite_when_nothing_changed(tmp_path, monkeypatch):
+    monkeypatch.setattr(cfg, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "LOG_CACHE_FILE", tmp_path / "log_cache.json")
+
+    writes = []
+    real_save = cfg._save_log_cache
+    monkeypatch.setattr(
+        cfg, "_save_log_cache",
+        lambda cache: (writes.append(1), real_save(cache))[1],
+    )
+
+    cfg.cache_job_paths("42", stdout_path="/w/out", work_dir="/w")
+    assert len(writes) == 1
+    # Same values again — the file must not be rewritten.
+    cfg.cache_job_paths("42", stdout_path="/w/out", work_dir="/w")
+    assert len(writes) == 1
+    # A changed value still goes through.
+    cfg.cache_job_paths("42", stdout_path="/w/other.out", work_dir="/w")
+    assert len(writes) == 2
+    assert cfg.get_cached_log_paths("42") == ("/w/other.out", None)
