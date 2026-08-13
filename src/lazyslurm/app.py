@@ -877,6 +877,20 @@ class LazySlurmApp(App):
         self._known_running_ids = current_ids
         self._first_poll_done = True
 
+        # Sparkline history is only ever plotted for a running job, so drop the
+        # entries of jobs that have ended — otherwise a long session accumulates
+        # one per job the user has ever highlighted.
+        self._resource_history = {
+            job_id: history
+            for job_id, history in self._resource_history.items()
+            if job_id in current_ids
+        }
+        self._cpu_marker = {
+            job_id: marker
+            for job_id, marker in self._cpu_marker.items()
+            if job_id in current_ids
+        }
+
         # Collect sparkline samples for selected running job
         if self._selected_job_id and self._selected_job_id in current_ids:
             await self._collect_resource_sample(self._selected_job_id)
