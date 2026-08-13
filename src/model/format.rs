@@ -166,6 +166,30 @@ pub fn gres_count(spec: &str) -> u32 {
         .sum()
 }
 
+/// Hours as `2 472` / `68 364` / `912.5`.
+///
+/// Thin-spaced thousands rather than commas: an account's yearly total runs to
+/// six figures, and unseparated digits at that length are unreadable.
+pub fn format_hours(hours: f64) -> String {
+    if hours >= 1000.0 {
+        let whole = hours.round() as u64;
+        let digits = whole.to_string();
+        // Group from the right in threes.
+        let mut grouped = String::new();
+        for (index, character) in digits.chars().enumerate() {
+            if index > 0 && (digits.len() - index).is_multiple_of(3) {
+                grouped.push(' ');
+            }
+            grouped.push(character);
+        }
+        grouped
+    } else if hours >= 10.0 {
+        format!("{hours:.0}")
+    } else {
+        format!("{hours:.1}")
+    }
+}
+
 /// Parse Slurm's elapsed format — `[DD-]HH:MM:SS`, `MM:SS`, `N/A` — to seconds.
 ///
 /// Unlike [`parse_duration`] this is integer-only and total-order friendly: it
@@ -275,6 +299,18 @@ mod tests {
     #[case("gpu", 0)]
     fn counts_gres(#[case] spec: &str, #[case] expected: u32) {
         assert_eq!(gres_count(spec), expected);
+    }
+
+    #[rstest]
+    #[case(68_364.0, "68 364")]
+    #[case(2472.0, "2 472")]
+    #[case(1000.0, "1 000")]
+    #[case(912.5, "912")]
+    #[case(12.0, "12")]
+    #[case(9.5, "9.5")]
+    #[case(0.0, "0.0")]
+    fn formats_hours(#[case] hours: f64, #[case] expected: &str) {
+        assert_eq!(format_hours(hours), expected);
     }
 
     #[rstest]

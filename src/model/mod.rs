@@ -16,8 +16,8 @@ pub mod partition;
 pub use accounting::{FairShare, PriorityInfo, UsageRow};
 pub use efficiency::{compute_efficiency, sizing_hint, Efficiency};
 pub use format::{
-    elapsed_seconds, format_bytes, format_duration, gres_count, parse_duration, parse_mem_bytes,
-    parse_req_mem,
+    elapsed_seconds, format_bytes, format_duration, format_hours, gres_count, parse_duration,
+    parse_mem_bytes, parse_req_mem,
 };
 pub use job::{
     CompletedJob, DetailSource, JobDetail, JobStats, PartitionJob, RunningJob, StatsSource,

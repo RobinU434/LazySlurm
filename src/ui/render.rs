@@ -459,6 +459,70 @@ pub fn help_overlay(frame: &mut Frame, area: Rect, content: &[Line<'static>]) {
     lines(frame, inner, content, 0);
 }
 
+/// Draw a bordered table of pre-built rows, scrolling to keep the cursor shown.
+pub fn simple_table(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    columns: &[&str],
+    rows: Vec<Vec<Line<'static>>>,
+    selected: usize,
+    focused: bool,
+) {
+    let block = panel(title, focused);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let header = TableRow::new(
+        columns
+            .iter()
+            .map(|name| Cell::from(*name))
+            .collect::<Vec<_>>(),
+    )
+    .style(theme::header());
+
+    let widths: Vec<Constraint> = (0..columns.len())
+        .map(|index| {
+            let widest = rows
+                .iter()
+                .filter_map(|row| row.get(index))
+                .map(|line| line.width() as u16)
+                .max()
+                .unwrap_or(0)
+                .max(columns[index].len() as u16);
+            Constraint::Length(widest.min(MAX_MEASURED_WIDTH))
+        })
+        .collect();
+
+    let table_rows: Vec<TableRow> = rows
+        .into_iter()
+        .enumerate()
+        .map(|(index, cells)| {
+            let mut row = TableRow::new(cells);
+            if index % 2 == 1 {
+                row = row.style(theme::stripe());
+            }
+            row
+        })
+        .collect();
+
+    let widget = Table::new(table_rows, widths)
+        .header(header)
+        .row_highlight_style(if focused {
+            theme::cursor()
+        } else {
+            theme::cursor_unfocused()
+        });
+
+    let mut state = TableState::new().with_selected(Some(selected));
+    frame.render_stateful_widget(widget, inner, &mut state);
+}
+
+/// Draw a one-line summary bar.
+pub fn summary_bar(frame: &mut Frame, area: Rect, line: Line<'static>) {
+    frame.render_widget(Paragraph::new(line), area);
+}
+
 /// A panel with a single message in it, for areas not yet implemented.
 pub fn placeholder_panel(frame: &mut Frame, area: Rect, title: &str, message: &str, focused: bool) {
     let block = panel(title, focused);

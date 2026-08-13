@@ -15,6 +15,8 @@ pub mod layout;
 pub mod log_pane;
 pub mod metadata;
 pub mod render;
+pub mod screens;
+pub mod simple_table;
 pub mod tabs;
 pub mod terminal;
 pub mod text;

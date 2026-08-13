@@ -36,6 +36,12 @@ pub enum Action {
     PrevMetaTab,
     ScrollUp,
     ScrollDown,
+    OpenPartitions,
+    OpenUsage,
+    ShowNodes,
+    SwitchPane,
+    CycleWindow,
+    Back,
 }
 
 /// One key combination.
@@ -91,6 +97,9 @@ pub enum Context {
     Jobs,
     Detail,
     Metadata,
+    Partitions,
+    Nodes,
+    Usage,
 }
 
 impl Context {
@@ -99,6 +108,9 @@ impl Context {
             Self::Jobs => "Job tables",
             Self::Detail => "Job Details",
             Self::Metadata => "Job Metadata",
+            Self::Partitions => "Partition monitor",
+            Self::Nodes => "Node view",
+            Self::Usage => "Account usage",
         }
     }
 
@@ -107,6 +119,9 @@ impl Context {
             Self::Jobs => "Active Jobs / Terminated Jobs",
             Self::Detail => "stdout · stderr · cpu · gpu · stats",
             Self::Metadata => "Resources · Submission · Pending · Raw",
+            Self::Partitions => "opened with p",
+            Self::Nodes => "Enter on a partition",
+            Self::Usage => "opened with Shift+U",
         }
     }
 
@@ -116,6 +131,9 @@ impl Context {
             Self::Jobs => JOBS,
             Self::Detail => DETAIL,
             Self::Metadata => METADATA,
+            Self::Partitions => PARTITIONS,
+            Self::Nodes => NODES,
+            Self::Usage => USAGE,
         }
     }
 
@@ -138,6 +156,19 @@ impl Context {
             Self::Metadata => &[
                 "The Pending tab appears only while a job is waiting: why it is not",
                 "running, when Slurm expects to start it, and its priority breakdown.",
+            ],
+            Self::Partitions => &[
+                "A/I/O/T is allocated / idle / other / total, for nodes and for CPUs.",
+                "The job list is every user's jobs, not just yours; ▸ marks your own.",
+                "A down partition is struck through rather than hidden.",
+            ],
+            Self::Nodes => &[
+                "A drained or down node shows — for load: its counters are stale.",
+                "GPUs are used/total, green while any are free.",
+            ],
+            Self::Usage => &[
+                "The fair-share factor is what decides queue order: above 0.5 you are",
+                "under your share and get boosted, below it you are over and pushed back.",
             ],
         }
     }
@@ -186,6 +217,96 @@ pub const GLOBAL: &[Binding] = &[
     },
 ];
 
+/// Keys for the partition monitor.
+pub const PARTITIONS: &[Binding] = &[
+    Binding {
+        display: "Up / Down",
+        description: "move between partitions; the job list follows",
+        action: Action::MoveUp,
+        keys: &[Key::plain(KeyCode::Up), Key::plain(KeyCode::Char('k'))],
+    },
+    Binding {
+        display: "j / k",
+        description: "move down / up",
+        action: Action::MoveDown,
+        keys: &[Key::plain(KeyCode::Down), Key::plain(KeyCode::Char('j'))],
+    },
+    Binding {
+        display: "Enter",
+        description: "show the individual nodes of this partition",
+        action: Action::ShowNodes,
+        keys: &[Key::plain(KeyCode::Enter)],
+    },
+    Binding {
+        display: "Tab",
+        description: "switch between the partition and job tables",
+        action: Action::SwitchPane,
+        keys: &[Key::plain(KeyCode::Tab), Key::plain(KeyCode::BackTab)],
+    },
+    Binding {
+        display: "Escape / p",
+        description: "back to the job view",
+        action: Action::Back,
+        keys: &[Key::plain(KeyCode::Esc), Key::plain(KeyCode::Char('p'))],
+    },
+];
+
+/// Keys for the node view.
+pub const NODES: &[Binding] = &[
+    Binding {
+        display: "Up / Down",
+        description: "move between nodes; the job list follows",
+        action: Action::MoveUp,
+        keys: &[Key::plain(KeyCode::Up), Key::plain(KeyCode::Char('k'))],
+    },
+    Binding {
+        display: "j / k",
+        description: "move down / up",
+        action: Action::MoveDown,
+        keys: &[Key::plain(KeyCode::Down), Key::plain(KeyCode::Char('j'))],
+    },
+    Binding {
+        display: "Tab",
+        description: "switch panel",
+        action: Action::SwitchPane,
+        keys: &[Key::plain(KeyCode::Tab), Key::plain(KeyCode::BackTab)],
+    },
+    Binding {
+        display: "Escape",
+        description: "back to the partition monitor",
+        action: Action::Back,
+        keys: &[Key::plain(KeyCode::Esc)],
+    },
+];
+
+/// Keys for the account usage panel.
+pub const USAGE: &[Binding] = &[
+    Binding {
+        display: "Up / Down",
+        description: "move through the users",
+        action: Action::MoveUp,
+        keys: &[Key::plain(KeyCode::Up), Key::plain(KeyCode::Char('k'))],
+    },
+    Binding {
+        display: "j / k",
+        description: "move down / up",
+        action: Action::MoveDown,
+        keys: &[Key::plain(KeyCode::Down), Key::plain(KeyCode::Char('j'))],
+    },
+    Binding {
+        display: "w",
+        description: "cycle the window: this month → last 30 days → this year",
+        action: Action::CycleWindow,
+        keys: &[Key::plain(KeyCode::Char('w'))],
+    },
+    Binding {
+        display: "Escape / Shift+U",
+        description: "back to the job view",
+        action: Action::Back,
+        keys: &[Key::plain(KeyCode::Esc), Key::plain(KeyCode::Char('U'))],
+    },
+];
+
 /// Keys for the job tables.
 pub const JOBS: &[Binding] = &[
     Binding {
@@ -223,6 +344,18 @@ pub const JOBS: &[Binding] = &[
         description: "bookmark — ★ rows pin to the top",
         action: Action::Bookmark,
         keys: &[Key::plain(KeyCode::Char('m'))],
+    },
+    Binding {
+        display: "p",
+        description: "partition monitor",
+        action: Action::OpenPartitions,
+        keys: &[Key::plain(KeyCode::Char('p'))],
+    },
+    Binding {
+        display: "Shift+U",
+        description: "account usage and fair share",
+        action: Action::OpenUsage,
+        keys: &[Key::plain(KeyCode::Char('U'))],
     },
 ];
 
@@ -343,7 +476,14 @@ fn binding_line(binding: &Binding, width: usize) -> Line<'static> {
 mod tests {
     use super::*;
 
-    const CONTEXTS: [Context; 3] = [Context::Jobs, Context::Detail, Context::Metadata];
+    const CONTEXTS: [Context; 6] = [
+        Context::Jobs,
+        Context::Detail,
+        Context::Metadata,
+        Context::Partitions,
+        Context::Nodes,
+        Context::Usage,
+    ];
 
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)

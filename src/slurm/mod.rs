@@ -13,6 +13,7 @@
 pub mod action;
 pub mod cache;
 pub mod fs;
+pub mod live;
 pub mod parse;
 pub mod query;
 pub mod reason;
@@ -24,6 +25,7 @@ pub use action::{
 };
 pub use cache::{DetailCache, ScriptStore};
 pub use fs::{read_log_file, tail_file, TAIL_LINES};
+pub use live::{gpu_status, node_processes};
 pub use query::{Slurm, UsageWindow, USAGE_WINDOWS};
 pub use reason::{explain, format_start_estimate};
 pub use transport::{CommandRunner, LocalRunner, Output};

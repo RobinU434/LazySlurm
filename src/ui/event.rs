@@ -8,7 +8,10 @@ use std::time::Duration;
 
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
-use crate::model::{CompletedJob, JobDetail, JobStats, PriorityInfo, RunningJob};
+use crate::model::{
+    CompletedJob, FairShare, JobDetail, JobStats, NodeInfo, PartitionInfo, PartitionJob,
+    PriorityInfo, RunningJob, UsageRow,
+};
 
 /// How long the input reader waits before checking whether it should stop.
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -24,8 +27,40 @@ pub enum Event {
     Jobs(Box<JobsLoaded>),
     /// A job's details finished loading.
     Detail(Box<DetailLoaded>),
+    /// The partition monitor's list arrived.
+    Partitions(Vec<PartitionInfo>),
+    /// The jobs on one partition arrived.
+    PartitionJobs {
+        partition: String,
+        jobs: Vec<PartitionJob>,
+    },
+    /// The nodes of one partition arrived.
+    Nodes {
+        partition: String,
+        nodes: Vec<NodeInfo>,
+    },
+    /// The jobs on one node arrived.
+    NodeJobs {
+        node: String,
+        jobs: Vec<PartitionJob>,
+    },
+    /// Account usage and fair share arrived.
+    Usage(Box<UsageLoaded>),
+    /// Live output from a compute node, for one detail tab.
+    Live {
+        tab: &'static str,
+        content: String,
+    },
     /// Something to write to the command log.
     Log(String, Option<String>),
+}
+
+/// The account-usage panel's two queries, which arrive together.
+#[derive(Debug)]
+pub struct UsageLoaded {
+    pub rows: Vec<UsageRow>,
+    pub shares: Vec<FairShare>,
+    pub accounting_available: bool,
 }
 
 /// The result of one poll.

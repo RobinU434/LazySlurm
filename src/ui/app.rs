@@ -22,14 +22,38 @@ use crate::model::{
 use crate::slurm::{Slurm, TAIL_LINES};
 
 use super::detail::{DetailView, ResourceHistory};
-use super::event::{DetailLoaded, Event, Events, JobsLoaded, Sender};
+use super::event::{DetailLoaded, Event, Events, JobsLoaded, Sender, UsageLoaded};
 use super::help::{self, Action, Context};
 use super::job_table::JobTable;
 use super::layout::main_layout;
 use super::metadata::MetadataView;
 use super::render::{self, LogEntry, TableStyle};
+use super::screens::{NodeScreen, Pane, PartitionScreen, UsageScreen};
 use super::terminal::{install_panic_hook, Session};
 use super::theme::Theme;
+
+/// The columns of a somebody-else's-jobs table.
+const PARTITION_JOB_COLUMNS: &[&str] = &[
+    "Job ID",
+    "User",
+    "Name",
+    "State",
+    "Time",
+    "Limit",
+    "N",
+    "CPUs",
+    "GRES",
+    "Node/Reason",
+];
+
+/// The key bar shown on the partition and node screens.
+const SCREEN_KEYS: &[(&str, &str)] = &[
+    ("Esc", "back"),
+    ("↵", "nodes"),
+    ("Tab", "panel"),
+    ("r", "refresh"),
+    ("?", "help"),
+];
 
 /// How many command-log entries to keep.
 const LOG_LIMIT: usize = 200;
@@ -85,6 +109,23 @@ impl Panel {
     }
 }
 
+/// A full-screen panel stacked over the main view.
+pub enum Screen {
+    Partitions(PartitionScreen),
+    Nodes(NodeScreen),
+    Usage(UsageScreen),
+}
+
+impl Screen {
+    fn context(&self) -> Context {
+        match self {
+            Self::Partitions(_) => Context::Partitions,
+            Self::Nodes(_) => Context::Nodes,
+            Self::Usage(_) => Context::Usage,
+        }
+    }
+}
+
 /// What a keystroke asked the runner to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
@@ -95,6 +136,8 @@ pub enum Command {
     Refresh,
     /// The selection changed; load that job's details.
     LoadDetail,
+    /// A screen was opened or moved; load what it needs.
+    LoadScreen,
 }
 
 /// The main screen.
@@ -122,6 +165,10 @@ pub struct App {
     history: BTreeMap<String, ResourceHistory>,
     /// The last `(TotalCPU, Elapsed)` seen per job, for CPU rate deltas.
     cpu_samples: BTreeMap<String, (f64, f64)>,
+    /// Full-screen panels stacked over the main view; empty means the main view.
+    stack: Vec<Screen>,
+    /// The node the shown job is on, for live monitoring.
+    metadata_node: Option<String>,
 }
 
 impl App {
@@ -149,6 +196,8 @@ impl App {
             generation: Arc::new(AtomicU64::new(0)),
             history: BTreeMap::new(),
             cpu_samples: BTreeMap::new(),
+            stack: Vec::new(),
+            metadata_node: None,
         };
         app.active.set_focused(true);
         app
@@ -203,6 +252,11 @@ impl App {
         );
         self.detail.set_stats(loaded.stats);
 
+        self.metadata_node = loaded
+            .detail
+            .as_ref()
+            .map(|detail| detail.node_list().to_string())
+            .filter(|node| crate::model::job::has_node(node));
         self.metadata
             .set_detail(loaded.detail, loaded.priority, loaded.sprio_available);
         true
@@ -238,6 +292,80 @@ impl App {
             self.cpu_samples
                 .insert(job_id.to_string(), (total_cpu, elapsed));
         }
+    }
+
+    /// Apply data that belongs to whichever screen is open.
+    ///
+    /// Every one of these is dropped when the matching screen is no longer on
+    /// top: a reply that arrives after the user has moved on has nowhere to go.
+    pub fn apply_partitions(&mut self, partitions: Vec<crate::model::PartitionInfo>) {
+        if let Some(Screen::Partitions(screen)) = self.stack.last_mut() {
+            screen.partitions.set_items(partitions);
+        }
+    }
+
+    pub fn apply_partition_jobs(&mut self, partition: &str, jobs: Vec<crate::model::PartitionJob>) {
+        if let Some(Screen::Partitions(screen)) = self.stack.last_mut() {
+            if screen.selected_partition() == Some(partition) {
+                screen.jobs.set_items(jobs);
+                screen.shown = Some(partition.to_string());
+            }
+        }
+    }
+
+    pub fn apply_nodes(&mut self, partition: &str, nodes: Vec<crate::model::NodeInfo>) {
+        if let Some(Screen::Nodes(screen)) = self.stack.last_mut() {
+            if screen.partition == partition {
+                screen.nodes.set_items(nodes);
+            }
+        }
+    }
+
+    pub fn apply_node_jobs(&mut self, node: &str, jobs: Vec<crate::model::PartitionJob>) {
+        if let Some(Screen::Nodes(screen)) = self.stack.last_mut() {
+            if screen.selected_node() == Some(node) {
+                screen.jobs.set_items(jobs);
+                screen.shown = Some(node.to_string());
+            }
+        }
+    }
+
+    pub fn apply_usage(&mut self, loaded: UsageLoaded) {
+        if let Some(Screen::Usage(screen)) = self.stack.last_mut() {
+            screen.rows.set_items(loaded.rows);
+            screen.shares = loaded.shares;
+            screen.accounting_available = loaded.accounting_available;
+            screen.loading = false;
+        }
+    }
+
+    /// Fill a live-monitoring tab with what a compute node reported.
+    pub fn apply_live(&mut self, tab: &str, content: String) {
+        match tab {
+            "cpu" => self.detail.cpu.set_content(content),
+            "gpu" => self.detail.gpu.set_content(content),
+            _ => {}
+        }
+    }
+
+    /// Which live tab, if any, is open and wants refreshing.
+    ///
+    /// Fetched only while its tab is showing: each one is an SSH round trip to a
+    /// compute node, and paying for it behind a hidden tab would be waste.
+    pub fn live_tab(&self) -> Option<&'static str> {
+        if self.config.no_live || !self.stack.is_empty() {
+            return None;
+        }
+        match self.detail.active_tab() {
+            Some("cpu") => Some("cpu"),
+            Some("gpu") if !self.config.no_gpu => Some("gpu"),
+            _ => None,
+        }
+    }
+
+    /// The node the selected job is running on, for live monitoring.
+    pub fn selected_node(&self) -> Option<String> {
+        self.metadata_node.clone()
     }
 
     /// Write a timestamped entry to the command log.
@@ -306,10 +434,55 @@ impl App {
             return self.handle_search_key(key);
         }
 
-        let Some(action) = help::lookup(self.focus.context(), &key) else {
+        let Some(action) = help::lookup(self.context(), &key) else {
             return Command::None;
         };
         self.apply_action(action)
+    }
+
+    /// The help and key context: the top screen, or the focused panel.
+    pub fn context(&self) -> Context {
+        match self.stack.last() {
+            Some(screen) => screen.context(),
+            None => self.focus.context(),
+        }
+    }
+
+    /// The screen the keys are currently driving, if any.
+    pub fn top_screen(&self) -> Option<&Screen> {
+        self.stack.last()
+    }
+
+    /// Open a full-screen panel.
+    fn push_screen(&mut self, screen: Screen) {
+        self.stack.push(screen);
+    }
+
+    /// Move the cursor on the top screen, or hand back to the main view.
+    fn screen_cursor(&mut self, delta: isize) -> Command {
+        match self.stack.last_mut() {
+            Some(Screen::Partitions(screen)) => match screen.focus {
+                Pane::Top => {
+                    screen.partitions.move_cursor(delta);
+                }
+                Pane::Bottom => {
+                    screen.jobs.move_cursor(delta);
+                }
+            },
+            Some(Screen::Nodes(screen)) => match screen.focus {
+                Pane::Top => {
+                    screen.nodes.move_cursor(delta);
+                }
+                Pane::Bottom => {
+                    screen.jobs.move_cursor(delta);
+                }
+            },
+            Some(Screen::Usage(screen)) => {
+                screen.rows.move_cursor(delta);
+            }
+            None => return Command::None,
+        }
+        Command::LoadScreen
     }
 
     fn apply_action(&mut self, action: Action) -> Command {
@@ -328,10 +501,55 @@ impl App {
             Action::PrevMetaTab => self.metadata.cycle_tab(-1),
             Action::ScrollUp => self.scroll_panel(-1),
             Action::ScrollDown => self.scroll_panel(1),
-            Action::MoveUp => return self.move_cursor(-1),
-            Action::MoveDown => return self.move_cursor(1),
+            Action::MoveUp => {
+                return if self.stack.is_empty() {
+                    self.move_cursor(-1)
+                } else {
+                    self.screen_cursor(-1)
+                }
+            }
+            Action::MoveDown => {
+                return if self.stack.is_empty() {
+                    self.move_cursor(1)
+                } else {
+                    self.screen_cursor(1)
+                }
+            }
             Action::MoveTop => return self.select_edge(false),
             Action::MoveBottom => return self.select_edge(true),
+            Action::OpenPartitions => {
+                self.push_screen(Screen::Partitions(PartitionScreen::new()));
+                return Command::LoadScreen;
+            }
+            Action::OpenUsage => {
+                let user = self.config.effective_user();
+                self.push_screen(Screen::Usage(UsageScreen::new(user)));
+                return Command::LoadScreen;
+            }
+            Action::ShowNodes => {
+                if let Some(Screen::Partitions(screen)) = self.stack.last() {
+                    if let Some(partition) = screen.selected_partition() {
+                        let screen = NodeScreen::new(partition);
+                        self.push_screen(Screen::Nodes(screen));
+                        return Command::LoadScreen;
+                    }
+                }
+            }
+            Action::SwitchPane => match self.stack.last_mut() {
+                Some(Screen::Partitions(screen)) => screen.focus = screen.focus.other(),
+                Some(Screen::Nodes(screen)) => screen.focus = screen.focus.other(),
+                _ => {}
+            },
+            Action::CycleWindow => {
+                if let Some(Screen::Usage(screen)) = self.stack.last_mut() {
+                    screen.window = screen.window.next();
+                    screen.loading = true;
+                    return Command::LoadScreen;
+                }
+            }
+            Action::Back => {
+                self.stack.pop();
+            }
         }
         Command::None
     }
@@ -467,6 +685,16 @@ impl App {
     // -- drawing ------------------------------------------------------------
 
     pub fn draw(&mut self, frame: &mut Frame) {
+        // A full-screen panel replaces the main view entirely, as it does in
+        // the Python — it is a screen, not an overlay.
+        if !self.stack.is_empty() {
+            self.draw_screen(frame);
+            if self.help_open {
+                render::help_overlay(frame, frame.area(), &help::help_lines(self.context()));
+            }
+            return;
+        }
+
         let log_lines = self
             .log
             .iter()
@@ -534,6 +762,151 @@ impl App {
         }
     }
 
+    /// Draw whichever full-screen panel is on top.
+    fn draw_screen(&mut self, frame: &mut Frame) {
+        let theme = self.theme.clone();
+        let user = self.config.effective_user();
+
+        match self.stack.last().expect("a screen is open") {
+            Screen::Partitions(screen) => {
+                let (bar, top, bottom, footer) = super::layout::stacked_layout(frame.area(), 2, 3);
+                render::summary_bar(frame, bar, screen.summary());
+
+                let rows = screen
+                    .partitions
+                    .items()
+                    .iter()
+                    .map(|partition| screen.row(partition, &theme))
+                    .collect();
+                render::simple_table(
+                    frame,
+                    top,
+                    "Partitions",
+                    &[
+                        "Partition",
+                        "Load",
+                        "Nodes A/I/O/T",
+                        "CPUs A/I/O/T",
+                        "Run",
+                        "Pend",
+                        "Limit",
+                        "GRES",
+                    ],
+                    rows,
+                    screen.partitions.selected_index(),
+                    screen.focus == Pane::Top,
+                );
+
+                let title = match screen.selected_partition() {
+                    Some(name) => format!("Jobs on {name} ({})", screen.jobs.len()),
+                    None => "Jobs on partition".to_string(),
+                };
+                let jobs = screen
+                    .jobs
+                    .items()
+                    .iter()
+                    .map(|job| super::screens::partition_job_row(job, &user))
+                    .collect();
+                render::simple_table(
+                    frame,
+                    bottom,
+                    &title,
+                    PARTITION_JOB_COLUMNS,
+                    jobs,
+                    screen.jobs.selected_index(),
+                    screen.focus == Pane::Bottom,
+                );
+                render::footer(frame, footer, SCREEN_KEYS);
+            }
+            Screen::Nodes(screen) => {
+                let (bar, top, bottom, footer) = super::layout::stacked_layout(frame.area(), 3, 2);
+                render::summary_bar(frame, bar, screen.summary());
+
+                let rows = screen
+                    .nodes
+                    .items()
+                    .iter()
+                    .map(|node| screen.row(node, &theme))
+                    .collect();
+                render::simple_table(
+                    frame,
+                    top,
+                    &format!("Nodes of {}", screen.partition),
+                    &[
+                        "Node",
+                        "State",
+                        "CPUs A/I/O/T",
+                        "Load",
+                        "Memory",
+                        "GPUs",
+                        "Reason",
+                    ],
+                    rows,
+                    screen.nodes.selected_index(),
+                    screen.focus == Pane::Top,
+                );
+
+                let title = match screen.selected_node() {
+                    Some(node) => format!("Jobs on {node} ({})", screen.jobs.len()),
+                    None => "Jobs on node".to_string(),
+                };
+                let jobs = screen
+                    .jobs
+                    .items()
+                    .iter()
+                    .map(|job| super::screens::partition_job_row(job, &user))
+                    .collect();
+                render::simple_table(
+                    frame,
+                    bottom,
+                    &title,
+                    PARTITION_JOB_COLUMNS,
+                    jobs,
+                    screen.jobs.selected_index(),
+                    screen.focus == Pane::Bottom,
+                );
+                render::footer(frame, footer, SCREEN_KEYS);
+            }
+            Screen::Usage(screen) => {
+                let (bar, top, bottom, footer) = super::layout::stacked_layout(frame.area(), 1, 3);
+                render::summary_bar(frame, bar, screen.summary());
+
+                let block = render::panel("Fair share", false);
+                let inner = block.inner(top);
+                frame.render_widget(block, top);
+                render::lines(frame, inner, &screen.fairshare_lines(), 0);
+
+                let total = screen.total_hours();
+                let rows = screen
+                    .rows
+                    .items()
+                    .iter()
+                    .filter(|row| !row.is_account_total())
+                    .map(|row| screen.row(row, total))
+                    .collect();
+                render::simple_table(
+                    frame,
+                    bottom,
+                    "Account usage",
+                    &["User", "Name", "CPU hours", "Share", "%"],
+                    rows,
+                    screen.rows.selected_index(),
+                    true,
+                );
+                render::footer(
+                    frame,
+                    footer,
+                    &[
+                        ("Esc", "back"),
+                        ("w", "window"),
+                        ("r", "refresh"),
+                        ("?", "help"),
+                    ],
+                );
+            }
+        }
+    }
+
     fn draw_detail(&mut self, frame: &mut Frame, area: ratatui::layout::Rect, searching: bool) {
         let focused = self.focus == Panel::Detail && !searching;
         let content = render::tabbed_panel(frame, area, "Job Details", self.detail.tabs(), focused);
@@ -592,15 +965,28 @@ pub async fn run(slurm: Arc<Slurm>, mut app: App, notes: Vec<String>) -> Result<
                 Command::Quit => break,
                 Command::Refresh => {
                     app.log("refresh", None);
-                    spawn_poll(slurm.clone(), events.sender());
-                    spawn_detail_load(&slurm, &mut app, events.sender());
+                    if app.top_screen().is_some() {
+                        spawn_screen_load(&slurm, &app, events.sender());
+                    } else {
+                        spawn_poll(slurm.clone(), events.sender());
+                        spawn_detail_load(&slurm, &mut app, events.sender());
+                        spawn_live_load(&slurm, &app, events.sender());
+                    }
                 }
                 Command::LoadDetail => spawn_detail_load(&slurm, &mut app, events.sender()),
+                Command::LoadScreen => spawn_screen_load(&slurm, &app, events.sender()),
                 Command::None => {}
             },
             Event::Tick => {
-                spawn_poll(slurm.clone(), events.sender());
-                spawn_detail_load(&slurm, &mut app, events.sender());
+                if app.top_screen().is_some() {
+                    // A full-screen panel is what the user is looking at, so
+                    // that is what gets refreshed.
+                    spawn_screen_load(&slurm, &app, events.sender());
+                } else {
+                    spawn_poll(slurm.clone(), events.sender());
+                    spawn_detail_load(&slurm, &mut app, events.sender());
+                    spawn_live_load(&slurm, &app, events.sender());
+                }
             }
             Event::Jobs(loaded) => {
                 let had_selection = app.shown_job.is_some();
@@ -613,6 +999,20 @@ pub async fn run(slurm: Arc<Slurm>, mut app: App, notes: Vec<String>) -> Result<
             Event::Detail(loaded) => {
                 app.apply_detail(*loaded);
             }
+            Event::Partitions(partitions) => {
+                app.apply_partitions(partitions);
+                spawn_screen_load(&slurm, &app, events.sender());
+            }
+            Event::PartitionJobs { partition, jobs } => {
+                app.apply_partition_jobs(&partition, jobs);
+            }
+            Event::Nodes { partition, nodes } => {
+                app.apply_nodes(&partition, nodes);
+                spawn_screen_load(&slurm, &app, events.sender());
+            }
+            Event::NodeJobs { node, jobs } => app.apply_node_jobs(&node, jobs),
+            Event::Usage(loaded) => app.apply_usage(*loaded),
+            Event::Live { tab, content } => app.apply_live(tab, content),
             Event::Log(action, result) => app.log(action, result),
             Event::Resize => {}
         }
@@ -696,6 +1096,91 @@ fn spawn_detail_load(slurm: &Arc<Slurm>, app: &mut App, sender: Sender) {
     });
 }
 
+/// Load whatever the open full-screen panel needs.
+///
+/// Called both when a screen opens and when its cursor moves; each branch only
+/// fetches the part that is actually out of date.
+fn spawn_screen_load(slurm: &Arc<Slurm>, app: &App, sender: Sender) {
+    let Some(screen) = app.top_screen() else {
+        return;
+    };
+    let slurm = slurm.clone();
+
+    match screen {
+        Screen::Partitions(screen) => {
+            if screen.partitions.is_empty() {
+                let sender = sender.clone();
+                let slurm = slurm.clone();
+                tokio::spawn(async move {
+                    let _ = sender.send(Event::Partitions(slurm.partitions().await));
+                });
+            }
+            if screen.needs_jobs() {
+                if let Some(partition) = screen.selected_partition().map(str::to_string) {
+                    tokio::spawn(async move {
+                        let jobs = slurm.partition_jobs(&partition, "RUNNING,PENDING").await;
+                        let _ = sender.send(Event::PartitionJobs { partition, jobs });
+                    });
+                }
+            }
+        }
+        Screen::Nodes(screen) => {
+            if screen.nodes.is_empty() {
+                let sender = sender.clone();
+                let slurm = slurm.clone();
+                let partition = screen.partition.clone();
+                tokio::spawn(async move {
+                    let nodes = slurm.partition_nodes(&partition).await;
+                    let _ = sender.send(Event::Nodes { partition, nodes });
+                });
+            }
+            if screen.needs_jobs() {
+                if let Some(node) = screen.selected_node().map(str::to_string) {
+                    tokio::spawn(async move {
+                        let jobs = slurm.node_jobs(&node).await;
+                        let _ = sender.send(Event::NodeJobs { node, jobs });
+                    });
+                }
+            }
+        }
+        Screen::Usage(screen) => {
+            let window = screen.window;
+            let user = screen.user.clone();
+            tokio::spawn(async move {
+                let (rows, shares) =
+                    tokio::join!(slurm.account_usage(window, ""), slurm.fairshare(&user));
+                let _ = sender.send(Event::Usage(Box::new(UsageLoaded {
+                    rows,
+                    shares,
+                    accounting_available: slurm.accounting_available(),
+                })));
+            });
+        }
+    }
+}
+
+/// Refresh the live cpu/gpu tab, if one is open.
+fn spawn_live_load(slurm: &Arc<Slurm>, app: &App, sender: Sender) {
+    let Some(tab) = app.live_tab() else {
+        return;
+    };
+    let Some(node) = app.selected_node() else {
+        return;
+    };
+
+    let slurm = slurm.clone();
+    let user = app.config.user.clone();
+    let job_id = app.selected_job_id().unwrap_or_default().to_string();
+
+    tokio::spawn(async move {
+        let content = match tab {
+            "gpu" => crate::slurm::gpu_status(&slurm, &node, &job_id).await,
+            _ => crate::slurm::node_processes(&slurm, &node, &user).await,
+        };
+        let _ = sender.send(Event::Live { tab, content });
+    });
+}
+
 /// Say so when the app is watching a cluster from one of its login nodes.
 fn warn_about_login_node(app: &mut App) {
     let local = hostname();
@@ -773,6 +1258,29 @@ mod tests {
             partitions: vec!["gpu:2/2/0/4".into()],
         });
         app
+    }
+
+    fn partition(name: &str) -> crate::model::PartitionInfo {
+        crate::model::PartitionInfo {
+            name: name.into(),
+            avail: "up".into(),
+            ..crate::model::PartitionInfo::default()
+        }
+    }
+
+    fn partition_job(job_id: &str) -> crate::model::PartitionJob {
+        crate::model::PartitionJob {
+            job_id: job_id.into(),
+            user: "someone".into(),
+            name: "their-job".into(),
+            state: "RUNNING".into(),
+            ..crate::model::PartitionJob::default()
+        }
+    }
+
+    /// Render whatever is on screen and return it as text.
+    fn screen_text(app: &mut App, width: u16, height: u16) -> String {
+        screen(app, width, height)
     }
 
     fn detail_for(job_id: &str, state: &str) -> JobDetail {
@@ -1148,6 +1656,181 @@ mod tests {
         for (width, height) in [(120, 40), (80, 24), (40, 12), (20, 6), (5, 3), (1, 1)] {
             screen(&mut app, width, height);
         }
+    }
+
+    #[test]
+    fn p_opens_the_partition_monitor_and_escape_closes_it() {
+        let mut app = app();
+
+        assert_eq!(app.handle_key(key(KeyCode::Char('p'))), Command::LoadScreen);
+        assert_eq!(app.context(), Context::Partitions);
+
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.top_screen().is_none());
+        assert_eq!(app.context(), Context::Jobs);
+    }
+
+    #[test]
+    fn shift_u_opens_the_usage_panel() {
+        let mut app = app();
+        assert_eq!(app.handle_key(key(KeyCode::Char('U'))), Command::LoadScreen);
+        assert_eq!(app.context(), Context::Usage);
+    }
+
+    #[test]
+    fn enter_on_a_partition_drills_into_its_nodes() {
+        let mut app = app();
+        app.handle_key(key(KeyCode::Char('p')));
+        app.apply_partitions(vec![partition("gpu"), partition("cpu")]);
+
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), Command::LoadScreen);
+        assert_eq!(app.context(), Context::Nodes);
+
+        // Escape goes back to the partition monitor, not all the way out.
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.context(), Context::Partitions);
+    }
+
+    #[test]
+    fn a_screen_takes_the_keys_from_the_main_view() {
+        let mut app = app();
+        app.handle_key(key(KeyCode::Char('p')));
+        app.apply_partitions(vec![partition("gpu"), partition("cpu")]);
+
+        // Down moves the partition cursor, not the job table's.
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.active.selected_index(), 0);
+        let Some(Screen::Partitions(screen)) = app.top_screen() else {
+            panic!("the partition monitor should be open");
+        };
+        assert_eq!(screen.selected_partition(), Some("cpu"));
+    }
+
+    #[test]
+    fn tab_switches_panes_within_a_screen() {
+        let mut app = app();
+        app.handle_key(key(KeyCode::Char('p')));
+
+        app.handle_key(key(KeyCode::Tab));
+        let Some(Screen::Partitions(screen)) = app.top_screen() else {
+            panic!("expected the partition monitor");
+        };
+        assert_eq!(screen.focus, Pane::Bottom);
+    }
+
+    #[test]
+    fn the_job_list_is_dropped_when_it_arrives_for_another_partition() {
+        let mut app = app();
+        app.handle_key(key(KeyCode::Char('p')));
+        app.apply_partitions(vec![partition("gpu"), partition("cpu")]);
+
+        // A reply for a partition the cursor has left has nowhere to go.
+        app.apply_partition_jobs("cpu", vec![partition_job("500")]);
+        let Some(Screen::Partitions(screen)) = app.top_screen() else {
+            panic!("expected the partition monitor");
+        };
+        assert!(screen.jobs.is_empty());
+
+        app.apply_partition_jobs("gpu", vec![partition_job("500")]);
+        let Some(Screen::Partitions(screen)) = app.top_screen() else {
+            panic!("expected the partition monitor");
+        };
+        assert_eq!(screen.jobs.len(), 1);
+    }
+
+    #[test]
+    fn w_cycles_the_usage_window_and_reloads() {
+        let mut app = app();
+        app.handle_key(key(KeyCode::Char('U')));
+
+        assert_eq!(app.handle_key(key(KeyCode::Char('w'))), Command::LoadScreen);
+        let Some(Screen::Usage(screen)) = app.top_screen() else {
+            panic!("expected the usage panel");
+        };
+        assert_eq!(screen.window, crate::slurm::UsageWindow::Last30Days);
+        assert!(screen.loading, "a new window means new data");
+    }
+
+    #[test]
+    fn the_help_follows_the_open_screen() {
+        let mut app = app();
+        app.handle_key(key(KeyCode::Char('p')));
+        app.handle_key(key(KeyCode::Char('?')));
+
+        let output = screen_text(&mut app, 100, 40);
+        assert!(output.contains("Partition monitor"), "{output}");
+        assert!(output.contains("A/I/O/T"), "{output}");
+    }
+
+    #[test]
+    fn draws_the_partition_monitor() {
+        let mut app = app();
+        app.handle_key(key(KeyCode::Char('p')));
+        app.apply_partitions(vec![partition("gpu"), partition("cpu")]);
+        app.apply_partition_jobs("gpu", vec![partition_job("500")]);
+
+        let output = screen_text(&mut app, 120, 40);
+        assert!(output.contains("2 partitions"), "{output}");
+        assert!(output.contains("Partitions"), "{output}");
+        assert!(output.contains("gpu"), "{output}");
+        assert!(output.contains("Jobs on gpu"), "{output}");
+        assert!(output.contains("all users"), "{output}");
+    }
+
+    #[test]
+    fn draws_the_usage_panel() {
+        let mut app = app();
+        app.handle_key(key(KeyCode::Char('U')));
+        app.apply_usage(UsageLoaded {
+            rows: vec![crate::model::UsageRow {
+                account: "physics".into(),
+                user: "robin".into(),
+                hours: 2500.0,
+                ..crate::model::UsageRow::default()
+            }],
+            shares: vec![],
+            accounting_available: true,
+        });
+
+        let output = screen_text(&mut app, 120, 40);
+        assert!(output.contains("Account usage"), "{output}");
+        assert!(output.contains("Fair share"), "{output}");
+        assert!(output.contains("2 500"), "{output}");
+    }
+
+    #[test]
+    fn screens_draw_at_awkward_sizes_without_panicking() {
+        for opener in ['p', 'U'] {
+            let mut app = app();
+            app.handle_key(key(KeyCode::Char(opener)));
+            app.apply_partitions(vec![partition("gpu")]);
+            for (width, height) in [(120, 40), (40, 12), (10, 4), (1, 1)] {
+                screen_text(&mut app, width, height);
+            }
+        }
+    }
+
+    #[test]
+    fn a_live_tab_is_only_fetched_while_it_is_showing() {
+        let mut app = app();
+        assert_eq!(app.live_tab(), None, "stdout is showing, not cpu");
+
+        app.detail.select_tab("cpu");
+        assert_eq!(app.live_tab(), Some("cpu"));
+
+        // Not while a full-screen panel is covering it.
+        app.handle_key(key(KeyCode::Char('p')));
+        assert_eq!(app.live_tab(), None);
+    }
+
+    #[test]
+    fn live_monitoring_can_be_turned_off_entirely() {
+        let mut app = App::new(Config {
+            no_live: true,
+            ..Config::default()
+        });
+        app.detail.select_tab("cpu");
+        assert_eq!(app.live_tab(), None);
     }
 
     #[test]
