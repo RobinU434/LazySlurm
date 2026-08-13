@@ -3,7 +3,10 @@
 Tracks progress against [RUST_PORT_PLAN.md](RUST_PORT_PLAN.md). One line per work
 item; update as you go, so a resumed session knows where it stopped.
 
-**Branch:** `rust-dev` · **Tests:** 364 passing · **Last updated:** 2026-08-13
+**Branch:** `rust-dev` · **Tests:** 417 passing · **Last updated:** 2026-08-13
+
+`lazyslurm` now starts, draws the main screen and quits. Verified end to end in
+a pty as well as by full-screen `TestBackend` draws.
 
 ## Layout
 
@@ -27,7 +30,7 @@ comparison against a real cluster.
 | P1 | Models, formatting, efficiency | **done** |
 | P2 | Slurm command layer: parsers, transport, queries, actions | **done** |
 | P3 | Config file, on-disk caches, CLI resolution | **done** |
-| P4 | Job tables, filtering, arrays, main screen | **state done**, rendering next |
+| P4 | Job tables, filtering, arrays, main screen | **done** |
 | P5 | Detail / metadata / help panels | not started |
 | P6 | Partition, node and usage screens | not started |
 | P7 | Actions wired to the UI, editor/pager shell-outs | not started |
@@ -86,22 +89,39 @@ CI runs the same three, plus wheel and sdist builds.
 consults the cache before guessing log paths, which is what keeps a job's logs
 reachable after `MinJobAge`.
 
-### P4 (part 1) — `src/ui/`
+### P4 — `src/ui/`
+
+**State** (no terminal or rendering type anywhere in it, per §5.2 of the plan):
 - `filter.rs` — the query language, ported from `test_filters.py`.
 - `job_table.rs` — `JobTable<T>` over both job types: filtering, array grouping
   and expansion, bookmark pinning, multi-select, the no-match placeholder,
   cursor preservation. Ported from `test_array_collapse.py`.
 
-Neither file references a terminal or a rendering type, which is what §5.2 of
-the plan requires and what makes these 60 tests possible at all.
+**Rendering and the loop:**
+- `theme.rs` — every style, replacing the 288-line stylesheet. The partition
+  hash matches the Python's byte sum, so both agree on colours.
+- `text.rs` — truncation by display column, not character count.
+- `layout.rs` — the stylesheet's fr ratios as `Constraint`s.
+- `render.rs` — job tables, cluster bar, command log, footer, filter bar.
+- `event.rs` — keys, ticks and finished queries on one channel.
+- `terminal.rs` — RAII ownership, panic hook, and the suspend helper P7 needs.
+- `app.rs` — state and key handling; `handle_key` returns a `Command` rather
+  than acting, so every keystroke is testable without a terminal.
 
-Two details worth keeping in mind when the renderer lands:
+Three things worth knowing before touching this code:
 
 - The cursor anchor is **held as state**, not read off the rows during a
   rebuild. A rebuild normally follows a change to the job list, at which point
   the existing rows index into a list that no longer matches them.
 - `Row::Job` carries an *index* into the job list, so a renderer must read jobs
   through `JobTable::job()` and must not cache rows across a poll.
+- Columns are **sized to their content**. Fixed widths made ratatui drop whole
+  columns off a 38-column panel rather than shrink them, and the job tables are
+  routinely that narrow.
+
+Keys so far: `q` quit, `/` filter (`Enter` accepts, `Esc` abandons), `r`
+refresh, `m` bookmark, `Enter` expand an array, `↑`/`↓`/`j`/`k` with wrapping
+between the two tables, `g`/`G` for the ends.
 
 ## Divergences
 
@@ -112,25 +132,29 @@ a blank where the fallback field has the answer. Worth fixing in the Python too.
 
 ## Still deferred
 
-- **`format_cluster_summary`** is not ported. It builds Rich markup, so it
-  belongs with the UI in P4 as styled spans rather than a marked-up string.
 - **Opportunistic script archiving on detail load.** `archive_batch_script` and
   the store are both in place; hooking it into the detail-load path is P7, where
   the UI decides when to spend the extra call.
+- **`Tab` / `Shift+Tab`** are unbound until P5 gives them somewhere to go: in
+  the Python they move between the detail and metadata panels.
+- **Detail and metadata panels** are placeholders that name the selected job.
 
 ## Next steps
 
-Finish P4 — rendering and the event loop, on top of the state layer above:
+P5 — the right-hand column:
 
-1. Add `ratatui` and `crossterm`. Build `ui/theme.rs` (every `Style` constant,
-   replacing the 288-line `.tcss`) and `ui/layout.rs` for the fr-ratio splits.
-2. Render `JobTable` rows into a `ratatui::Table`: markers before the name,
-   partition colours from the same `sum(bytes) % 9` hash the Python uses, state
-   colours on the Job ID cell in the active table and the State cell in the
-   terminated one.
-3. The event loop: an input task, a tick task and data tasks all feeding one
-   `mpsc` channel, with a `generation` counter to drop stale detail loads
-   instead of trying to cancel them.
-4. Key handling, including `Up`/`Down` wrapping between the two tables in both
-   directions — `move_cursor` already returns `false` at the edge for this.
-5. `format_cluster_summary` as styled spans (deferred from P2).
+1. A tab strip widget (`[`/`]` and `(`/`)`), and a `LogPane` to replace
+   Textual's `RichLog`: owns its lines, wraps to width, scrolls.
+2. Detail panel: stdout, stderr, cpu, gpu, stats. The stats tab is generated
+   text — port `_efficiency_section` literally, including the `▆▆▆▁▁▁▁▁` gauges,
+   the `<1%` rule and the sizing hint.
+3. Metadata panel: Resources, Submission, Pending, Raw. The Pending tab exists
+   only while the job is pending, and the tab cycle must skip it when absent.
+4. Detail loading with a generation counter to drop stale results, and the
+   200 ms selection debounce.
+5. `help.rs` as data, plus the cross-check test that keeps it from drifting from
+   the real bindings.
+
+**Do not port a Rich-markup parser.** Build `Line`s from styled `Span`s
+directly — the Python needs `_escape()` in `help.py` precisely because `[ / ]`
+is a keybinding that looks like markup.
