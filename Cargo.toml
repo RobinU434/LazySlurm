@@ -1,0 +1,47 @@
+[package]
+name = "lazyslurm"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "A TUI for monitoring Slurm HPC jobs"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/RobinU434/LazySlurm"
+keywords = ["slurm", "hpc", "tui", "monitoring", "jobs"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "lazyslurm"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+chrono = "0.4"
+clap = { version = "4", features = ["derive"] }
+directories = "5"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+shell-words = "1"
+thiserror = "2"
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "process",
+    "time",
+    "sync",
+    "io-util",
+    "fs",
+] }
+toml = "0.8"
+toml_edit = "0.22"
+unicode-width = "0.2"
+
+[dev-dependencies]
+pretty_assertions = "1"
+rstest = "0.23"
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
