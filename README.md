@@ -834,6 +834,35 @@ lazyslurm [-h] [-r SEC] [-d N] [-u USER] [-p PARTITION]
 | `--partition-order` | Comma-separated partition display order for cluster bar | (sinfo order) |
 | `-H`, `--remote` | SSH target for remote mode (e.g. `user@login.hpc.edu`) | (local) |
 
+## Development
+
+```bash
+uv sync --group dev        # test dependencies
+uv run pytest              # the suite
+```
+
+### Coverage
+
+```bash
+uv run pytest --cov                        # terminal report, missing lines listed
+uv run pytest --cov --cov-report=html      # browsable report in htmlcov/index.html
+uv run pytest --cov --cov-report=xml       # coverage.xml, for external tools
+```
+
+Settings live under `[tool.coverage.*]` in `pyproject.toml`: branch coverage is on,
+fully-covered files are collapsed, and the run fails below **68%** — a floor to catch a
+drop, not a target. Raise it as coverage rises. Coverage is opt-in, so a plain
+`uv run pytest` stays fast.
+
+Where it stands today (~70% overall): the parsing and model layers are well covered
+(`models.py` 97%, `slurm.py` 82%, `job_table.py` 92%), while `app.py` sits at ~43%
+because much of it is key handlers that shell out to an editor, a pager or SSH. The
+useful next targets are the widget render paths, which need no cluster.
+
+Four tests fail outside a Slurm environment and are not related to the code under test:
+two need an `sstat` binary on `PATH`, two assert a hardcoded local time. Coverage
+numbers here include those failures.
+
 ## Requirements
 
 - Python 3.10+
