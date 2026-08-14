@@ -842,6 +842,25 @@ Steady-state poll, measured on a login node: 132ms → 33ms at `--days 7`, and ~
 `r` does not force the expensive re-read: the incremental query is already current, and
 with `refresh = 0` it is the only path there is. It does refresh the cluster bar, whose
 `sinfo` data is otherwise cached for 45 seconds.
+### Version in the footer
+
+<details>
+<summary>Which build is this?</summary>
+
+The right edge of the footer names the running version:
+
+```
+ q Quit  ? Help  / Search  r Refresh                          v0.3.0+g1a2b3c4
+```
+
+A plain `v0.3.0` is a release, installed from PyPI. The `+g1a2b3c4` suffix is the
+short commit hash, and appears whenever the code came from git — an editable
+install, a clone you run in place, or `pip install git+https://...`, which records
+the commit it built from. `lazyslurm --version` prints the same string.
+
+Between a login node, a laptop and two clusters it is easy to lose track of which
+install you are looking at; a bug report that names the commit is worth rather more
+than one that names the version.
 
 </details>
 
@@ -1121,12 +1140,13 @@ lazyslurm --partition-order gpu,cpu,fat
 <summary>Every flag, with defaults</summary>
 
 ```
-lazyslurm [-h] [-r SEC] [-d N] [-u USER] [-p PARTITION]
+lazyslurm [-h] [-V] [-r SEC] [-d N] [-u USER] [-p PARTITION]
          [--no-gpu] [--no-live] [--partition-order P1,P2,...] [-H HOST]
 ```
 
 | Flag | Description | Default |
 |------|-------------|---------|
+| `-V`, `--version` | Print the version and exit — with the commit when running from a checkout | — |
 | `-r`, `--refresh` | Auto-refresh interval in seconds. Set to `0` or `off` to disable. | 5 |
 | `-d`, `--days` | How many days back to show terminated jobs | 7 |
 | `-u`, `--user` | Slurm user to monitor. When `--remote user@host` is used, defaults to the remote username. | `$USER` |

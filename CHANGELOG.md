@@ -32,6 +32,16 @@ the command, the import package and the config directory are all `lazyslurm`.
 
 ### Added
 
+- **The running version, in the footer**. The right edge of the footer now names the
+  build: `v0.3.0` for a release from PyPI, `v0.3.0+g1a2b3c4` when the code came from
+  git. The commit is read from the work tree when there is one — an editable install or
+  a clone run in place — and otherwise from what `pip` recorded when installing from a
+  VCS URL ([PEP 610](https://peps.python.org/pep-0610/)'s `direct_url.json`), so
+  `pip install git+https://...` is identified too. `lazyslurm --version` (`-V`) prints
+  the same string. Anyone running LazySlurm on more than one machine has at some point
+  wondered which of them is out of date; now the answer is on screen, and a bug report
+  can name a commit rather than a version.
+
 - **Resource monitoring: htop/nvtop-style CPU and GPU meters with history**
   ([#59](https://github.com/RobinU434/LazySlurm/issues/59)). The **cpu** tab was a `ps`
   listing and the **gpu** tab was raw `nvidia-smi` — both answered "what is running right
