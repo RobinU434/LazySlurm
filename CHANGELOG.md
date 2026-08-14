@@ -6,7 +6,33 @@ the command, the import package and the config directory are all `lazyslurm`.
 
 ## Unreleased
 
+### Added
+
+- **Fold a node open into its GPUs, in the partition monitor**
+  ([#66](https://github.com/RobinU434/LazySlurm/issues/66)). The node view stopped one
+  level too early on a GPU cluster: `7/8` says how full a node is, but not *which* device
+  is free, who has the rest, or whether they are being used. `Enter` on a node now unfolds
+  one row per GPU, each cell carrying the same kind of thing as the node cell above it —
+  identity stays identity, `Load` is already a bar on the same 0–1 scale, `Memory` keeps
+  its used/total shape.
+
+  Which devices are taken costs nothing: `sinfo` reports the allocated indices
+  (`gpu:a100:7(IDX:0-4,6-7)`), and the node view already fetches that. The two columns
+  that do cost something wait for a key — `g` resolves which job holds each GPU (one
+  `scontrol` per job on the node), `Shift+G` reads live utilisation and memory (one round
+  trip). Neither runs on the refresh: browsing a large partition would otherwise turn
+  every cursor move into a burst of round trips.
+
+  `node_expand` chooses what a row unfolds into (`gpu` by default, falling back to the CPU
+  allocation on a node with no GRES) and `gpu_column` chooses whether the GPUs column reads
+  `7/8` or `▣▣▢▣▣▣▣▣`, which shows the free slot without expanding anything.
+
 ### Changed
+
+- **A drained node's GPUs no longer read as free.** The GPUs column coloured `0/8` green
+  on a node nothing can be scheduled onto, which is exactly the wrong conclusion — the
+  same reasoning the Load column already applied by showing `—` there. Both readings of
+  the column are now dimmed for a node that is down, drained, failing or in maintenance.
 
 - **A refresh no longer re-reads the whole job history**
   ([#63](https://github.com/RobinU434/LazySlurm/issues/63)). `sacct` was 69% of every
