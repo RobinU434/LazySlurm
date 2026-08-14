@@ -2108,13 +2108,11 @@ class LazySlurmApp(App):
         await self._poll_jobs(force=True)
         if self._selected_job_id:
             await self._load_job_details(self._selected_job_id)
-            # Also refresh live monitors on explicit refresh
-            if not self.config.no_live and self._selected_node:
-                await asyncio.gather(
-                    self._load_cpu_monitor(),
-                    self._load_gpu_monitor() if not self.config.no_gpu
-                    else asyncio.sleep(0),
-                )
+            # Only the tab being looked at, the way the auto-refresh already
+            # does it. Sampling both cost a second round trip -- and, in remote
+            # mode, a serialized one -- to update a panel that is not on screen.
+            if not self.config.no_live:
+                await self._refresh_live_monitors()
         self._log("refresh", "complete")
 
     def _log(self, action: str, result: str = "") -> None:

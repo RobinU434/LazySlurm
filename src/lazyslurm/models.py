@@ -700,6 +700,11 @@ class NodeSample:
     load: tuple[float, float, float] | None = None
     error: str = ""                   # why there is nothing to show
 
+    # The /proc/stat counters this reading ended at, kept so the next sample can
+    # difference against them instead of pausing on the node to take its own
+    # second snapshot. Not displayed.
+    counters: dict[int, tuple[float, float]] = field(default_factory=dict)
+
     @property
     def busy(self) -> float:
         """Mean utilisation across the sampled cores, 0-1."""

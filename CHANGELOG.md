@@ -30,6 +30,24 @@ the command, the import package and the config directory are all `lazyslurm`.
   expensive re-read — the incremental query is already current, and with
   `refresh = 0` that keypress is the only path there is.
 
+- **The cpu and gpu tabs no longer stall a refresh**
+  ([#63](https://github.com/RobinU434/LazySlurm/issues/63)). Two things made the meter
+  and graph modes feel slow to refresh.
+
+  The sample paused for half a second *on the node*, to take the second `/proc/stat`
+  snapshot a utilisation figure needs. That snapshot is now kept from the previous
+  sample and subtracted instead, so only the first sample after opening a job pays for
+  it — the reading then covers the gap since the last refresh, the way htop reports the
+  gap since its last draw. A snapshot older than a minute is not used, since that would
+  report a minute's average as if it were the current load.
+
+  And pressing `r` sampled *both* tabs regardless of which one was on screen, spending a
+  whole extra round trip (a serialized one, in remote mode) on a panel nobody was
+  looking at. It now refreshes the visible tab, as the auto-refresh already did.
+
+  Pressing `r` on the cpu tab in graph mode, measured against a live job: **~690ms →
+  187ms**, of which the sample itself is 625ms → 99ms.
+
 ### Added
 
 - **The running version, in the footer**. The right edge of the footer now names the
