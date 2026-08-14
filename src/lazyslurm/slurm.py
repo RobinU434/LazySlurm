@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shlex
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
@@ -12,6 +13,8 @@ from pathlib import Path
 
 from lazyslurm.ssh import PromptCallback, SSHSession, quote_argv
 from lazyslurm.models import (
+    _gres_entries,
+    gres_indices,
     CompletedJob,
     array_task_count,
     Config,
@@ -20,6 +23,7 @@ from lazyslurm.models import (
     GpuSample,
     JobDetail,
     JobStats,
+    NodeDevice,
     NodeInfo,
     NodeSample,
     PartitionInfo,
@@ -1900,6 +1904,71 @@ def _as_float(value: str) -> float:
         return float(value.strip())
     except (ValueError, AttributeError):
         return 0.0
+
+
+# One "Nodes=... CPU_IDs=... Mem=... GRES=..." line of `scontrol show job -d`,
+# which is the only place Slurm says *which* device a job was given.
+_JOB_ALLOC = re.compile(
+    r"Nodes=(?P<nodes>\S+)\s+CPU_IDs=(?P<cpus>\S+)\s+Mem=\S+\s+GRES=(?P<gres>\S*)"
+)
+
+
+def expand_node_spec(spec: str) -> list[str]:
+    """``cn[1-3],cn9`` -> ``["cn1", "cn2", "cn3", "cn9"]``.
+
+    A multi-node job reports its allocation against a bracketed host list, so
+    matching the spec literally would drop the owner of every GPU held by a job
+    spanning more than one node.
+    """
+    names: list[str] = []
+    for match in re.finditer(r"([^,\[\]]+)(?:\[([^\]]*)\])?", spec or ""):
+        prefix, ranges = match.group(1), match.group(2)
+        if not prefix:
+            continue
+        if not ranges:
+            names.append(prefix)
+            continue
+        for part in ranges.split(","):
+            lo, _, hi = part.partition("-")
+            if lo.isdigit() and hi.isdigit():
+                width = len(lo)
+                names.extend(f"{prefix}{i:0{width}d}" for i in range(int(lo), int(hi) + 1))
+            elif lo:
+                names.append(f"{prefix}{lo}")
+    return names
+
+
+def parse_job_allocation(stdout: str, node: str) -> tuple[str, list[int]]:
+    """What one job holds on `node`: (CPU count, GPU indices)."""
+    for match in _JOB_ALLOC.finditer(stdout):
+        if node not in expand_node_spec(match.group("nodes")):
+            continue
+        cpus = len(parse_cpu_list(match.group("cpus")))
+        indices: list[int] = []
+        for _, _, detail in _gres_entries(match.group("gres")):
+            indices.extend(gres_indices(detail))
+        return (str(cpus) if cpus else ""), indices
+    return "", []
+
+
+async def get_device_owners(
+    node: str, jobs: Iterable[tuple[str, str, str]],
+) -> dict[int, tuple[str, str, str, str]]:
+    """Map GPU index -> (job id, user, name, cpus) for the jobs on `node`.
+
+    One `scontrol show job -d` per job: it refuses a comma-separated list, and
+    asking for every job on the cluster instead costs ~360ms and most of a
+    megabyte. Only ever called when the user presses the key for it.
+    """
+    owners: dict[int, tuple[str, str, str, str]] = {}
+    for job_id, user, name in jobs:
+        stdout, _, rc = await _run_cmd("scontrol", "show", "job", "-d", job_id)
+        if rc != 0 or not stdout.strip():
+            continue
+        cpus, indices = parse_job_allocation(stdout, node)
+        for index in indices:
+            owners[index] = (job_id, user, name, cpus)
+    return owners
 
 
 def parse_sinfo_nodes(stdout: str) -> list[NodeInfo]:

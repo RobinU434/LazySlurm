@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 
 
@@ -35,6 +36,10 @@ class Config:
     # "meter" (per-core and per-GPU bars) or "graph" (meters plus history).
     # Shift+M cycles it at runtime; see RESOURCE_MONITOR_MODES below.
     resource_monitor: str = "graph"
+    # What expanding a node row in the partition monitor unfolds into, and how
+    # that node's GPUs column reads. See NODE_EXPAND_MODES / GPU_COLUMN_MODES.
+    node_expand: str = "gpu"
+    gpu_column: str = "count"
 
 
 def _array_ranges(job_id: str) -> list[tuple[int, int, int]]:
@@ -186,6 +191,90 @@ def gres_count(spec: str) -> int:
         except ValueError:
             continue
     return total
+
+
+# gpu[:model]:count[(detail)] -- one entry of a GRES string. Not a split on
+# "," : the index list inside (IDX:0,2-7) has commas of its own, and splitting
+# on them lands mid-parenthesis.
+_GRES_ENTRY = re.compile(r"gpu:(?:([^:,()]+):)?(\d+)(?:\(([^)]*)\))?")
+
+
+def _gres_entries(spec: str) -> list[tuple[str, int, str]]:
+    """``gpu:a100:8(IDX:0-7),mps:100`` -> ``[("a100", 8, "IDX:0-7")]``."""
+    return [
+        (match.group(1) or "", int(match.group(2)), match.group(3) or "")
+        for match in _GRES_ENTRY.finditer(spec or "")
+    ]
+
+
+def gres_indices(detail: str) -> list[int]:
+    """The indices in an ``IDX:0,2-7`` fragment. ``IDX:N/A`` means none.
+
+    A node with nothing allocated reports ``gpu:rtx2080ti:0(IDX:N/A)``. Reading
+    that as index 0 would show the first GPU busy on every idle node.
+    """
+    _, _, spec = (detail or "").partition("IDX:")
+    spec = spec.strip()
+    if not spec or spec.startswith("N/A"):
+        return []
+    out: list[int] = []
+    for part in spec.split(","):
+        lo, _, hi = part.strip().partition("-")
+        if lo.isdigit() and hi.isdigit():
+            out.extend(range(int(lo), int(hi) + 1))
+        elif lo.isdigit():
+            out.append(int(lo))
+    return out
+
+
+def gres_devices(gres: str, gres_used: str) -> list[NodeDevice]:
+    """One :class:`NodeDevice` per configured GPU, marked busy or free.
+
+    Both strings come from the `sinfo -N` the node screen already runs, so this
+    costs nothing: ``gpu:a100:8(S:0-1)`` says how many there are and what they
+    are, ``gpu:a100:7(IDX:0-4,6-7)`` says which of them are taken -- which is
+    the question "7/8" cannot answer.
+    """
+    configured = _gres_entries(gres)
+    if not configured:
+        return []
+    model, total, _ = configured[0]
+    busy: set[int] = set()
+    for _, _, detail in _gres_entries(gres_used):
+        busy.update(gres_indices(detail))
+    return [NodeDevice(index=i, model=model, busy=i in busy) for i in range(total)]
+
+
+# What expanding a node row in the partition monitor unfolds into. "gpu" falls
+# back to the CPU block on a node with no GRES, so a CPU partition still
+# expands into something useful.
+NODE_EXPAND_MODES = ("gpu", "cpu", "both", "off")
+
+# How the node table's GPUs column renders: "7/8", or one mark per device.
+GPU_COLUMN_MODES = ("count", "glyphs")
+
+
+@dataclass
+class NodeDevice:
+    """One GPU of a node, as a child row under it.
+
+    ``busy`` comes from sinfo and is always known. The rest is filled in on
+    demand -- the owner from scontrol, the utilisation from nvidia-smi -- and
+    stays None until the user asks for it, because each costs a round trip.
+    """
+
+    index: int
+    model: str = ""
+    busy: bool = False
+    job_id: str = ""
+    user: str = ""
+    name: str = ""
+    cpus: str = ""
+    util: float | None = None
+    mem_used: float | None = None     # bytes
+    mem_total: float | None = None    # bytes
+    power: float | None = None        # watts
+    power_limit: float | None = None  # watts
 
 
 @dataclass

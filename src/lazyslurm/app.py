@@ -39,6 +39,7 @@ from lazyslurm.widgets.usage_view import UsageTable, format_hours
 from lazyslurm.widgets.version_footer import VersionFooter
 from lazyslurm.widgets.partition_view import (
     NodeSelected,
+    set_node_display,
     NodeTable,
     PartitionJobTable,
     PartitionSelected,
@@ -397,6 +398,8 @@ class NodeScreen(Screen):
         Binding("escape", "close", "Back"),
         Binding("q", "close", "Back"),
         Binding("r", "refresh_now", "Refresh"),
+        Binding("g", "resolve_owners", "Who has the GPUs"),
+        Binding("G", "resolve_usage", "GPU usage", show=False),
         Binding("tab", "focus_other", "Switch Panel", show=False),
         Binding("shift+tab", "focus_other", show=False),
     ]
@@ -462,6 +465,79 @@ class NodeScreen(Screen):
 
     async def action_refresh_now(self) -> None:
         await self._refresh_nodes()
+
+    async def action_resolve_owners(self) -> None:
+        """`g`: fill in who holds each GPU of the highlighted node.
+
+        One `scontrol show job -d` per job on the node. Not automatic, and not
+        on the poll: browsing a large partition would otherwise turn every
+        cursor move into a burst of round trips.
+        """
+        table = self.query_one("#node-table", NodeTable)
+        node = table.get_selected_node()
+        info = table.get_node(node) if node else None
+        if not node or info is None:
+            return
+        devices = table.devices_of(info)
+        if not devices:
+            return
+        job_table = self.query_one("#node-jobs", PartitionJobTable)
+        jobs = [(j.job_id, j.user, j.name) for j in job_table.jobs()]
+        owners = await slurm.get_device_owners(node, jobs)
+        if not owners:
+            # A key that appears to do nothing is worse than one that explains
+            # itself: usually the node's GPUs are simply all free.
+            self.notify(f"No GPU owners to resolve on {node}", timeout=4)
+            return
+        for device in devices:
+            owner = owners.get(device.index)
+            if owner:
+                device.job_id, device.user, device.name, device.cpus = owner
+        table.set_devices(node, devices)
+        table.expand(node)
+
+    async def action_resolve_usage(self) -> None:
+        """`Shift+G`: live utilisation and memory for the highlighted node."""
+        table = self.query_one("#node-table", NodeTable)
+        node = table.get_selected_node()
+        info = table.get_node(node) if node else None
+        if not node or info is None or self.config.no_live:
+            return
+        devices = table.devices_of(info)
+        if not devices:
+            return
+        reading = await slurm.get_gpu_sample(node)
+        if not reading.gpus:
+            self.notify(
+                f"Could not read GPU usage on {node}", severity="warning", timeout=6,
+            )
+            return
+        if len(reading.gpus) != len(devices):
+            # Slurm confines an ssh session to the cgroup of whatever job it
+            # lands in, so nvidia-smi can report a subset -- renumbered from 0,
+            # which does NOT line up with Slurm's IDX. Attributing those figures
+            # to devices by position would put another job's utilisation on the
+            # wrong row, so refuse rather than guess.
+            self.notify(
+                f"{node} reported {len(reading.gpus)} of {len(devices)} GPUs — "
+                "the session is confined to one job's devices, so the readings "
+                "cannot be matched to devices",
+                severity="warning",
+                timeout=8,
+            )
+            return
+        by_index = {gpu.index: gpu for gpu in reading.gpus}
+        for device in devices:
+            gpu = by_index.get(device.index)
+            if gpu is None:
+                continue
+            device.util = gpu.util
+            device.mem_used = gpu.mem_used
+            device.mem_total = gpu.mem_total
+            device.power = gpu.power
+            device.power_limit = gpu.power_limit
+        table.set_devices(node, devices)
+        table.expand(node)
 
     def action_focus_other(self) -> None:
         table = self.query_one("#node-table", NodeTable)
@@ -891,6 +967,10 @@ class LazySlurmApp(App):
             max_partition=self.config.max_partition_width,
             abbreviate=self.config.abbreviate_states,
             collapse_arrays=self.config.collapse_arrays,
+        )
+        set_node_display(
+            node_expand=self.config.node_expand,
+            gpu_column=self.config.gpu_column,
         )
 
         # Prune old cache entries. Point the script cache at the configured
@@ -1974,7 +2054,9 @@ class LazySlurmApp(App):
         from lazyslurm import config as persistent_config
         from lazyslurm.__main__ import (
             parse_cache_max_age,
+            parse_gpu_column,
             parse_interactive_shell,
+            parse_node_expand,
             parse_resource_monitor,
             unknown_config_keys,
         )
@@ -1996,6 +2078,15 @@ class LazySlurmApp(App):
         )
         if monitor_warning:
             self._log("config file", monitor_warning)
+        node_expand, expand_warning = parse_node_expand(
+            saved.get("node_expand", old.node_expand)
+        )
+        gpu_column, column_warning = parse_gpu_column(
+            saved.get("gpu_column", old.gpu_column)
+        )
+        for warning in (expand_warning, column_warning):
+            if warning:
+                self._log("config file", warning)
 
         # Rebuild config from file, preserving CLI-only values (remote, user)
         self.config = Config(
@@ -2022,6 +2113,8 @@ class LazySlurmApp(App):
             ),
             interactive_shell=shell,
             resource_monitor=monitor,
+            node_expand=node_expand,
+            gpu_column=gpu_column,
         )
         # An edit to the file is an explicit choice, so it wins over whatever
         # Shift+M left the session on.
@@ -2048,6 +2141,10 @@ class LazySlurmApp(App):
             abbreviate=self.config.abbreviate_states,
             collapse_arrays=self.config.collapse_arrays,
         )
+        set_node_display(
+            node_expand=self.config.node_expand,
+            gpu_column=self.config.gpu_column,
+        )
 
         # Log what changed
         changes = []
@@ -2055,7 +2152,7 @@ class LazySlurmApp(App):
             "refresh", "days", "user", "partition", "no_gpu", "no_live",
             "editor", "max_name_width", "max_partition_width", "abbreviate_states",
             "partition_order", "cache_max_age_days", "script_cache_dir",
-            "interactive_shell", "resource_monitor",
+            "interactive_shell", "resource_monitor", "node_expand", "gpu_column",
         ):
             old_val = getattr(old, field)
             new_val = getattr(self.config, field)
