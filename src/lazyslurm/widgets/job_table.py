@@ -343,6 +343,16 @@ class _BaseJobTable(DataTable):
                 self.post_message(JobSelected(job_id, self.SOURCE))
 
     def update_jobs(self, jobs: list) -> None:
+        # Rendering every row to find out that none of them changed is the most
+        # expensive thing a poll does once the history window is wide -- 45ms
+        # for 4000 terminated jobs, which is most of the poll now that sacct is
+        # cached. _apply_diff would discover the same thing, but only after the
+        # rows have been built. Comparing the jobs first costs ~1ms.
+        #
+        # Only the polled data is checked here: a filter, a bookmark or a
+        # display change comes through its own method and rebuilds regardless.
+        if jobs == self._all_jobs and not self._force_next:
+            return
         self._all_jobs = jobs
         self._rebuild()
 

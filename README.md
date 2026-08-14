@@ -820,6 +820,31 @@ The bottom-right panel shows a timestamped log of all actions and their results:
 
 </details>
 
+### What a refresh costs
+
+<details>
+<summary>Why a wide <code>--days</code> window is no longer slow</summary>
+
+`sacct` gets expensive as the history window grows — on one cluster, 112ms for seven
+days, 1.5 seconds for thirty, 4.5 for ninety. LazySlurm used to pay that on every
+refresh, to be told the same thing each time: a job that has ended does not change
+again.
+
+The window is now read once and held in memory. Each refresh re-reads only the last
+couple of minutes and merges the result, which still catches a job that started days
+ago and ended a moment ago — `sacct --starttime` selects jobs in any state *during* the
+window, not jobs that started in it. Every ten minutes the whole window is re-read
+anyway, in case an accounting row was revised after the fact.
+
+Steady-state poll, measured on a login node: 132ms → 33ms at `--days 7`, and ~1.6s →
+44ms at `--days 30`. A wide window now costs its full price only once, at startup.
+
+`r` does not force the expensive re-read: the incremental query is already current, and
+with `refresh = 0` it is the only path there is. It does refresh the cluster bar, whose
+`sinfo` data is otherwise cached for 45 seconds.
+
+</details>
+
 ## Job Cache
 
 Slurm forgets a job shortly after it ends — `MinJobAge` seconds, often just 300. Until
