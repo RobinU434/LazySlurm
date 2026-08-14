@@ -231,7 +231,8 @@ def test_run_cmd_goes_through_the_session_in_remote_mode(monkeypatch):
         monkeypatch.setattr(slurm, "_config", Config(remote="user@login"))
         session = _local_session()
         await session.connect()
-        monkeypatch.setattr(slurm, "_session", session)
+        monkeypatch.setattr(slurm, "_sessions", {"host": session})
+        monkeypatch.setattr(slurm, "_attached", "host")
         try:
             # Arguments are shell-quoted into one command line for the channel.
             out, _, rc = await slurm._run_cmd("echo", "a b", "c'd")
@@ -245,7 +246,8 @@ def test_run_cmd_goes_through_the_session_in_remote_mode(monkeypatch):
 
 def test_run_cmd_without_a_session_reports_instead_of_hanging(monkeypatch):
     monkeypatch.setattr(slurm, "_config", Config(remote="user@login"))
-    monkeypatch.setattr(slurm, "_session", None)
+    monkeypatch.setattr(slurm, "_sessions", {})
+    monkeypatch.setattr(slurm, "_attached", "")
     out, err, rc = _run(slurm._run_cmd("squeue"))
     assert (out, rc) == ("", 1)
     assert "not connected" in err
@@ -270,7 +272,8 @@ def test_node_hop_runs_from_the_login_node(monkeypatch):
     """
     recorder = _RecordingSession()
     monkeypatch.setattr(slurm, "_config", Config(remote="user@login"))
-    monkeypatch.setattr(slurm, "_session", recorder)
+    monkeypatch.setattr(slurm, "_sessions", {"host": recorder})
+    monkeypatch.setattr(slurm, "_attached", "host")
 
     out, rc = _run(slurm._ssh_cmd("gpu001", "nvidia-smi -L"))
     assert (out, rc) == ("ok\n", 0)
@@ -285,7 +288,8 @@ def test_node_hop_runs_from_the_login_node(monkeypatch):
 
 def test_local_mode_still_ssh_directly_to_the_node(monkeypatch):
     monkeypatch.setattr(slurm, "_config", Config())  # no remote
-    monkeypatch.setattr(slurm, "_session", None)
+    monkeypatch.setattr(slurm, "_sessions", {})
+    monkeypatch.setattr(slurm, "_attached", "")
     captured = {}
 
     async def _fake_exec(*args, **kwargs):

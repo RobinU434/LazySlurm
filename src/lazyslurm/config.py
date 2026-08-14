@@ -24,6 +24,32 @@ CONFIG_FILE = CONFIG_DIR / "config.toml"
 LOG_CACHE_FILE = CONFIG_DIR / "log_cache.json"
 SCRIPT_CACHE_DIR = CONFIG_DIR / "scripts"
 
+# Which cluster the cached job ids belong to. Slurm numbers jobs from 1 on every
+# cluster, so job 4815 exists on all of them and means something different on
+# each; without this level the caches hand one cluster's log paths and batch
+# script to another. Set at startup by set_cluster(); "local" until then, which
+# is also where a single-cluster user's existing cache is migrated to.
+DEFAULT_CLUSTER = "local"
+CLUSTER = DEFAULT_CLUSTER
+
+# The format version of log_cache.json. 1 (implicit) is the flat {job_id: entry}
+# layout that predates cluster keying.
+LOG_CACHE_VERSION = 2
+
+
+def cluster_key(name: str) -> str:
+    """A cluster name safe to use as a directory and a JSON key."""
+    cleaned = "".join(
+        c if c.isalnum() or c in "-_." else "-" for c in (name or "").strip()
+    ).strip("-.")
+    return cleaned or DEFAULT_CLUSTER
+
+
+def set_cluster(name: str) -> None:
+    """Name the cluster whose jobs are being cached (called at startup)."""
+    global CLUSTER
+    CLUSTER = cluster_key(name)
+
 
 def load() -> dict:
     """Load persistent config. Returns empty dict if file doesn't exist."""
@@ -247,26 +273,56 @@ def set_partition_colors(colors: dict[str, str]) -> None:
 # ---------------------------------------------------------------------------
 # Log path cache — remembers StdOut/StdErr paths from scontrol
 # ---------------------------------------------------------------------------
-# Format: {"<job_id>": {"stdout": "...", "stderr": "...", "command": "...", "workdir": "...", "ts": <epoch>}, ...}
+# Format: {"version": 2, "clusters": {"<cluster>": {"<job_id>": {"stdout": ...,
+# "stderr": ..., "command": ..., "workdir": ..., "ts": <epoch>}}}}
+#
+# The cluster level is not decoration: job ids are per-cluster, so without it
+# one cluster's log paths and batch script are served for another's job of the
+# same number (#61).
+
+
+def _load_document() -> dict:
+    """The whole cache file, in the current format.
+
+    A file from before cluster keying is a flat {job_id: entry} map. It is read
+    as the *current* cluster's entries rather than discarded -- whoever wrote it
+    had one cluster, and that is the one they were using.
+    """
+    if not LOG_CACHE_FILE.exists():
+        return {"version": LOG_CACHE_VERSION, "clusters": {}}
+    try:
+        data = json.loads(LOG_CACHE_FILE.read_text())
+    except (OSError, ValueError):
+        # Truncated or corrupt cache — it is a cache, so rebuild it.
+        return {"version": LOG_CACHE_VERSION, "clusters": {}}
+    if not isinstance(data, dict):
+        return {"version": LOG_CACHE_VERSION, "clusters": {}}
+    clusters = data.get("clusters")
+    if isinstance(clusters, dict):
+        return {"version": LOG_CACHE_VERSION, "clusters": clusters}
+    flat = {k: v for k, v in data.items() if isinstance(v, dict)}
+    return {"version": LOG_CACHE_VERSION, "clusters": {CLUSTER: flat} if flat else {}}
 
 
 def _load_log_cache() -> dict:
-    if not LOG_CACHE_FILE.exists():
-        return {}
-    try:
-        return json.loads(LOG_CACHE_FILE.read_text())
-    except (OSError, ValueError):
-        # Truncated or corrupt cache — it is a cache, so rebuild it.
-        return {}
+    """This cluster's entries."""
+    return _load_document()["clusters"].get(CLUSTER, {})
 
 
-def _save_log_cache(cache: dict) -> None:
+def _save_document(document: dict) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     # Write via a temp file + rename so a concurrent reader never sees a
     # half-written file (the TUI and a resubmit can both touch this).
     tmp = LOG_CACHE_FILE.with_suffix(f".tmp{os.getpid()}")
-    tmp.write_text(json.dumps(cache))
+    tmp.write_text(json.dumps(document))
     os.replace(tmp, LOG_CACHE_FILE)
+
+
+def _save_log_cache(cache: dict) -> None:
+    """Replace this cluster's entries, leaving every other cluster's alone."""
+    document = _load_document()
+    document["clusters"][CLUSTER] = cache
+    _save_document(document)
 
 
 def cache_job_paths(
@@ -337,14 +393,100 @@ def get_cached_command(job_id: str) -> tuple[str | None, str | None]:
 
 
 def prune_log_cache(max_age_days: int | None = 30) -> None:
-    """Remove cache entries older than max_age_days. None = never prune."""
+    """Remove cache entries older than max_age_days. None = never prune.
+
+    Every cluster is pruned, not just the current one: the entries of a cluster
+    not connected to today would otherwise never age out. A cluster left with
+    nothing is dropped.
+    """
     if max_age_days is None:
         return
-    cache = _load_log_cache()
+    document = _load_document()
     cutoff = time.time() - max_age_days * 86400
-    pruned = {k: v for k, v in cache.items() if v.get("ts", 0) > cutoff}
-    if len(pruned) < len(cache):
-        _save_log_cache(pruned)
+    kept: dict[str, dict] = {}
+    removed = 0
+    for cluster, entries in document["clusters"].items():
+        fresh = {
+            job_id: entry for job_id, entry in entries.items()
+            if isinstance(entry, dict) and entry.get("ts", 0) > cutoff
+        }
+        removed += len(entries) - len(fresh)
+        if fresh:
+            kept[cluster] = fresh
+    if removed or kept.keys() != document["clusters"].keys():
+        document["clusters"] = kept
+        _save_document(document)
+
+
+# ---------------------------------------------------------------------------
+# Known clusters — the ones this install has connected to
+# ---------------------------------------------------------------------------
+# Format: {"version": 1, "clusters": [{"host": ..., "cluster": ..., "user": ...,
+#          "last_seen": <epoch>}]}
+#
+# Remembered state, not configuration, so it lives beside log_cache.json rather
+# than in config.toml — which is hand-edited and comment-preserving (#62).
+
+CLUSTERS_FILE = CONFIG_DIR / "clusters.json"
+CLUSTERS_VERSION = 1
+
+
+def known_clusters() -> list[dict]:
+    """Every cluster connected to before, most recently seen first."""
+    if not CLUSTERS_FILE.exists():
+        return []
+    try:
+        data = json.loads(CLUSTERS_FILE.read_text())
+    except (OSError, ValueError):
+        return []
+    entries = data.get("clusters") if isinstance(data, dict) else None
+    if not isinstance(entries, list):
+        return []
+    clean = [e for e in entries if isinstance(e, dict) and e.get("host")]
+    return sorted(clean, key=lambda e: e.get("last_seen", 0), reverse=True)
+
+
+def remember_cluster(host: str, cluster: str = "", user: str = "") -> None:
+    """Record a successful connection, or refresh what is known about one.
+
+    Keyed by the SSH target rather than the cluster name: the target is what
+    reconnecting needs, and it is known before the cluster can be asked its
+    name. A second target for the same cluster is a separate row, which is
+    honest -- they are different routes and may not behave the same.
+    """
+    host = (host or "").strip()
+    if not host:
+        return
+    entries = [e for e in known_clusters() if e.get("host") != host]
+    entry = {"host": host, "last_seen": time.time()}
+    if cluster:
+        entry["cluster"] = cluster
+    if user:
+        entry["user"] = user
+    entries.append(entry)
+    _write_clusters(entries)
+
+
+def forget_cluster(host: str) -> bool:
+    """Drop a remembered cluster. True if there was one."""
+    entries = known_clusters()
+    remaining = [e for e in entries if e.get("host") != host]
+    if len(remaining) == len(entries):
+        return False
+    _write_clusters(remaining)
+    return True
+
+
+def _write_clusters(entries: list[dict]) -> None:
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = CLUSTERS_FILE.with_suffix(f".tmp{os.getpid()}")
+        tmp.write_text(json.dumps(
+            {"version": CLUSTERS_VERSION, "clusters": entries}, indent=2,
+        ))
+        os.replace(tmp, CLUSTERS_FILE)
+    except OSError:
+        pass  # a list of clusters is not worth failing a session over
 
 
 # ---------------------------------------------------------------------------
@@ -354,7 +496,11 @@ def prune_log_cache(max_age_days: int | None = 30) -> None:
 # (300s on many clusters), so `scontrol write batch_script` fails for anything
 # older. Archiving the text — rather than the path, which the user may edit,
 # move, or delete — is what makes an old job's script recoverable at all.
-# Layout: <SCRIPT_CACHE_DIR>/<base_job_id>.sh
+# Layout: <SCRIPT_CACHE_DIR>/<cluster>/<base_job_id>.sh
+#
+# Per cluster, because this one is not merely a stale cache when it collides:
+# `b` would show another cluster's script, and resubmit falls back to the
+# archive when the original file is gone, so `s` would submit it (#61).
 
 
 def set_script_cache_dir(path: str | Path | None) -> None:
@@ -384,7 +530,38 @@ def script_cache_path(job_id: str) -> Path | None:
     base = base_job_id(job_id)
     if not base:
         return None
-    return SCRIPT_CACHE_DIR / f"{base}.sh"
+    return SCRIPT_CACHE_DIR / CLUSTER / f"{base}.sh"
+
+
+def migrate_script_cache() -> int:
+    """Move a pre-cluster archive under the current cluster. Returns the count.
+
+    The scripts sitting directly in the archive directory were written before
+    it was keyed by cluster, by someone who had one cluster -- the one they are
+    on now. Left where they are they would simply stop being found.
+    """
+    try:
+        loose = [p for p in SCRIPT_CACHE_DIR.glob("*.sh") if p.is_file()]
+    except OSError:
+        return 0
+    if not loose:
+        return 0
+    target = SCRIPT_CACHE_DIR / CLUSTER
+    moved = 0
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        os.chmod(target, 0o700)
+    except OSError:
+        return 0
+    for path in loose:
+        try:
+            destination = target / path.name
+            if not destination.exists():
+                os.replace(path, destination)
+                moved += 1
+        except OSError:
+            pass
+    return moved
 
 
 def get_cached_script(job_id: str) -> Path | None:
@@ -426,7 +603,10 @@ def prune_script_cache(max_age_days: int | None = 30) -> None:
         return
     cutoff = time.time() - max_age_days * 86400
     try:
+        # Both layouts: <cluster>/<id>.sh, and anything left directly in the
+        # directory by a version that predates the cluster level.
         scripts = list(SCRIPT_CACHE_DIR.glob("*.sh"))
+        scripts += list(SCRIPT_CACHE_DIR.glob("*/*.sh"))
     except OSError:
         return
     for path in scripts:

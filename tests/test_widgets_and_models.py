@@ -292,7 +292,7 @@ def test_script_cache_round_trip(tmp_path, monkeypatch):
     assert cfg.get_cached_script("777") is None
     path = cfg.cache_script("777", "#!/bin/bash\necho hi\n")
     assert path is not None
-    assert path == tmp_path / "scripts" / "777.sh"
+    assert path == tmp_path / "scripts" / cfg.CLUSTER / "777.sh"
     assert cfg.get_cached_script("777") == path
     assert path.read_text() == "#!/bin/bash\necho hi\n"
 
@@ -302,8 +302,8 @@ def test_script_cache_array_task_shares_base(tmp_path, monkeypatch):
 
     cfg.cache_script("777", "#!/bin/bash\n")
     # All tasks of an array resolve to the one script written for the base id.
-    assert cfg.get_cached_script("777_11") == tmp_path / "scripts" / "777.sh"
-    assert cfg.get_cached_script("777_[1-40]") == tmp_path / "scripts" / "777.sh"
+    assert cfg.get_cached_script("777_11") == tmp_path / "scripts" / cfg.CLUSTER / "777.sh"
+    assert cfg.get_cached_script("777_[1-40]") == tmp_path / "scripts" / cfg.CLUSTER / "777.sh"
 
 
 def test_cache_script_rejects_empty(tmp_path, monkeypatch):
@@ -333,8 +333,8 @@ def test_cache_script_permissions(tmp_path, monkeypatch):
 def test_get_cached_script_ignores_empty_file(tmp_path, monkeypatch):
     _script_cache(tmp_path, monkeypatch)
 
-    (tmp_path / "scripts").mkdir()
-    (tmp_path / "scripts" / "777.sh").write_text("")
+    (tmp_path / "scripts" / cfg.CLUSTER).mkdir(parents=True)
+    (tmp_path / "scripts" / cfg.CLUSTER / "777.sh").write_text("")
     # A truncated write must not open as a blank buffer.
     assert cfg.get_cached_script("777") is None
 
@@ -368,10 +368,10 @@ def test_set_script_cache_dir(tmp_path, monkeypatch):
     _script_cache(tmp_path, monkeypatch)
 
     cfg.set_script_cache_dir(tmp_path / "custom")
-    assert cfg.script_cache_path("777") == tmp_path / "custom" / "777.sh"
+    assert cfg.script_cache_path("777") == tmp_path / "custom" / cfg.CLUSTER / "777.sh"
     # Falsy input keeps the current directory (empty config value = use default).
     cfg.set_script_cache_dir("")
-    assert cfg.script_cache_path("777") == tmp_path / "custom" / "777.sh"
+    assert cfg.script_cache_path("777") == tmp_path / "custom" / cfg.CLUSTER / "777.sh"
 
 
 # ---------------------------------------------------------------------------

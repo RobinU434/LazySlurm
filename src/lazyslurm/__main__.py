@@ -41,6 +41,7 @@ _FILE_ONLY_KEYS = frozenset({
     "node_expand",
     "gpu_column",
     "config_version",
+    "cluster_name",
 })
 
 KNOWN_CONFIG_KEYS = frozenset(_CONFIG_KEYS) | _FILE_ONLY_KEYS
@@ -379,6 +380,7 @@ def main() -> None:
         resource_monitor=resource_monitor,
         node_expand=node_expand,
         gpu_column=gpu_column,
+        cluster_name=str(saved.get("cluster_name", "")).strip(),
     )
 
     # Bail out before the TUI starts rather than crashing on the first poll:
@@ -386,8 +388,22 @@ def main() -> None:
     # nothing about what to do instead.
     absent = missing_commands(str(resolved["remote"]))
     if absent:
-        print(_no_slurm_message(absent, str(resolved["remote"])), file=sys.stderr)
-        raise SystemExit(1)
+        # No Slurm here and no --remote is not necessarily an error: it is what
+        # running LazySlurm on your own machine looks like, and the clusters you
+        # have connected to before are exactly what you need to get somewhere.
+        # Only when there is no ssh either — or no cluster to offer — is there
+        # genuinely nothing to show (#62).
+        from lazyslurm import config as persistent_config
+
+        browsable = (
+            not resolved["remote"]
+            and shutil.which("ssh") is not None
+            and persistent_config.known_clusters()
+        )
+        if not browsable:
+            print(_no_slurm_message(absent, str(resolved["remote"])), file=sys.stderr)
+            raise SystemExit(1)
+        config.start_in_browser = True
 
     from lazyslurm.app import LazySlurmApp
     app = LazySlurmApp(

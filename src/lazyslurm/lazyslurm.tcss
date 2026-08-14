@@ -165,6 +165,27 @@
     border-title-color: $accent;
 }
 
+/* Cluster browser */
+#cluster-bar-top {
+    dock: top;
+    height: 1;
+    background: transparent;
+    color: $text-muted;
+    padding: 0 1;
+}
+
+#cluster-table {
+    height: 1fr;
+    border: round $secondary-background-lighten-2;
+    border-title-color: $text-muted;
+    border-title-align: center;
+}
+
+#cluster-table:focus-within {
+    border: round $accent;
+    border-title-color: $accent;
+}
+
 /* Account usage screen */
 #usage-bar {
     dock: top;

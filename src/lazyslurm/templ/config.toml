@@ -57,6 +57,12 @@ config_version = "0.0.0"
 # abbreviate_states = false  # use short state names: COMP, FAIL, TIME, CAN, OOM, ...
 # collapse_arrays = true     # fold a job array into one row; Enter expands it
 
+# What to call this cluster in the on-disk caches. Job ids are per-cluster, so
+# job 4815 exists on every one of them and means something different on each;
+# the caches keep them apart under this name. Empty asks Slurm (ClusterName),
+# falling back to the --remote host, then "local". Set it only if that is wrong.
+# cluster_name = ""
+
 # Cache settings
 # cache_max_age_days = 30    # auto-delete cached job info older than N days (0 = never)
 # script_cache_dir = ""      # where archived sbatch scripts live (default: <config_dir>/scripts)

@@ -50,6 +50,44 @@ the command, the import package and the config directory are all `lazyslurm`.
   allocation on a node with no GRES) and `gpu_column` chooses whether the GPUs column reads
   `7/8` or `▣▣▢▣▣▣▣▣`, which shows the free slot without expanding anything.
 
+- **A cluster browser** ([#62](https://github.com/RobinU434/LazySlurm/issues/62)). `k`
+  lists the clusters this install has connected to — each with its SSH target, user, when
+  you last looked, and whether its connection is still alive. A cluster is remembered the
+  first time you reach it with `--remote`, so there is nothing to set up.
+
+  Two ways to leave one, differing in what coming back costs. **Detach** (`d`) keeps the
+  SSH connection open, so re-attaching is instant and silent — which is what makes moving
+  between three clusters in a morning bearable when each login wants a verification code.
+  **Disconnect** (`x`) closes it, because "detached" is not "closed": on a shared machine,
+  or for a cluster you are done with, a live connection is not what you want left behind.
+  Quitting closes every session either way.
+
+  Started on your own machine with no Slurm and no `--remote`, LazySlurm now opens the
+  browser instead of exiting — that case is not an error, it is what running it on a
+  laptop looks like.
+
+### Fixed
+
+- **Job caches no longer collide across clusters**
+  ([#61](https://github.com/RobinU434/LazySlurm/issues/61)). Both on-disk caches were
+  keyed by job id alone, and Slurm numbers jobs from 1 on every cluster — so job 4815 on
+  one cluster and job 4815 on another were one entry, and whichever was seen last won.
+  The stdout tab then pointed at the other cluster's path, `b` showed the other cluster's
+  batch script, and because resubmit falls back to the archive when the original file is
+  gone, `s` could submit it. All of it silent.
+
+  Both caches now carry a cluster level: `log_cache.json` becomes
+  `{"version": 2, "clusters": {"<name>": {...}}}` and the archive becomes
+  `scripts/<cluster>/<job>.sh`. The cluster is Slurm's own `ClusterName` — the same
+  identity Slurm uses for accounting, stable across login nodes and independent of how
+  you connected — falling back to the `--remote` host and then `"local"`, with
+  `cluster_name` in `config.toml` as an override. Deliberately *not* the login node's IP:
+  those are routinely round-robin, which would split one cluster's cache into several.
+
+  An existing flat cache is read as the current cluster's rather than discarded, and
+  loose `scripts/*.sh` are moved under it, since whoever wrote them had one cluster — the
+  one they are on now. Pruning reaches every cluster, not just the connected one.
+
 ### Changed
 
 - **The partition monitor opens on what it already knows**

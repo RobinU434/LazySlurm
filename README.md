@@ -154,6 +154,7 @@ Press `?` at any time for this list inside the app:
 | `o` | Open a shell on the selected job's compute node. Suspends the TUI; type `exit` to return. The mechanism is [configurable](#interactive-shell-ssh-vs-srun) — SSH by default |
 | `Shift+O` | The same, using the *other* access method (`ssh` ↔ `srun`) for this one shell |
 | `,` | Edit config file (`~/.config/lazyslurm/config.toml`) in your editor |
+| `k` | Open the [cluster browser](#cluster-browser) — attach, detach or disconnect |
 | `r` | Force refresh all job data |
 | `?` | Help for **the panel you are in** — job tables, Job Details, Job Metadata, partition monitor, node view or account usage. Other panels are listed at the bottom (also closes with `Escape`) |
 | `q` | Quit |
@@ -906,6 +907,46 @@ the commit it built from. `lazyslurm --version` prints the same string.
 Between a login node, a laptop and two clusters it is easy to lose track of which
 install you are looking at; a bug report that names the commit is worth rather more
 than one that names the version.
+
+</details>
+
+### Cluster browser
+
+<details>
+<summary>Switching between clusters without logging in again</summary>
+
+Press `k` for the clusters this install has connected to:
+
+```
+  Cluster       SSH target                       User      Last seen        Session
+  national-gpu  georg@login.hpc.example.edu      georg     just now         ○ not connected
+  mpi-is        gmartius@slurm.mpi-int.mpg.de    gmartius  yesterday 10:46  ● connected (detached)
+  galvani       mot824@galvani.uni-tuebingen.de  mot824    3 weeks ago      ● attached
+```
+
+A cluster is remembered the first time you reach it with `--remote`; nothing to set up.
+`Enter` attaches, and if the connection is still open that is instant.
+
+There are two ways to leave one, and they differ in what coming back costs:
+
+| Key | | |
+|-----|---|---|
+| `d` | **detach** | leave the cluster but keep its SSH connection open — re-attaching is instant and silent |
+| `x` | **disconnect** | close it; re-attaching means authenticating again, verification code included |
+| `Del` | forget | drop it from the list (disconnect it first) |
+
+Detach is what makes switching between clusters worth doing: the session stays on its
+ControlMaster socket, so you can move between three clusters all morning and type one
+verification code per cluster per day. Disconnect exists because "detached" is not
+"closed" — on a shared machine, or for a cluster you are done with, a live connection is
+not what you want left behind.
+
+**Quitting LazySlurm closes every session**, detached ones included: a connection
+outliving the app that opened it is a surprise, and there is no UI left to find it with.
+
+Started on your own machine with no Slurm and no `--remote`, LazySlurm opens this list
+instead of exiting — it is the one thing that can usefully be shown, and it is how you
+get somewhere.
 
 </details>
 
