@@ -14,6 +14,7 @@ from textual.binding import Binding
 from textual.css.query import NoMatches
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
+from textual.timer import Timer
 from textual.widgets import DataTable, Input, RichLog, Static
 
 from lazyslurm import help as help_topics
@@ -21,6 +22,7 @@ from lazyslurm import slurm
 from lazyslurm.models import (
     Config,
     NodeSample,
+    PartitionInfo,
     PriorityInfo,
     RESOURCE_MONITOR_MODES,
     parse_duration,
@@ -476,6 +478,11 @@ class PartitionScreen(Screen):
     Top: every partition with node/CPU allocated-idle-other-total counts and a
     load bar. Bottom: the jobs on the highlighted partition, from *all* users
     (the main job tables are filtered to you).
+
+    Opening this used to block on three Slurm calls before drawing anything,
+    one of them a cluster-wide squeue (#72). Now `sinfo` paints the partition
+    table, and the two squeue calls fill in the job list and the running/
+    pending column behind it.
     """
 
     BINDINGS = [
@@ -488,10 +495,18 @@ class PartitionScreen(Screen):
         Binding("shift+tab", "focus_other", show=False),
     ]
 
+    # How long the cursor must rest on a row before its jobs are fetched.
+    # Holding the arrow key down used to fire one squeue per row it passed.
+    JOB_DEBOUNCE = 0.15
+
     def __init__(self, config: Config) -> None:
         super().__init__()
         self.config = config
         self._selected_partition: str | None = None
+        self._partitions: list[PartitionInfo] = []
+        self._counts_known = False
+        self._job_timer: Timer | None = None
+        self._pending_partition: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Static(id="partition-bar")
@@ -508,38 +523,103 @@ class PartitionScreen(Screen):
         self.query_one("#partition-table", PartitionTable).focus()
         await self._refresh_partitions()
         if self.config.refresh > 0:
-            self.set_interval(self.config.refresh, self._refresh_partitions)
+            self.set_interval(self.config.refresh, self._poll)
 
-    async def _refresh_partitions(self) -> None:
+    def on_screen_resume(self) -> None:
+        """Reopened from the job list.
+
+        The screen instance is kept alive between opens, so it is already drawn
+        with what it had — this only brings it up to date, in the background.
+        """
+        if self._partitions:
+            self.run_worker(self._refresh_partitions(), group="partitions", exclusive=True)
+
+    async def _poll(self) -> None:
+        """The auto-refresh tick. The screen keeps its timers while it is
+        hidden behind the job list, and polling Slurm for a screen nobody is
+        looking at is exactly the cost this issue is about."""
+        if self.app.screen is self:
+            await self._refresh_partitions()
+
+    async def _refresh_partitions(self, *, force: bool = False) -> None:
+        """Paint the partition table from `sinfo`, then fill the rest in.
+
+        Only the sinfo call is awaited: the job list and the cluster-wide job
+        counts follow as workers, so the table is on screen before either
+        squeue has answered.
+        """
         table = self.query_one("#partition-table", PartitionTable)
-        partitions = await slurm.get_partitions(self.config)
+        partitions = await slurm.get_partitions(self.config, force=force)
+        self._partitions = partitions
         table.update_partitions(partitions)
-
-        total_nodes = sum(p.nodes_total for p in partitions)
-        alloc_nodes = sum(p.nodes_alloc for p in partitions)
-        running = sum(p.running for p in partitions)
-        pending = sum(p.pending for p in partitions)
-        self.query_one("#partition-bar", Static).update(
-            f"[bold]{len(partitions)}[/] partitions   "
-            f"[green]{alloc_nodes}[/]/{total_nodes} nodes allocated   "
-            f"[green]{running}[/] running   [yellow]{pending}[/] pending   "
-            "[dim](all users)[/]"
-        )
+        self._update_bar()
 
         selected = table.get_selected_partition()
         if selected:
-            await self._refresh_jobs(selected)
+            self._schedule_job_refresh(selected, delay=0)
+        self.run_worker(self._refresh_job_counts(force=force),
+                        group="partition-counts", exclusive=True)
+
+    async def _refresh_job_counts(self, *, force: bool = False) -> None:
+        """Fill the running/pending column from a cluster-wide squeue.
+
+        The slowest call on this screen, and the one nothing else waits for.
+        """
+        counts = await slurm.get_partition_job_counts(force=force)
+        for part in self._partitions:
+            part.running, part.pending = counts.get(part.name, (0, 0))
+        self._counts_known = True
+        self.query_one("#partition-table", PartitionTable).update_partitions(self._partitions)
+        self._update_bar()
+
+    def _update_bar(self) -> None:
+        partitions = self._partitions
+        total_nodes = sum(p.nodes_total for p in partitions)
+        alloc_nodes = sum(p.nodes_alloc for p in partitions)
+        if self._counts_known:
+            running = sum(p.running for p in partitions)
+            pending = sum(p.pending for p in partitions)
+            jobs = f"[green]{running}[/] running   [yellow]{pending}[/] pending"
+        else:
+            jobs = "[dim]counting jobs…[/]"
+        self.query_one("#partition-bar", Static).update(
+            f"[bold]{len(partitions)}[/] partitions   "
+            f"[green]{alloc_nodes}[/]/{total_nodes} nodes allocated   "
+            f"{jobs}   [dim](all users)[/]"
+        )
+
+    def _schedule_job_refresh(self, partition: str, delay: float | None = None) -> None:
+        """Fetch `partition`'s jobs once the cursor has settled on it."""
+        self._pending_partition = partition
+        self._selected_partition = partition
+        if self._job_timer is not None:
+            self._job_timer.stop()
+            self._job_timer = None
+        if delay == 0:  # a refresh, not a cursor move — nothing to wait out
+            self._run_pending_job_refresh()
+            return
+        self._job_timer = self.set_timer(
+            self.JOB_DEBOUNCE if delay is None else delay,
+            self._run_pending_job_refresh,
+        )
+
+    def _run_pending_job_refresh(self) -> None:
+        partition = self._pending_partition
+        if partition:
+            # exclusive: a squeue still running for a row the cursor has left
+            # is cancelled, so the table cannot be filled by a stale answer.
+            self.run_worker(self._refresh_jobs(partition),
+                            group="partition-jobs", exclusive=True)
 
     async def _refresh_jobs(self, partition: str) -> None:
-        self._selected_partition = partition
         jobs = await slurm.get_partition_jobs(partition, self.config)
         job_table = self.query_one("#partition-jobs", PartitionJobTable)
         job_table.update_jobs(jobs)
         job_table.border_title = f"Jobs on {partition} ({len(jobs)})"
 
-    async def on_partition_selected(self, event: PartitionSelected) -> None:
+    def on_partition_selected(self, event: PartitionSelected) -> None:
         if event.partition != self._selected_partition:
-            await self._refresh_jobs(event.partition)
+            self._schedule_job_refresh(event.partition)
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Enter on a partition row. DataTable claims the key for its own
@@ -556,7 +636,8 @@ class PartitionScreen(Screen):
         self.app.push_screen(NodeScreen(partition, self.config))
 
     async def action_refresh_now(self) -> None:
-        await self._refresh_partitions()
+        """`r` — the user asked for current numbers, so bypass the TTLs."""
+        await self._refresh_partitions(force=True)
 
     def action_focus_other(self) -> None:
         table = self.query_one("#partition-table", PartitionTable)
@@ -921,9 +1002,25 @@ class LazySlurmApp(App):
     # Data polling
     # ------------------------------------------------------------------
 
+    @property
+    def _job_screen(self) -> Screen:
+        """The job list, even when a full-screen monitor sits on top of it.
+
+        `App.query_one` searches the *visible* screen, so a poll that landed
+        while the partition monitor was open used to raise NoMatches and take
+        the tick down with it.
+        """
+        return self.screen_stack[0]
+
     async def _poll_jobs(self, force: bool = False) -> None:
-        active_table = self.query_one("#active-jobs", ActiveJobTable)
-        completed_table = self.query_one("#completed-jobs", CompletedJobTable)
+        screen = self._job_screen
+        try:
+            active_table = screen.query_one("#active-jobs", ActiveJobTable)
+            completed_table = screen.query_one("#completed-jobs", CompletedJobTable)
+        except NoMatches:
+            # A tick that landed while the app is tearing down. Nothing to draw
+            # on, and nothing worth raising over.
+            return
 
         running, completed, part_info = await asyncio.gather(
             slurm.get_running_jobs(self.config),
@@ -935,7 +1032,7 @@ class LazySlurmApp(App):
 
         # Update cluster bar (counts derived from the squeue result above)
         summary = slurm.format_cluster_summary(running, part_info, self.config)
-        self.query_one("#cluster-bar", Static).update(summary)
+        screen.query_one("#cluster-bar", Static).update(summary)
 
         # Job completion notifications
         current_ids = {j.job_id for j in running}
@@ -1242,6 +1339,10 @@ class LazySlurmApp(App):
     async def _refresh_live_monitors(self) -> None:
         if not self._selected_node or self._selected_node in ("N/A", "None", "(null)"):
             return
+        # Sampling a panel that is hidden behind the partition monitor costs an
+        # ssh round trip to a compute node for output nobody can see.
+        if self.screen is not self._job_screen:
+            return
 
         detail_view = self.query_one("#detail-view", DetailView)
         tabs = detail_view.query_one("#detail-tabs")
@@ -1513,9 +1614,20 @@ class LazySlurmApp(App):
     # Partition monitor
     # ------------------------------------------------------------------
 
+    _PARTITION_SCREEN = "partitions"
+
     def action_partitions(self) -> None:
-        """Open the partition monitor screen (Escape or p returns)."""
-        self.push_screen(PartitionScreen(self.config))
+        """Open the partition monitor screen (Escape or p returns).
+
+        The screen is installed rather than rebuilt each time: a popped screen
+        is destroyed, so `p` used to redo every Slurm call from scratch even a
+        second after closing it. Installed, it comes back already drawn and
+        refreshes itself behind the paint (#72). `_reload_config` drops it, so
+        a changed partition order or colour never survives in a stale screen.
+        """
+        if not self.is_screen_installed(self._PARTITION_SCREEN):
+            self.install_screen(PartitionScreen(self.config), name=self._PARTITION_SCREEN)
+        self.push_screen(self._PARTITION_SCREEN)
 
     def action_usage(self) -> None:
         """Open the account usage screen (Escape or U returns)."""
@@ -1918,6 +2030,16 @@ class LazySlurmApp(App):
 
         # Re-apply module-level settings
         slurm.set_config(self.config)
+        # The partition monitor holds a Config of its own and is kept alive
+        # between opens; drop it so the next `p` builds one with the new
+        # partition order and colours. Only when it is off the stack -- Textual
+        # refuses to uninstall a screen that is currently displayed, and the
+        # editor this returns from is opened from the job list anyway.
+        if (
+            self.is_screen_installed(self._PARTITION_SCREEN)
+            and not any(isinstance(s, PartitionScreen) for s in self.screen_stack)
+        ):
+            self.uninstall_screen(self._PARTITION_SCREEN)
         persistent_config.set_script_cache_dir(self.config.script_cache_dir)
         set_partition_colors(self.config.partition_colors)
         set_display_config(

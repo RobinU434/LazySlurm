@@ -8,6 +8,22 @@ the command, the import package and the config directory are all `lazyslurm`.
 
 ### Changed
 
+- **The partition monitor opens on what it already knows**
+  ([#72](https://github.com/RobinU434/LazySlurm/issues/72)). Pressing `p` used to await
+  three Slurm calls before drawing anything: `sinfo`, a **cluster-wide `squeue`** across
+  every user and partition (only to fill the running/pending column), and then a third
+  call for the highlighted partition's jobs. Nothing was cached and the screen was
+  rebuilt on every open, so closing and reopening it paid the whole bill again. On a
+  busy controller — or over SSH, where the shared shell serialises all three behind
+  whatever poll is already in flight — that is seconds of empty tables.
+
+  Now `sinfo` paints the table (served from the same 45-second cache the cluster bar
+  already fills, so opening the monitor after a poll usually costs no command at all),
+  and the two `squeue` calls fill the job list and the running/pending column behind the
+  paint. The cluster-wide count is cached for 15 seconds, the screen is kept alive
+  between opens so reopening is instant, and moving the cursor debounces by 150ms
+  instead of firing one `squeue` per row it passes over. `r` still bypasses every cache.
+
 - **A refresh no longer re-reads the whole job history**
   ([#63](https://github.com/RobinU434/LazySlurm/issues/63)). `sacct` was 69% of every
   poll and returned a byte-identical answer each time, because a job that has ended does
@@ -47,6 +63,15 @@ the command, the import package and the config directory are all `lazyslurm`.
 
   Pressing `r` on the cpu tab in graph mode, measured against a live job: **~690ms →
   187ms**, of which the sample itself is 625ms → 99ms.
+
+### Fixed
+
+- **The job list kept polling into a screen it could not see**
+  ([#72](https://github.com/RobinU434/LazySlurm/issues/72)). With `refresh` on, a poll
+  that landed while the partition monitor was open looked for the job tables on the
+  *visible* screen and raised `NoMatches`, taking the tick down with it. It now
+  addresses the job list directly, and the cpu/gpu sampler skips its ssh round trip
+  entirely while a full-screen monitor is on top of it.
 
 ### Added
 
