@@ -22,6 +22,14 @@
 # Use srun if your cluster's pam_slurm_adm refuses ssh to compute nodes.
 # interactive_shell = "ssh"  # "ssh" (default) | "srun"
 
+# How the cpu and gpu tabs present themselves. Shift+M cycles the modes at
+# runtime; this is only what they start on.
+#   text  = the raw ps / nvidia-smi output — the only mode that shows the
+#           process list, and nvidia-smi's ECC/MIG sections
+#   meter = one bar per allocated core and per GPU, htop/nvtop style
+#   graph = the meters plus a history band per metric (default)
+# resource_monitor = "graph"
+
 # Column display settings
 # max_name_width = 16        # max characters for job name column (0 = unlimited)
 # max_partition_width = 16   # max characters for partition column (0 = unlimited)

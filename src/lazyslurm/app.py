@@ -18,8 +18,19 @@ from textual.widgets import DataTable, Footer, Input, RichLog, Static
 
 from lazyslurm import help as help_topics
 from lazyslurm import slurm
-from lazyslurm.models import Config, PriorityInfo, parse_duration
-from lazyslurm.widgets.detail_view import DetailView, parse_mem_bytes
+from lazyslurm.models import (
+    Config,
+    NodeSample,
+    PriorityInfo,
+    RESOURCE_MONITOR_MODES,
+    parse_duration,
+)
+from lazyslurm.widgets.detail_view import (
+    DetailView,
+    parse_mem_bytes,
+    render_cpu_monitor,
+    render_gpu_monitor,
+)
 from lazyslurm.widgets.job_table import ActiveJobTable, CompletedJobTable, JobSelected, set_partition_colors, set_display_config
 from lazyslurm.widgets.metadata_view import MetadataView
 from lazyslurm.widgets.usage_view import UsageTable, format_hours
@@ -680,6 +691,7 @@ class LazySlurmApp(App):
         Binding("question_mark", "help", "Help", show=True, key_display="?"),
         Binding("slash", "toggle_search", "Search", show=True, key_display="/"),
         Binding("m", "toggle_bookmark", "Bookmark", show=False),
+        Binding("M", "cycle_monitor_mode", "Monitor mode", show=False),
         Binding("c", "cancel_job", "Cancel", show=False),
         Binding("shift+c", "force_cancel_job", "Force Cancel", show=False),
         Binding("ctrl+v", "toggle_multiselect", "Multi-select", show=False),
@@ -737,6 +749,15 @@ class LazySlurmApp(App):
         self._first_poll_done: bool = False
         # Sparkline resource history
         self._resource_history: dict[str, dict[str, list[float]]] = {}
+        # How the cpu/gpu tabs render — Shift+M cycles it for this session only,
+        # the config file sets what it starts on.
+        self._monitor_mode: str = (
+            self.config.resource_monitor
+            if self.config.resource_monitor in RESOURCE_MONITOR_MODES else "graph"
+        )
+        # Per-job history sampled from the node itself (not sacct): per-core and
+        # per-GPU series for the meter/graph modes.
+        self._monitor_history: dict[str, dict] = {}
         # Previous (TotalCPU, Elapsed) per job — the CPU series is a delta
         self._cpu_marker: dict[str, tuple[float, float] | None] = {}
         # Resubmit state
@@ -945,6 +966,11 @@ class LazySlurmApp(App):
             for job_id, marker in self._cpu_marker.items()
             if job_id in current_ids
         }
+        self._monitor_history = {
+            job_id: history
+            for job_id, history in self._monitor_history.items()
+            if job_id in current_ids
+        }
 
         # Collect sparkline samples for selected running job
         if self._selected_job_id and self._selected_job_id in current_ids:
@@ -1133,6 +1159,85 @@ class LazySlurmApp(App):
     # Live CPU/GPU auto-refresh
     # ------------------------------------------------------------------
 
+    def _history_for(self, job_id: str) -> dict:
+        """The per-job node-sampled history, created on first use."""
+        return self._monitor_history.setdefault(job_id, {
+            "cores": {},      # cpu id -> utilisation series
+            "cpu": [],        # mean across the allocated cores
+            "mem": [],        # fraction of the job's (or node's) memory
+            "gpu_util": {},   # gpu index -> utilisation series
+            "gpu_mem": {},    # gpu index -> memory-used fraction
+        })
+
+    @staticmethod
+    def _append_sample(series: list[float], value: float) -> None:
+        series.append(value)
+        if len(series) > _MAX_HISTORY:
+            del series[:-_MAX_HISTORY]
+
+    def _record_node_sample(self, job_id: str, sample: NodeSample) -> None:
+        hist = self._history_for(job_id)
+        for core in sample.cores:
+            self._append_sample(hist["cores"].setdefault(core.cpu, []), core.busy)
+        if sample.cores:
+            self._append_sample(hist["cpu"], sample.busy)
+        if sample.mem_ratio is not None:
+            self._append_sample(hist["mem"], sample.mem_ratio)
+
+    def _record_gpu_sample(self, job_id: str, reading) -> None:
+        hist = self._history_for(job_id)
+        for gpu in reading.gpus:
+            if gpu.util is not None:
+                self._append_sample(hist["gpu_util"].setdefault(gpu.index, []), gpu.util)
+            if gpu.mem_ratio is not None:
+                self._append_sample(hist["gpu_mem"].setdefault(gpu.index, []), gpu.mem_ratio)
+
+    async def _load_cpu_monitor(self) -> None:
+        """Fetch and render the cpu tab in whichever mode is active.
+
+        One round trip either way: text mode runs `ps`, the meter modes run the
+        sampling script, and neither adds a call per metric.
+        """
+        detail_view = self.query_one("#detail-view", DetailView)
+        job_id = self._selected_job_id or ""
+        node = self._selected_node
+        if self._monitor_mode == "text":
+            content = await slurm.get_node_processes(node, self.config.user)
+        else:
+            sample = await slurm.get_node_sample(node, job_id)
+            if job_id and not sample.error:
+                self._record_node_sample(job_id, sample)
+            content = render_cpu_monitor(
+                sample,
+                self._monitor_history.get(job_id),
+                width=detail_view.monitor_width,
+                graph=self._monitor_mode == "graph",
+            )
+        # The user may have moved to another job while the node was answering.
+        if job_id and self._selected_job_id != job_id:
+            return
+        detail_view.load_cpu(content)
+
+    async def _load_gpu_monitor(self) -> None:
+        detail_view = self.query_one("#detail-view", DetailView)
+        job_id = self._selected_job_id or ""
+        node = self._selected_node
+        if self._monitor_mode == "text":
+            content = await slurm.get_gpu_status(node, job_id)
+        else:
+            reading = await slurm.get_gpu_sample(node, job_id)
+            if job_id and not reading.error:
+                self._record_gpu_sample(job_id, reading)
+            content = render_gpu_monitor(
+                reading,
+                self._monitor_history.get(job_id),
+                width=detail_view.monitor_width,
+                graph=self._monitor_mode == "graph",
+            )
+        if job_id and self._selected_job_id != job_id:
+            return
+        detail_view.load_gpu(content)
+
     async def _refresh_live_monitors(self) -> None:
         if not self._selected_node or self._selected_node in ("N/A", "None", "(null)"):
             return
@@ -1142,11 +1247,22 @@ class LazySlurmApp(App):
         active_tab = tabs.active
 
         if active_tab == "tab-cpu":
-            content = await slurm.get_node_processes(self._selected_node, self.config.user)
-            detail_view.load_cpu(content)
+            await self._load_cpu_monitor()
         elif active_tab == "tab-gpu" and not self.config.no_gpu:
-            content = await slurm.get_gpu_status(self._selected_node, self._selected_job_id or "")
-            detail_view.load_gpu(content)
+            await self._load_gpu_monitor()
+
+    async def action_cycle_monitor_mode(self) -> None:
+        """Shift+M: text -> meter -> graph, for this session.
+
+        Session-only on purpose: the config file stays the place that decides
+        what the tabs open on, so cycling to compare modes does not rewrite it.
+        """
+        index = RESOURCE_MONITOR_MODES.index(self._monitor_mode)
+        self._monitor_mode = RESOURCE_MONITOR_MODES[(index + 1) % len(RESOURCE_MONITOR_MODES)]
+        self._log("monitor mode", self._monitor_mode)
+        self._set_status(f"cpu/gpu view: {self._monitor_mode}")
+        if not self.config.no_live:
+            await self._refresh_live_monitors()
 
     # ------------------------------------------------------------------
     # Navigation
@@ -1746,6 +1862,7 @@ class LazySlurmApp(App):
         from lazyslurm.__main__ import (
             parse_cache_max_age,
             parse_interactive_shell,
+            parse_resource_monitor,
             unknown_config_keys,
         )
 
@@ -1761,6 +1878,11 @@ class LazySlurmApp(App):
         )
         if shell_warning:
             self._log("config file", shell_warning)
+        monitor, monitor_warning = parse_resource_monitor(
+            saved.get("resource_monitor", old.resource_monitor)
+        )
+        if monitor_warning:
+            self._log("config file", monitor_warning)
 
         # Rebuild config from file, preserving CLI-only values (remote, user)
         self.config = Config(
@@ -1786,7 +1908,12 @@ class LazySlurmApp(App):
                 str(saved.get("script_cache_dir", old.script_cache_dir))
             ),
             interactive_shell=shell,
+            resource_monitor=monitor,
         )
+        # An edit to the file is an explicit choice, so it wins over whatever
+        # Shift+M left the session on.
+        if monitor != old.resource_monitor:
+            self._monitor_mode = monitor
 
         # Re-apply module-level settings
         slurm.set_config(self.config)
@@ -1805,7 +1932,7 @@ class LazySlurmApp(App):
             "refresh", "days", "user", "partition", "no_gpu", "no_live",
             "editor", "max_name_width", "max_partition_width", "abbreviate_states",
             "partition_order", "cache_max_age_days", "script_cache_dir",
-            "interactive_shell",
+            "interactive_shell", "resource_monitor",
         ):
             old_val = getattr(old, field)
             new_val = getattr(self.config, field)
@@ -1976,15 +2103,11 @@ class LazySlurmApp(App):
             await self._load_job_details(self._selected_job_id)
             # Also refresh live monitors on explicit refresh
             if not self.config.no_live and self._selected_node:
-                detail_view = self.query_one("#detail-view", DetailView)
-                cpu_content, gpu_content = await asyncio.gather(
-                    slurm.get_node_processes(self._selected_node, self.config.user),
-                    slurm.get_gpu_status(self._selected_node, self._selected_job_id or "")
-                    if not self.config.no_gpu else asyncio.sleep(0),
+                await asyncio.gather(
+                    self._load_cpu_monitor(),
+                    self._load_gpu_monitor() if not self.config.no_gpu
+                    else asyncio.sleep(0),
                 )
-                detail_view.load_cpu(cpu_content)
-                if not self.config.no_gpu and isinstance(gpu_content, str):
-                    detail_view.load_gpu(gpu_content)
         self._log("refresh", "complete")
 
     def _log(self, action: str, result: str = "") -> None:

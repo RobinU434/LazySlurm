@@ -9,7 +9,9 @@ from textual.widgets import Static, TabbedContent, TabPane, RichLog
 
 from lazyslurm.models import (
     Efficiency,
+    GpuReading,
     JobStats,
+    NodeSample,
     format_bytes,
     format_duration,
     parse_mem_bytes,
@@ -20,7 +22,15 @@ from lazyslurm.models import (
 # job used almost none of what it reserved.
 _EFF_GOOD, _EFF_FAIR = 0.60, 0.25
 
-__all__ = ["DetailView", "parse_mem_bytes", "sparkline", "efficiency_bar"]
+__all__ = [
+    "DetailView",
+    "parse_mem_bytes",
+    "sparkline",
+    "efficiency_bar",
+    "meter_bar",
+    "render_cpu_monitor",
+    "render_gpu_monitor",
+]
 
 
 def efficiency_style(ratio: float | None) -> str:
@@ -58,6 +68,194 @@ def sparkline(values: list[float], scale_max: float | None = None) -> str:
     if mx <= 0:
         return "▁" * len(values)
     return "".join(_SPARK_CHARS[min(int(v / mx * 7), 7)] for v in values)
+
+
+# ---------------------------------------------------------------------------
+# htop/nvtop-style meters
+# ---------------------------------------------------------------------------
+
+# Load colouring: a core at 90% is the point, not a problem, so the top band is
+# for saturation rather than danger — it is memory where red means trouble.
+_LOAD_BUSY, _LOAD_HOT = 0.60, 0.85
+
+
+def load_style(ratio: float) -> str:
+    if ratio >= _LOAD_HOT:
+        return "red"
+    if ratio >= _LOAD_BUSY:
+        return "yellow"
+    return "green"
+
+
+def meter_bar(ratio: float | None, width: int = 20, style: str | None = None) -> str:
+    """`▏███████░░░░░` — one htop-style gauge, coloured by how full it is."""
+    width = max(1, width)
+    if ratio is None:
+        return "[dim]▏" + "░" * width + "[/]"
+    ratio = min(1.0, max(0.0, ratio))
+    filled = min(width, int(round(ratio * width)))
+    # A non-zero reading always shows at least one block: "1%" next to an empty
+    # bar reads as a rendering bug rather than as a nearly idle core.
+    if ratio > 0 and filled == 0:
+        filled = 1
+    colour = style or load_style(ratio)
+    return f"[dim]▏[/][{colour}]{'█' * filled}[/][dim]{'░' * (width - filled)}[/]"
+
+
+def _pct(ratio: float | None) -> str:
+    return "  ? " if ratio is None else f"{min(ratio, 1.0) * 100:3.0f}%"
+
+
+def _band(values: list[float] | None, width: int) -> str:
+    """A history band, right-aligned so the newest sample sits at the edge."""
+    if not values:
+        return "[dim]" + "·" * width + "[/]"
+    recent = values[-width:]
+    pad = "·" * (width - len(recent))
+    return f"[dim]{pad}[/]{sparkline(recent, scale_max=1.0)}"
+
+
+def _grid(cells: list[str], columns: int) -> list[str]:
+    """Lay cells out in ``columns``, filling top-to-bottom as htop does.
+
+    Column-major, so core ids read downwards: cores 0-3 on the left, 4-7 on the
+    right, rather than every other core alternating sides.
+    """
+    rows = (len(cells) + columns - 1) // columns
+    return ["  ".join(cells[c * rows + r]
+                      for c in range(columns)
+                      if c * rows + r < len(cells))
+            for r in range(rows)]
+
+
+def render_cpu_monitor(
+    sample: NodeSample,
+    history: dict | None = None,
+    width: int = 80,
+    graph: bool = False,
+) -> str:
+    """The cpu tab in meter/graph mode: one bar per allocated core.
+
+    ``history`` is the app's per-job ring buffer — ``{"cores": {cpu: [...]},
+    "cpu": [...], "mem": [...]}`` — and is only read when ``graph`` is set.
+    """
+    if sample.error:
+        return sample.error
+    history = history or {}
+    width = max(40, width)
+    lines: list[str] = []
+
+    scope = ("allocated to this job" if sample.scope == "job"
+             else "on the node — srun --overlap unavailable, showing the whole machine")
+    count = len(sample.cores)
+    lines.append(f"[bold]Node: {sample.node}[/]  "
+                 f"[dim]{count} core{'' if count == 1 else 's'}, {scope}[/]")
+    lines.append("")
+
+    if not sample.cores:
+        lines.append("[dim]No per-core data — /proc/stat was unreadable[/]")
+        return "\n".join(lines)
+
+    label = max(len(str(c.cpu)) for c in sample.cores)
+    if graph:
+        # One core per line, each with its own trailing history band: the whole
+        # point of graph mode is seeing a core ramp, plateau or stall.
+        core_hist = history.get("cores", {})
+        bar_w = max(10, min(30, (width - label - 12) // 2))
+        band_w = max(8, width - label - bar_w - 14)
+        for core in sample.cores:
+            lines.append(
+                f"  {core.cpu:>{label}} {meter_bar(core.busy, bar_w)} {_pct(core.busy)}  "
+                f"{_band(core_hist.get(core.cpu), band_w)}"
+            )
+    else:
+        cell_w = label + 30
+        columns = max(1, min(4, (width - 2) // (cell_w + 2)))
+        bar_w = max(8, (width - 2 - 2 * (columns - 1)) // columns - label - 8)
+        cells = [
+            f"{core.cpu:>{label}} {meter_bar(core.busy, bar_w)} {_pct(core.busy)}"
+            for core in sample.cores
+        ]
+        lines.extend("  " + row for row in _grid(cells, columns))
+
+    lines.append("")
+    mem_w = max(10, min(40, width - 40))
+    mem_ratio = sample.mem_ratio
+    mem_scope = "job" if sample.mem_scope == "job" else "node"
+    if sample.mem_total:
+        used = format_bytes(sample.mem_used or 0)
+        total = format_bytes(sample.mem_total)
+        style = "red" if mem_ratio and mem_ratio >= 0.9 else None
+        lines.append(
+            f"  {'Mem':>{label}} {meter_bar(mem_ratio, mem_w, style)} {_pct(mem_ratio)}"
+            f"  {used}/{total} [dim]({mem_scope})[/]"
+        )
+    if sample.load:
+        one, five, fifteen = sample.load
+        lines.append(f"  {'Load':>{label}} [dim]{one:.2f}  {five:.2f}  {fifteen:.2f}"
+                     f"  (1 / 5 / 15 min, whole node)[/]")
+
+    if graph:
+        band_w = max(20, width - label - 20)
+        cpu_hist, mem_hist = history.get("cpu"), history.get("mem")
+        if cpu_hist or mem_hist:
+            lines.append("")
+            lines.append("[bold underline]History[/]  [dim]newest on the right[/]")
+            if cpu_hist:
+                lines.append(f"  {'CPU':>{label}} {_band(cpu_hist, band_w)}  "
+                             f"[dim]{len(cpu_hist)} samples[/]")
+            if mem_hist:
+                lines.append(f"  {'Mem':>{label}} {_band(mem_hist, band_w)}  "
+                             f"[dim]{len(mem_hist)} samples[/]")
+    return "\n".join(lines)
+
+
+def render_gpu_monitor(
+    reading: GpuReading,
+    history: dict | None = None,
+    width: int = 80,
+    graph: bool = False,
+) -> str:
+    """The gpu tab in meter/graph mode: per-device utilisation and memory."""
+    if reading.error:
+        return reading.error
+    history = history or {}
+    width = max(40, width)
+    lines: list[str] = []
+
+    scope = ("allocated to this job" if reading.scope == "job"
+             else "all node GPUs — srun --overlap unavailable")
+    count = len(reading.gpus)
+    lines.append(f"[bold]Node: {reading.node}[/]  "
+                 f"[dim]{count} GPU{'' if count == 1 else 's'}, {scope}[/]")
+
+    bar_w = max(12, min(34, width - 44))
+    band_w = max(20, width - 24)
+    util_hist, mem_hist = history.get("gpu_util", {}), history.get("gpu_mem", {})
+
+    for gpu in reading.gpus:
+        lines.append("")
+        extras = []
+        if gpu.temperature is not None:
+            extras.append(f"{gpu.temperature:.0f}°C")
+        if gpu.power is not None:
+            extras.append(
+                f"{gpu.power:.0f}W" + (f"/{gpu.power_limit:.0f}W" if gpu.power_limit else "")
+            )
+        suffix = f"  [dim]{'  '.join(extras)}[/]" if extras else ""
+        lines.append(f"[bold]GPU {gpu.index}[/] [dim]{gpu.name}[/]{suffix}")
+        lines.append(f"  {'Util':>4} {meter_bar(gpu.util, bar_w)} {_pct(gpu.util)}")
+        mem_note = ""
+        if gpu.mem_total:
+            mem_note = f"  {format_bytes(gpu.mem_used or 0)}/{format_bytes(gpu.mem_total)}"
+        style = "red" if (gpu.mem_ratio or 0) >= 0.95 else None
+        lines.append(f"  {'Mem':>4} {meter_bar(gpu.mem_ratio, bar_w, style)} "
+                     f"{_pct(gpu.mem_ratio)}{mem_note}")
+        if graph:
+            lines.append(f"  {'':>4} [dim]util[/] {_band(util_hist.get(gpu.index), band_w)}")
+            lines.append(f"  {'':>4} [dim]mem [/] {_band(mem_hist.get(gpu.index), band_w)}")
+
+    return "\n".join(lines)
 
 
 class DetailView(Vertical):
@@ -107,6 +305,20 @@ class DetailView(Vertical):
         log = self.query_one("#log-stderr", RichLog)
         log.clear()
         log.write(content)
+
+    @property
+    def monitor_width(self) -> int:
+        """Columns the cpu/gpu meters may use.
+
+        Falls back to 80 before the first layout pass, when every widget still
+        reports a zero size — rendering into a width of 0 would clamp every bar
+        to its minimum and look broken for one frame.
+        """
+        try:
+            width = self.query_one("#cpu-content", Static).size.width
+        except NoMatches:
+            width = 0
+        return (width or self.size.width or 82) - 2
 
     def load_cpu(self, content: str) -> None:
         self.query_one("#cpu-content", Static).update(content)

@@ -36,6 +36,7 @@ _FILE_ONLY_KEYS = frozenset({
     "cache_max_age_days",
     "script_cache_dir",
     "interactive_shell",
+    "resource_monitor",
 })
 
 KNOWN_CONFIG_KEYS = frozenset(_CONFIG_KEYS) | _FILE_ONLY_KEYS
@@ -123,6 +124,22 @@ def parse_interactive_shell(raw: object) -> tuple[str, str]:
         return value, ""
     options = " | ".join(INTERACTIVE_SHELLS)
     return "ssh", f"interactive_shell: {raw!r} is not one of {options} — using ssh"
+
+
+def parse_resource_monitor(raw: object) -> tuple[str, str]:
+    """Validate ``resource_monitor``. Returns (value, warning or "").
+
+    Same contract as ``parse_interactive_shell``: an unknown value falls back to
+    the default and says so, because the cpu/gpu tabs would otherwise look
+    unchanged with no hint that the setting was rejected.
+    """
+    from lazyslurm.models import RESOURCE_MONITOR_MODES
+
+    value = str(raw).strip().lower()
+    if value in RESOURCE_MONITOR_MODES:
+        return value, ""
+    options = " | ".join(RESOURCE_MONITOR_MODES)
+    return "graph", f"resource_monitor: {raw!r} is not one of {options} — using graph"
 
 
 def main() -> None:
@@ -270,9 +287,14 @@ def main() -> None:
     interactive_shell, shell_warning = parse_interactive_shell(
         saved.get("interactive_shell", "ssh")
     )
+    resource_monitor, monitor_warning = parse_resource_monitor(
+        saved.get("resource_monitor", "graph")
+    )
     warnings = unknown_config_keys(saved)
     if shell_warning:
         warnings.append(shell_warning)
+    if monitor_warning:
+        warnings.append(monitor_warning)
 
     config = Config(
         refresh=float(resolved["refresh"]),
@@ -293,6 +315,7 @@ def main() -> None:
         cache_max_age_days=cache_max_age_days,
         script_cache_dir=script_cache_dir,
         interactive_shell=interactive_shell,
+        resource_monitor=resource_monitor,
     )
 
     # Bail out before the TUI starts rather than crashing on the first poll:

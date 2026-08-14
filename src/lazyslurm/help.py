@@ -111,10 +111,13 @@ PANELS: tuple[Panel, ...] = (
             Key("l", "open the active log in the pager — / searches, F follows", ("l",)),
             Key("e", "open stdout in your editor", ("e",)),
             Key("Shift+E", "open stderr in your editor", ("shift+e",)),
+            Key("Shift+M", "cpu/gpu view: text -> meters -> meters with history", ("M",)),
         ),
         notes=(
             "The log tabs show the last 500 lines; press l to read a whole large log.",
             "cpu and gpu are live from the node and refresh while the tab is open.",
+            "Shift+M switches those two tabs between the raw ps / nvidia-smi text and",
+            "htop/nvtop-style meters; resource_monitor in the config sets the default.",
             "stats opens with Efficiency: used against requested, and a sizing hint.",
         ),
     ),

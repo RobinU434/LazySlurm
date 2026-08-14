@@ -138,6 +138,7 @@ Press `?` at any time for this list inside the app:
 | `/` | Open the [filter bar](#filtering) — plain text or `state:`/`part:`/`name:`/`id:`/`gpu:` terms. `Enter` accepts, `Escape` abandons |
 | `Enter` | Expand / collapse a [job array](#job-arrays) row |
 | `m` | Bookmark / unbookmark the selected job. Bookmarked jobs show a ★ prefix and are pinned to the top of their table |
+| `Shift+M` | Cycle how the **cpu** and **gpu** tabs present themselves: [`text` → `meter` → `graph`](#resource-monitor-modes) |
 | `c` | Cancel the selected job (with confirmation prompt) |
 | `Shift+C` | **Force cancel** — sends SIGKILL immediately, no confirmation |
 | `Ctrl+V` | Toggle multi-select mode (vim-visual style). Use Up/Down to extend the selection range from an anchor row, then press `c` or `Shift+C` to cancel all selected jobs. Press `Ctrl+V` again to exit. Detail panels freeze on the last single-selected job. |
@@ -179,22 +180,83 @@ for common patterns (`slurm-JOBID.out`, `JOBNAME-JOBID.out`, `logs/` subdirector
 ### cpu
 
 <details>
-<summary>Live process listing from the job's node</summary>
+<summary>Per-core meters with history, htop style</summary>
 
-Live process listing from the job's compute node, similar to `top`. Shows PID, %CPU,
-%MEM, RSS, VSZ, elapsed time, and command name. Auto-refreshes while the tab is active.
+One bar per **allocated** core — the job's cgroup, not the node's core count — with the
+job's memory and the node's load average underneath:
+
+```
+Node: node042  16 cores, allocated to this job
+
+   0 ▏███████████████████░░░░░░░░░░░   63%   8 ▏█████░░░░░░░░░░░░░░░░░░░░░░░░░   18%
+   1 ▏████████████████████████████░░   92%   9 ▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░    2%
+   ...
+  Mem ▏██████████████░░░░░░░░░░░░░░░   47%  118G/251G (job)
+  Load 8.42  7.90  6.11  (1 / 5 / 15 min, whole node)
+```
+
+In `graph` mode each core also carries a history band, and the mean CPU and memory
+series are plotted full width beneath — the difference between a job that is ramping up,
+one that has plateaued and one that has stalled. `Shift+M` switches to `text` for the
+`ps` process listing (PID, %CPU, %MEM, RSS, VSZ, elapsed, command), which is what the
+tab showed before 0.4.0 and the only view that names the processes.
+
+The sample comes from inside the job's cgroup via `srun --overlap`, falling back to SSH
+(which sees the whole machine, and says so). Each refresh is **one** round trip: the two
+`/proc/stat` snapshots a utilisation figure needs are taken on the node itself, half a
+second apart, so the percentages are instantaneous rather than averaged over the refresh
+interval. Auto-refreshes while the tab is active.
 
 </details>
 
 ### gpu
 
 <details>
-<summary>nvidia-smi for the job's own GPUs only</summary>
+<summary>Per-GPU meters with history, nvtop style</summary>
 
-Live `nvidia-smi` output showing **only the GPUs allocated to the selected job**. Uses
-`srun --overlap --jobid` to run nvidia-smi inside the job's cgroup, so GPU visibility
-is automatically restricted to the job's allocation. The header shows
-`CUDA_VISIBLE_DEVICES` for confirmation. Auto-refreshes while the tab is active.
+Utilisation and memory per device — again **only the GPUs allocated to the job** — with
+temperature and power where `nvidia-smi` reports them, and a history band per metric in
+`graph` mode:
+
+```
+Node: node042  2 GPUs, allocated to this job
+
+GPU 0 NVIDIA A100-SXM4-80GB  62°C  310W/400W
+  Util ▏████████████████████████████████░   97%
+   Mem ▏█████████████████░░░░░░░░░░░░░░░░   50%  40G/80G
+       util ···············▁▂▃▄▆▆▇▇▇▇▇▆▅▄▃▁▁▂▄▅▆▇▇▇
+```
+
+`Shift+M` switches to `text` for the raw `nvidia-smi` output, which the meters cannot
+replace: it carries the process list, ECC counters and MIG partitions. Both views run
+inside the job's cgroup via `srun --overlap --jobid`, so GPU visibility is restricted to
+the allocation; the text view shows `CUDA_VISIBLE_DEVICES` for confirmation. Auto-refreshes
+while the tab is active.
+
+</details>
+
+### Resource monitor modes
+
+<details>
+<summary>text, meter, graph — and how to change the default</summary>
+
+`Shift+M` cycles the cpu and gpu tabs through three presentations, for this session only:
+
+| Mode | What it shows |
+|------|---------------|
+| `text` | The raw `ps` / `nvidia-smi` output. The only mode with the process list, ECC and MIG. |
+| `meter` | Per-core and per-GPU bars. Compact — the right choice on a short terminal. |
+| `graph` | The meters plus a history band per metric. The default. |
+
+What they *start* on comes from the config file:
+
+```toml
+resource_monitor = "graph"   # "text" | "meter" | "graph"
+```
+
+History is kept per job, up to 60 samples, and only accumulates while the tab is open —
+so a five-second refresh gives a five-minute band. It is dropped when the job ends.
+`--no-live` switches the whole thing off, including the SSH and `srun` calls.
 
 </details>
 
@@ -960,6 +1022,12 @@ no_live = false          # --no-live: disable live CPU/GPU monitoring
 remote = ""              # -H/--remote: SSH target for remote mode
 editor = "vim"           # text editor for viewing logs ("vim", "nano", "less", etc.)
 pager = "less"           # pager for browsing whole logs with 'l' ("less", "more", "bat")
+
+# How the cpu and gpu tabs open. Shift+M cycles them at runtime.
+#   text  = raw ps / nvidia-smi — the only mode with the process list and MIG/ECC
+#   meter = per-core and per-GPU bars, htop/nvtop style
+#   graph = the meters plus a history band per metric
+resource_monitor = "graph"
 
 # Column display settings
 max_name_width = 16      # max characters for job name column (0 = unlimited)

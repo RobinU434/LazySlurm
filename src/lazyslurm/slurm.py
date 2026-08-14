@@ -14,9 +14,13 @@ from lazyslurm.models import (
     CompletedJob,
     array_task_count,
     Config,
+    CoreSample,
+    GpuReading,
+    GpuSample,
     JobDetail,
     JobStats,
     NodeInfo,
+    NodeSample,
     PartitionInfo,
     PartitionJob,
     FairShare,
@@ -1946,6 +1950,275 @@ async def get_gpu_status(node: str, job_id: str = "") -> str:
     if job_id:
         header += f"  [dim yellow](showing all GPUs — srun --overlap failed, falling back to SSH)[/]"
     return f"{header}\n\n{stdout}"
+
+
+# ---------------------------------------------------------------------------
+# Structured node sampling — the meter/graph resource monitor
+# ---------------------------------------------------------------------------
+#
+# One round trip per tab refresh, exactly as the text mode costs: the script
+# below does all the reading itself, including the two /proc/stat snapshots that
+# a utilisation figure needs. Diffing across refresh ticks instead would avoid
+# the sleep, but would report a five-second average and lose the series every
+# time the user switched tabs.
+
+_SAMPLE_SLEEP = 0.5  # seconds between the two /proc/stat snapshots
+
+# Sections are marked rather than positional, so a node missing one of these
+# files (no cgroup, no loadavg) drops that section instead of shifting the rest.
+_NODE_SAMPLE_SCRIPT = f"""
+echo '##stat1'; grep '^cpu' /proc/stat
+echo '##affinity'; grep -i '^Cpus_allowed_list' /proc/self/status
+echo '##load'; cat /proc/loadavg
+echo '##meminfo'; grep -E '^(MemTotal|MemAvailable|MemFree):' /proc/meminfo
+echo '##cgroup'
+cg=$(awk -F: '$1 == 0 {{print $3}}' /proc/self/cgroup 2>/dev/null)
+p="/sys/fs/cgroup$cg"
+while [ -n "$cg" ] && [ "$p" != "/sys/fs/cgroup" ] && [ "$p" != "/" ]; do
+  if [ -r "$p/memory.max" ] && [ -r "$p/memory.current" ]; then
+    lim=$(cat "$p/memory.max")
+    if [ "$lim" != "max" ]; then
+      echo "used $(cat "$p/memory.current")"; echo "limit $lim"; break
+    fi
+  fi
+  p=$(dirname "$p")
+done
+cg1=$(awk -F: '$2 ~ /(^|,)memory(,|$)/ {{print $3}}' /proc/self/cgroup 2>/dev/null | head -1)
+m1="/sys/fs/cgroup/memory$cg1"
+while [ -n "$cg1" ] && [ "$m1" != "/sys/fs/cgroup/memory" ] && [ "$m1" != "/" ]; do
+  if [ -r "$m1/memory.limit_in_bytes" ] && [ -r "$m1/memory.usage_in_bytes" ]; then
+    echo "used $(cat "$m1/memory.usage_in_bytes")"
+    echo "limit $(cat "$m1/memory.limit_in_bytes")"; break
+  fi
+  m1=$(dirname "$m1")
+done
+sleep {_SAMPLE_SLEEP}
+echo '##stat2'; grep '^cpu' /proc/stat
+""".strip()
+
+# nounits keeps the CSV free of "MiB"/"W" suffixes; unsupported fields still
+# come back as "[N/A]" or "[Not Supported]", which the parser drops to None.
+_GPU_QUERY_FIELDS = (
+    "index,name,utilization.gpu,memory.used,memory.total,"
+    "temperature.gpu,power.draw,power.limit"
+)
+_GPU_SAMPLE_CMD = (
+    f"nvidia-smi --query-gpu={_GPU_QUERY_FIELDS} --format=csv,noheader,nounits"
+)
+
+# A v1 cgroup with no limit reports a number near 2**63 rather than "max".
+_UNLIMITED = 1 << 62
+
+
+def _split_sections(text: str) -> dict[str, list[str]]:
+    """Split ``##name``-marked output into ``{name: [lines]}``."""
+    sections: dict[str, list[str]] = {}
+    current = ""
+    for line in text.splitlines():
+        if line.startswith("##"):
+            current = line[2:].strip()
+            sections.setdefault(current, [])
+        elif current:
+            sections[current].append(line)
+    return sections
+
+
+def _parse_stat(lines: list[str]) -> dict[int, tuple[float, float]]:
+    """``cpu<N>`` lines from /proc/stat as ``{cpu: (busy, total)}`` jiffies.
+
+    The aggregate ``cpu`` line is skipped — it is the sum of the others, and the
+    meters are per core.
+    """
+    out: dict[int, tuple[float, float]] = {}
+    for line in lines:
+        fields = line.split()
+        if len(fields) < 5 or not fields[0].startswith("cpu"):
+            continue
+        index = fields[0][3:]
+        if not index.isdigit():
+            continue
+        try:
+            values = [float(v) for v in fields[1:]]
+        except ValueError:
+            continue
+        # user nice system idle iowait irq softirq steal guest guest_nice.
+        # idle+iowait is the idle share; guest time is already counted in user,
+        # so summing every field would double it.
+        total = sum(values[:8]) if len(values) >= 8 else sum(values)
+        idle = values[3] + (values[4] if len(values) > 4 else 0.0)
+        out[int(index)] = (total - idle, total)
+    return out
+
+
+def parse_cpu_list(spec: str) -> list[int]:
+    """``0-3,8,12-13`` -> ``[0, 1, 2, 3, 8, 12, 13]``."""
+    cpus: list[int] = []
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        lo, _, hi = part.partition("-")
+        if lo.isdigit() and hi.isdigit():
+            cpus.extend(range(int(lo), int(hi) + 1))
+        elif lo.isdigit():
+            cpus.append(int(lo))
+    return cpus
+
+
+def parse_node_sample(text: str, node: str = "", scope: str = "node") -> NodeSample:
+    """Turn the sampling script's output into a :class:`NodeSample`."""
+    sections = _split_sections(text)
+    sample = NodeSample(node=node, scope=scope)
+
+    first = _parse_stat(sections.get("stat1", []))
+    second = _parse_stat(sections.get("stat2", []))
+
+    allowed: list[int] = []
+    for line in sections.get("affinity", []):
+        _, _, spec = line.partition(":")
+        allowed = parse_cpu_list(spec)
+    # The affinity mask is what makes this the *job's* cores rather than the
+    # node's: inside the cgroup it is exactly the allocation. Without it (or on
+    # the SSH fallback, where it covers the machine) every core is shown.
+    cpus = [c for c in allowed if c in second] or sorted(second)
+
+    for cpu in cpus:
+        busy_now, total_now = second[cpu]
+        busy_before, total_before = first.get(cpu, (0.0, 0.0))
+        d_total = total_now - total_before
+        d_busy = busy_now - busy_before
+        # A counter that did not move (or went backwards, after a CPU hotplug)
+        # says nothing about utilisation — report it as idle, not as 100%.
+        ratio = d_busy / d_total if d_total > 0 else 0.0
+        sample.cores.append(CoreSample(cpu=cpu, busy=min(1.0, max(0.0, ratio))))
+
+    for line in sections.get("load", []):
+        fields = line.split()
+        if len(fields) >= 3:
+            try:
+                sample.load = (float(fields[0]), float(fields[1]), float(fields[2]))
+            except ValueError:
+                pass
+
+    meminfo: dict[str, float] = {}
+    for line in sections.get("meminfo", []):
+        key, _, value = line.partition(":")
+        parts = value.split()
+        if parts and parts[0].isdigit():
+            meminfo[key.strip()] = float(parts[0]) * 1024  # /proc/meminfo is kB
+
+    cgroup: dict[str, float] = {}
+    for line in sections.get("cgroup", []):
+        key, _, value = line.partition(" ")
+        value = value.strip()
+        if key in ("used", "limit") and value.isdigit() and key not in cgroup:
+            cgroup[key] = float(value)
+
+    limit = cgroup.get("limit", 0)
+    # An unlimited cgroup (a step with no memory limit of its own) says nothing
+    # about the job's headroom, so the node's own numbers are the better answer.
+    if "used" in cgroup and 0 < limit < _UNLIMITED:
+        sample.mem_used, sample.mem_total = cgroup["used"], limit
+        sample.mem_scope = "job"
+    elif "MemTotal" in meminfo:
+        total = meminfo["MemTotal"]
+        available = meminfo.get("MemAvailable", meminfo.get("MemFree"))
+        sample.mem_total = total
+        sample.mem_used = total - available if available is not None else None
+        sample.mem_scope = "node"
+
+    return sample
+
+
+def _gpu_float(raw: str) -> float | None:
+    """A CSV cell as a number, or None for nvidia-smi's [N/A]/[Not Supported]."""
+    raw = raw.strip()
+    if not raw or raw.startswith("["):
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def parse_gpu_sample(text: str, node: str = "", scope: str = "node") -> GpuReading:
+    """Parse ``nvidia-smi --query-gpu`` CSV into a :class:`GpuReading`."""
+    reading = GpuReading(node=node, scope=scope)
+    for line in text.splitlines():
+        fields = [f.strip() for f in line.split(",")]
+        if len(fields) < 5 or not fields[0].isdigit():
+            continue
+        util = _gpu_float(fields[2])
+        mem_used = _gpu_float(fields[3])
+        mem_total = _gpu_float(fields[4])
+        reading.gpus.append(GpuSample(
+            index=int(fields[0]),
+            name=fields[1],
+            util=util / 100 if util is not None else None,
+            # nounits reports memory in MiB.
+            mem_used=mem_used * 1024 ** 2 if mem_used is not None else None,
+            mem_total=mem_total * 1024 ** 2 if mem_total is not None else None,
+            temperature=_gpu_float(fields[5]) if len(fields) > 5 else None,
+            power=_gpu_float(fields[6]) if len(fields) > 6 else None,
+            power_limit=_gpu_float(fields[7]) if len(fields) > 7 else None,
+        ))
+    return reading
+
+
+async def get_node_sample(node: str, job_id: str = "") -> NodeSample:
+    """Sample per-core utilisation, memory and load, scoped to the job.
+
+    Preferred path is `srun --overlap`, which lands inside the job's cgroup and
+    so reports the allocated cores and the job's memory limit. Falls back to SSH,
+    which sees the whole machine — the same trade-off the gpu tab already makes.
+    """
+    if not node or node in ("N/A", "None", "(null)"):
+        return NodeSample(error="[dim]No node assigned[/]")
+
+    first_node = _first_node(node)
+    if job_id:
+        stdout, _, rc = await _run_cmd(
+            "srun", "--overlap", f"--jobid={job_id}",
+            "bash", "-c", _NODE_SAMPLE_SCRIPT,
+        )
+        if rc == 0 and "##stat2" in stdout:
+            return parse_node_sample(stdout, first_node, scope="job")
+
+    stdout, rc = await _ssh_cmd(first_node, _NODE_SAMPLE_SCRIPT)
+    if rc != 0 or "##stat2" not in stdout:
+        return NodeSample(
+            node=first_node,
+            error=f"[dim]Could not sample {first_node} (srun and SSH both failed)[/]",
+        )
+    return parse_node_sample(stdout, first_node, scope="node")
+
+
+async def get_gpu_sample(node: str, job_id: str = "") -> GpuReading:
+    """Per-GPU utilisation, memory, temperature and power for a job's GPUs."""
+    if not node or node in ("N/A", "None", "(null)"):
+        return GpuReading(error="[dim]No node assigned[/]")
+
+    first_node = _first_node(node)
+    if job_id:
+        stdout, _, rc = await _run_cmd(
+            "srun", "--overlap", f"--jobid={job_id}",
+            "bash", "-c", _GPU_SAMPLE_CMD,
+        )
+        if rc == 0 and stdout.strip():
+            reading = parse_gpu_sample(stdout, first_node, scope="job")
+            if reading.gpus:
+                return reading
+
+    stdout, rc = await _ssh_cmd(first_node, _GPU_SAMPLE_CMD)
+    if rc != 0 or not stdout.strip():
+        return GpuReading(
+            node=first_node,
+            error=f"[dim]Could not reach {first_node}, or nvidia-smi is not available[/]",
+        )
+    reading = parse_gpu_sample(stdout, first_node, scope="node")
+    if not reading.gpus:
+        reading.error = f"[dim]No GPUs reported by nvidia-smi on {first_node}[/]"
+    return reading
 
 
 def _first_node(node_spec: str) -> str:

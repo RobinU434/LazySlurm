@@ -31,6 +31,10 @@ class Config:
     # accounting-neutral) or "srun" (inside it, but adds a job step). See
     # INTERACTIVE_SHELLS in slurm.py for the trade-off.
     interactive_shell: str = "ssh"
+    # How the cpu/gpu tabs present themselves: "text" (raw ps / nvidia-smi),
+    # "meter" (per-core and per-GPU bars) or "graph" (meters plus history).
+    # Shift+M cycles it at runtime; see RESOURCE_MONITOR_MODES below.
+    resource_monitor: str = "graph"
 
 
 def _array_ranges(job_id: str) -> list[tuple[int, int, int]]:
@@ -662,6 +666,82 @@ def sizing_hint(eff: Efficiency) -> str:
     if not suggestions:
         return ""
     return "next time try " + " ".join(suggestions)
+
+
+# The three ways the cpu/gpu tabs can present themselves, in the order Shift+M
+# cycles them. "text" stays first because it is the only one that shows what the
+# meters cannot: the process list, and nvidia-smi's ECC/MIG/process sections.
+RESOURCE_MONITOR_MODES = ("text", "meter", "graph")
+
+
+@dataclass
+class CoreSample:
+    """One CPU as /proc/stat saw it over the sampling interval."""
+
+    cpu: int          # the kernel's cpu id, not the position in the list
+    busy: float       # 0-1, non-idle jiffies over total jiffies
+
+
+@dataclass
+class NodeSample:
+    """A point-in-time reading of one node, scoped to a job where possible.
+
+    ``scope`` is "job" when the reading came from inside the job's cgroup — the
+    cores are then the allocated ones and the memory is the cgroup's — and
+    "node" when it is the whole machine, which is what the SSH fallback sees.
+    """
+
+    node: str = ""
+    scope: str = "node"
+    cores: list[CoreSample] = field(default_factory=list)
+    mem_used: float | None = None     # bytes
+    mem_total: float | None = None    # bytes
+    mem_scope: str = "node"           # "job" (cgroup) or "node" (/proc/meminfo)
+    load: tuple[float, float, float] | None = None
+    error: str = ""                   # why there is nothing to show
+
+    @property
+    def busy(self) -> float:
+        """Mean utilisation across the sampled cores, 0-1."""
+        if not self.cores:
+            return 0.0
+        return sum(c.busy for c in self.cores) / len(self.cores)
+
+    @property
+    def mem_ratio(self) -> float | None:
+        if not self.mem_total or self.mem_used is None:
+            return None
+        return self.mem_used / self.mem_total
+
+
+@dataclass
+class GpuSample:
+    """One GPU as nvidia-smi reported it. Fields nvidia-smi omits stay None."""
+
+    index: int
+    name: str = ""
+    util: float | None = None         # 0-1
+    mem_used: float | None = None     # bytes
+    mem_total: float | None = None    # bytes
+    temperature: float | None = None  # degrees C
+    power: float | None = None        # watts
+    power_limit: float | None = None  # watts
+
+    @property
+    def mem_ratio(self) -> float | None:
+        if not self.mem_total or self.mem_used is None:
+            return None
+        return self.mem_used / self.mem_total
+
+
+@dataclass
+class GpuReading:
+    """Every GPU visible to the job, plus why the list may be empty."""
+
+    node: str = ""
+    scope: str = "node"               # "job" (srun --overlap) or "node" (ssh)
+    gpus: list[GpuSample] = field(default_factory=list)
+    error: str = ""
 
 
 @dataclass

@@ -4,6 +4,31 @@ All notable changes to LazySlurm are documented here. The distribution is
 published on PyPI as [`lazyslurm-py`](https://pypi.org/project/lazyslurm-py/);
 the command, the import package and the config directory are all `lazyslurm`.
 
+## Unreleased
+
+### Added
+
+- **Resource monitoring: htop/nvtop-style CPU and GPU meters with history**
+  ([#59](https://github.com/RobinU434/LazySlurm/issues/59)). The **cpu** tab was a `ps`
+  listing and the **gpu** tab was raw `nvidia-smi` — both answered "what is running right
+  now" and nothing else. They now draw one bar per *allocated* core (the job's cgroup, not
+  the node's core count) with the job's memory and the node's load beneath, and per-device
+  utilisation, memory, temperature and power for each GPU. In `graph` mode every metric
+  also carries a history band, which is what distinguishes a job that is ramping up from
+  one that has plateaued and one that has stalled.
+
+  `Shift+M` cycles the two tabs through `text` → `meter` → `graph` for the session;
+  `resource_monitor` in `config.toml` sets what they open on (`graph` by default). `text`
+  is kept as a full mode rather than dropped, because the meters cannot show what the raw
+  output carries: the process list, ECC counters and MIG partitions.
+
+  The cost is unchanged — one round trip per tab refresh, as before. The two `/proc/stat`
+  snapshots that a utilisation figure needs are taken on the node itself, half a second
+  apart, so the numbers are instantaneous rather than a five-second average, and the
+  remote path gains no extra hops through the shared session. The sample runs inside the
+  job's cgroup via `srun --overlap`, falling back to SSH and saying when it does.
+  `--no-live` still switches everything off.
+
 ## 0.3.0 — 2026-08-13
 
 Job arrays fold into one row, a failed job can be resubmitted with more of what it
