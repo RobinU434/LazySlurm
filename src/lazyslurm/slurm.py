@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import os
 import shlex
+from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Callable
+from typing import Callable, Iterable
 from pathlib import Path
 
 from lazyslurm.ssh import PromptCallback, SSHSession, quote_argv
@@ -88,9 +89,12 @@ def _as_int(value: str | None) -> int:
 
 
 def set_config(config: Config) -> None:
-    """Set the module-level config (called once at app startup)."""
+    """Set the module-level config (called at app startup, and on a config reload)."""
     global _config
     _config = config
+    # The caches below are answers to a question the config asks; a new config
+    # may be asking a different one.
+    reset_caches()
 
 
 # Where this module reports things the user should know about — set to the
@@ -341,26 +345,72 @@ async def get_running_jobs(config: Config | None = None) -> list[RunningJob]:
 
 _SACCT_FORMAT = "JobID,JobName,State,ExitCode,Start,End,Elapsed,Partition"
 
+# States a job can still leave, so its row is not worth remembering yet. The
+# next poll's window will pick it up again once it has settled.
+_UNFINISHED_STATES = ("RUNNING", "PENDING", "REQUEUED")
 
-async def get_completed_jobs(config: Config | None = None) -> list[CompletedJob]:
-    """Fetch past jobs via sacct, sorted by job ID descending (latest first)."""
-    cfg = config or _config
-    days = cfg.days
-    user = cfg.user or USER
-    start_time = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%dT00:00:00")
-    cmd: list[str] = [
-        "sacct",
-        "-u", user,
-        f"--format={_SACCT_FORMAT}",
-        f"--starttime={start_time}",
-        "--noheader",
-        "--parsable2",
-    ]
+# How far back a refresh looks, beyond the moment of the previous query.
+#
+# Two things make "since the last query" too tight. The login node's clock and
+# slurmdbd's need not agree, and an accounting row can land slightly after the
+# event it describes. Re-reading a couple of minutes costs nothing measurable
+# (the window is priced by how many jobs fall in it, and almost none do) and
+# removes both races.
+_SACCT_OVERLAP = timedelta(minutes=2)
 
-    stdout, _, rc = await _run_cmd(*cmd)
-    if rc != 0 or not stdout.strip():
-        return []
+# How often to re-ask for the whole window regardless.
+#
+# Merging only ever adds or updates; it cannot notice a row that was revised
+# retroactively into a shape the window no longer covers. A full query now and
+# then keeps a session that stays open for days from drifting, and at ten
+# minutes apart its cost disappears into the average.
+_SACCT_RESYNC = timedelta(minutes=10)
 
+
+@dataclass
+class _CompletedCache:
+    """Everything sacct has told us about this window, kept between polls."""
+
+    key: tuple[str, int, str]
+    jobs: dict[str, CompletedJob]
+    queried_at: datetime
+    full_at: datetime
+
+
+_completed_cache: _CompletedCache | None = None
+
+# How long the cluster bar's view of the partitions may be out of date. Nodes
+# do not drain and come back on a five-second cadence.
+_SINFO_TTL = timedelta(seconds=45)
+
+# (partition_order, fetched at, rendered entries)
+_partition_cache: tuple[tuple[str, ...], datetime, list[str]] | None = None
+
+
+def reset_caches() -> None:
+    """Forget everything remembered between polls.
+
+    Called when the config changes under the module, and by tests, which share
+    one imported module and would otherwise see each other's answers.
+    """
+    global _completed_cache, _partition_cache
+    _completed_cache = None
+    _partition_cache = None
+
+
+def _parse_end_time(value: str) -> datetime | None:
+    """The End column as a datetime, or None for "Unknown" and friends."""
+    text = (value or "").strip()
+    if not text or not text[0].isdigit():
+        return None
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def parse_sacct_jobs(stdout: str, partition: str = "") -> list[CompletedJob]:
+    """Parse `sacct --parsable2` output into the jobs worth showing."""
     jobs: list[CompletedJob] = []
     for line in stdout.strip().splitlines():
         parts = _split_row(line, 8, free_text=1)    # JobName
@@ -370,9 +420,9 @@ async def get_completed_jobs(config: Config | None = None) -> list[CompletedJob]
         if "." in job_id:
             continue
         state = parts[2].strip()
-        if state in ("RUNNING", "PENDING", "REQUEUED"):
+        if state in _UNFINISHED_STATES:
             continue
-        if cfg.partition and parts[7].strip() != cfg.partition:
+        if partition and parts[7].strip() != partition:
             continue
         jobs.append(CompletedJob(
             job_id=job_id,
@@ -384,8 +434,93 @@ async def get_completed_jobs(config: Config | None = None) -> list[CompletedJob]
             elapsed=parts[6].strip(),
             partition=parts[7].strip(),
         ))
-    jobs.sort(key=lambda j: job_sort_key(j.job_id), reverse=True)
     return jobs
+
+
+async def _query_sacct(user: str, since: datetime) -> tuple[str, bool]:
+    """Run sacct from `since`. Returns (stdout, ok)."""
+    stdout, _, rc = await _run_cmd(
+        "sacct",
+        "-u", user,
+        f"--format={_SACCT_FORMAT}",
+        f"--starttime={since.strftime('%Y-%m-%dT%H:%M:%S')}",
+        "--noheader",
+        "--parsable2",
+    )
+    return stdout, rc == 0
+
+
+async def get_completed_jobs(
+    config: Config | None = None, *, full: bool = False,
+) -> list[CompletedJob]:
+    """Past jobs via sacct, sorted by job ID descending (latest first).
+
+    The expensive query runs once. sacct's cost grows with the number of rows
+    in the window -- a seven-day history takes ~110ms here, a thirty-day one
+    ~1.5s -- and re-asking for all of it every few seconds returns a byte-
+    identical answer, since a job that has ended does not change again.
+
+    So the window is read in full once, kept, and afterwards only the part that
+    can still move is re-read. That works because ``--starttime`` selects jobs
+    in any state *during* the window rather than jobs that started in it: a job
+    that began days ago and ended a moment ago is still in a two-minute window,
+    which is exactly the job the refresh exists to notice.
+
+    `full=True` forces the whole window to be re-read.
+    """
+    global _completed_cache
+    cfg = config or _config
+    days = cfg.days
+    user = cfg.user or USER
+    key = (user, days, cfg.partition or "")
+
+    now = datetime.now()
+    window_start = (now - timedelta(days=days)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    cache = _completed_cache
+    if cache is not None and cache.key != key:
+        # A different question entirely (another user, window or partition):
+        # the remembered answers are about something else.
+        cache = None
+
+    incremental = (
+        not full
+        and cache is not None
+        and now - cache.full_at < _SACCT_RESYNC
+    )
+    since = max(cache.queried_at - _SACCT_OVERLAP, window_start) if incremental else window_start
+
+    stdout, ok = await _query_sacct(user, since)
+    if not ok:
+        # Keep serving what we have: a transient sacct failure should not blank
+        # the table, and the next poll will merge on top of it.
+        return _sorted(cache.jobs.values()) if cache is not None else []
+
+    fresh = {job.job_id: job for job in parse_sacct_jobs(stdout, cfg.partition)}
+    if incremental:
+        assert cache is not None
+        merged = dict(cache.jobs)
+        merged.update(fresh)
+        # A job leaves the window when it ended before its start, the same way
+        # it would have simply stopped appearing in a full query.
+        merged = {
+            job_id: job
+            for job_id, job in merged.items()
+            if (end := _parse_end_time(job.end)) is None or end >= window_start
+        }
+        full_at = cache.full_at
+    else:
+        merged, full_at = fresh, now
+
+    _completed_cache = _CompletedCache(
+        key=key, jobs=merged, queried_at=now, full_at=full_at,
+    )
+    return _sorted(merged.values())
+
+
+def _sorted(jobs: Iterable[CompletedJob]) -> list[CompletedJob]:
+    return sorted(jobs, key=lambda j: job_sort_key(j.job_id), reverse=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1660,21 +1795,46 @@ async def get_partitions(config: Config | None = None) -> list[PartitionInfo]:
     return order_partitions(parts, cfg)
 
 
-async def get_partition_availability(config: Config | None = None) -> list[str]:
+async def get_partition_availability(
+    config: Config | None = None, *, force: bool = False,
+) -> list[str]:
     """Return per-partition node availability strings from `sinfo`.
 
     Each entry looks like "gpu:10/5/0/15" (allocated/idle/other/total).
     Honors cfg.partition_order for display ordering; down partitions are
     dropped.
+
+    Cached for `_SINFO_TTL`. This feeds the cluster bar, which describes the
+    shape of the whole machine -- how many nodes a partition has, and roughly
+    how busy it is. That is not a five-second quantity, and asking for it at
+    five-second granularity costs a command (and, remotely, a round trip) to
+    redraw the same string. `force=True` on the manual refresh, where the user
+    has asked for everything to be current.
     """
+    global _partition_cache
     cfg = config or _config
+    key = tuple(cfg.partition_order or ())
+    now = datetime.now()
+    cached = _partition_cache
+    if (
+        not force
+        and cached is not None
+        and cached[0] == key
+        and now - cached[1] < _SINFO_TTL
+    ):
+        return cached[2]
+
     stdout, _, _ = await _run_cmd(
         "sinfo", "--noheader", "--summarize", f"--format={_SINFO_FORMAT}",
     )
     if not stdout.strip():
+        # Nothing to cache: an empty answer here usually means sinfo failed,
+        # and holding onto that for a minute would hide the recovery.
         return []
     parts = [p for p in parse_sinfo(stdout) if p.avail == "up"]
-    return [f"{p.name}:{p.nodes_aiot}" for p in order_partitions(parts, cfg)]
+    result = [f"{p.name}:{p.nodes_aiot}" for p in order_partitions(parts, cfg)]
+    _partition_cache = (key, now, result)
+    return result
 
 
 # ---------------------------------------------------------------------------

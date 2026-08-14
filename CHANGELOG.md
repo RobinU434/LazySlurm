@@ -6,6 +6,30 @@ the command, the import package and the config directory are all `lazyslurm`.
 
 ## Unreleased
 
+### Changed
+
+- **A refresh no longer re-reads the whole job history**
+  ([#63](https://github.com/RobinU434/LazySlurm/issues/63)). `sacct` was 69% of every
+  poll and returned a byte-identical answer each time, because a job that has ended does
+  not change again. It scaled badly with the window: 112ms at `days = 7`, **1.5s at
+  `days = 30`**, 4.5s at 90 — paid on every refresh.
+
+  The window is now read once and kept in memory, and each refresh re-reads only the
+  couple of minutes that can still have moved, merging the result. This is safe because
+  `sacct --starttime` selects jobs in any state *during* the window rather than jobs that
+  started in it, so a job that began days ago and ended a moment ago still shows up in a
+  two-minute window. The whole window is re-read every ten minutes anyway, in case an
+  accounting row was revised after the fact.
+
+  Two smaller ones alongside it: the cluster bar's `sinfo` call is cached for 45 seconds
+  (`r` bypasses that, since it is a plain staleness cache), and the job tables no longer
+  render every row to discover that nothing changed.
+
+  Measured on a login node, steady-state poll: **132ms → 33ms** at `days = 7`, and
+  **~1.6s → 44ms** at `days = 30`. Pressing `r` deliberately does *not* force the
+  expensive re-read — the incremental query is already current, and with
+  `refresh = 0` that keypress is the only path there is.
+
 ### Added
 
 - **The running version, in the footer**. The right edge of the footer now names the

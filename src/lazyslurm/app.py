@@ -921,14 +921,14 @@ class LazySlurmApp(App):
     # Data polling
     # ------------------------------------------------------------------
 
-    async def _poll_jobs(self) -> None:
+    async def _poll_jobs(self, force: bool = False) -> None:
         active_table = self.query_one("#active-jobs", ActiveJobTable)
         completed_table = self.query_one("#completed-jobs", CompletedJobTable)
 
         running, completed, part_info = await asyncio.gather(
             slurm.get_running_jobs(self.config),
             slurm.get_completed_jobs(self.config),
-            slurm.get_partition_availability(self.config),
+            slurm.get_partition_availability(self.config, force=force),
         )
         active_table.update_jobs(running)
         completed_table.update_jobs(completed)
@@ -2099,7 +2099,13 @@ class LazySlurmApp(App):
         if self.config.remote and slurm.get_session() is None:
             await self._start_remote_session()
             return
-        await self._poll_jobs()
+        # `force` here means the cluster bar, whose cache is a plain TTL and
+        # can genuinely be stale. The completed-job list is not forced: its
+        # incremental query already re-reads everything that could have
+        # changed, so a full re-read would cost a second on a wide window to
+        # return the same rows -- and with `refresh = 0` this is the *only*
+        # path, which is exactly the one worth keeping fast.
+        await self._poll_jobs(force=True)
         if self._selected_job_id:
             await self._load_job_details(self._selected_job_id)
             # Also refresh live monitors on explicit refresh
