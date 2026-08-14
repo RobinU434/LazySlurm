@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Callable, Iterable
 from pathlib import Path
@@ -383,8 +383,18 @@ _completed_cache: _CompletedCache | None = None
 # do not drain and come back on a five-second cadence.
 _SINFO_TTL = timedelta(seconds=45)
 
-# (partition_order, fetched at, rendered entries)
-_partition_cache: tuple[tuple[str, ...], datetime, list[str]] | None = None
+# (fetched at, every partition sinfo reported). One cache behind both the
+# cluster bar and the partition monitor: they ask the same question of the same
+# command, and used to each pay for it.
+_sinfo_cache: tuple[datetime, list[PartitionInfo]] | None = None
+
+# How long the per-partition running/pending counts may be out of date. Shorter
+# than the sinfo TTL because the queue does move on that scale -- but not zero,
+# because the command behind it is a cluster-wide squeue (#72).
+_QUEUE_COUNT_TTL = timedelta(seconds=15)
+
+# (fetched at, {partition: (running, pending)})
+_job_count_cache: tuple[datetime, dict[str, tuple[int, int]]] | None = None
 
 
 def reset_caches() -> None:
@@ -393,9 +403,10 @@ def reset_caches() -> None:
     Called when the config changes under the module, and by tests, which share
     one imported module and would otherwise see each other's answers.
     """
-    global _completed_cache, _partition_cache
+    global _completed_cache, _sinfo_cache, _job_count_cache
     _completed_cache = None
-    _partition_cache = None
+    _sinfo_cache = None
+    _job_count_cache = None
     _stat_cache.clear()
 
 
@@ -1766,34 +1777,71 @@ def parse_partition_job_counts(stdout: str) -> dict[str, tuple[int, int]]:
     return {name: (run, pend) for name, (run, pend) in counts.items()}
 
 
-async def get_partition_job_counts() -> dict[str, tuple[int, int]]:
-    """Running/pending job counts per partition, across all users."""
+async def get_partition_job_counts(*, force: bool = False) -> dict[str, tuple[int, int]]:
+    """Running/pending job counts per partition, across all users.
+
+    The command behind this is the most expensive one LazySlurm runs: a
+    cluster-wide `squeue` with no user or partition filter, which on a busy
+    controller returns tens of thousands of rows. Cached for
+    `_QUEUE_COUNT_TTL` so a refresh tick -- or reopening the monitor a second
+    after closing it -- does not ask slurmctld for the whole queue again (#72).
+    """
+    global _job_count_cache
+    now = datetime.now()
+    cached = _job_count_cache
+    if not force and cached is not None and now - cached[0] < _QUEUE_COUNT_TTL:
+        return dict(cached[1])
+
     stdout, _, rc = await _run_cmd(
         "squeue", "--noheader", "--format=%P|%T", "--states=RUNNING,PENDING",
     )
     if rc != 0 or not stdout.strip():
+        # An empty queue and a failed squeue look the same here, and caching
+        # the failure would hide the recovery for a quarter of a minute.
         return {}
-    return parse_partition_job_counts(stdout)
+    counts = parse_partition_job_counts(stdout)
+    _job_count_cache = (now, counts)
+    return dict(counts)
 
 
-async def get_partitions(config: Config | None = None) -> list[PartitionInfo]:
+async def _sinfo_partitions(*, force: bool = False) -> list[PartitionInfo]:
+    """Every partition as `sinfo --summarize` sees it, cached for `_SINFO_TTL`.
+
+    The one place that runs sinfo for the partition list. Callers get fresh
+    copies because they fill `running`/`pending` in, and the cache must not
+    come back carrying the last screen's job counts.
+    """
+    global _sinfo_cache
+    now = datetime.now()
+    cached = _sinfo_cache
+    if not force and cached is not None and now - cached[0] < _SINFO_TTL:
+        return [replace(p) for p in cached[1]]
+
+    stdout, _, rc = await _run_cmd(
+        "sinfo", "--noheader", "--summarize", f"--format={_SINFO_FORMAT}",
+    )
+    if rc != 0 or not stdout.strip():
+        # Nothing to cache: an empty answer here usually means sinfo failed,
+        # and holding onto that for a minute would hide the recovery.
+        return []
+    parts = parse_sinfo(stdout)
+    _sinfo_cache = (now, parts)
+    return [replace(p) for p in parts]
+
+
+async def get_partitions(
+    config: Config | None = None, *, force: bool = False,
+) -> list[PartitionInfo]:
     """Fetch every partition's node/CPU state from `sinfo`.
 
     Unlike the cluster bar this keeps unavailable ("down") partitions — the
     monitor screen shows them greyed out rather than hiding them.
+
+    Job counts are *not* filled in here; `get_partition_job_counts` is a
+    separate, much slower call and the monitor paints this first (#72).
     """
     cfg = config or _config
-    stdout, counts = await asyncio.gather(
-        _run_cmd("sinfo", "--noheader", "--summarize", f"--format={_SINFO_FORMAT}"),
-        get_partition_job_counts(),
-    )
-    out, _, rc = stdout
-    if rc != 0 or not out.strip():
-        return []
-    parts = parse_sinfo(out)
-    for part in parts:
-        part.running, part.pending = counts.get(part.name, (0, 0))
-    return order_partitions(parts, cfg)
+    return order_partitions(await _sinfo_partitions(force=force), cfg)
 
 
 async def get_partition_availability(
@@ -1805,37 +1853,16 @@ async def get_partition_availability(
     Honors cfg.partition_order for display ordering; down partitions are
     dropped.
 
-    Cached for `_SINFO_TTL`. This feeds the cluster bar, which describes the
-    shape of the whole machine -- how many nodes a partition has, and roughly
-    how busy it is. That is not a five-second quantity, and asking for it at
-    five-second granularity costs a command (and, remotely, a round trip) to
-    redraw the same string. `force=True` on the manual refresh, where the user
-    has asked for everything to be current.
+    Served from the shared `_sinfo_partitions` cache. This feeds the cluster
+    bar, which describes the shape of the whole machine -- how many nodes a
+    partition has, and roughly how busy it is. That is not a five-second
+    quantity, and asking for it at five-second granularity costs a command
+    (and, remotely, a round trip) to redraw the same string. `force=True` on
+    the manual refresh, where the user has asked for everything to be current.
     """
-    global _partition_cache
     cfg = config or _config
-    key = tuple(cfg.partition_order or ())
-    now = datetime.now()
-    cached = _partition_cache
-    if (
-        not force
-        and cached is not None
-        and cached[0] == key
-        and now - cached[1] < _SINFO_TTL
-    ):
-        return cached[2]
-
-    stdout, _, _ = await _run_cmd(
-        "sinfo", "--noheader", "--summarize", f"--format={_SINFO_FORMAT}",
-    )
-    if not stdout.strip():
-        # Nothing to cache: an empty answer here usually means sinfo failed,
-        # and holding onto that for a minute would hide the recovery.
-        return []
-    parts = [p for p in parse_sinfo(stdout) if p.avail == "up"]
-    result = [f"{p.name}:{p.nodes_aiot}" for p in order_partitions(parts, cfg)]
-    _partition_cache = (key, now, result)
-    return result
+    parts = [p for p in await _sinfo_partitions(force=force) if p.avail == "up"]
+    return [f"{p.name}:{p.nodes_aiot}" for p in order_partitions(parts, cfg)]
 
 
 # ---------------------------------------------------------------------------
