@@ -10,6 +10,8 @@ from pathlib import Path
 
 import tomlkit
 
+from lazyslurm import __version__
+
 # Use tomllib (3.11+) for reading; tomlkit does the writing, because it is the
 # only one of the two that preserves the file's comments and layout.
 try:
@@ -57,15 +59,24 @@ DEPRECATED: dict[str, str] = {}
 BACKUP_FILE = CONFIG_DIR / "config.toml.bak"
 
 
-def template_version() -> int:
-    """The revision of the packaged template, or 0 if it cannot be read."""
-    text = _template_text()
-    if not text:
-        return 0
-    try:
-        return int(tomllib.loads(text).get(VERSION_KEY, 0))
-    except (tomllib.TOMLDecodeError, TypeError, ValueError):
-        return 0
+def release_tuple(version: object) -> tuple[int, ...]:
+    """The comparable part of a version string: ``0.3.0+g1a2b3c4`` -> ``(0, 3, 0)``.
+
+    The local part identifies a build, not a release, so it plays no part in
+    deciding whether a config file is out of date -- otherwise every commit of a
+    checkout would look like a new version to migrate towards.
+
+    Anything unparsable sorts oldest, which is the safe direction: a file whose
+    version we cannot read is treated as one that predates us.
+    """
+    text = str(version or "").strip().split("+", 1)[0]
+    parts = []
+    for field in text.split("."):
+        digits = "".join(c for c in field if c.isdigit())
+        if not digits:
+            break
+        parts.append(int(digits))
+    return tuple(parts)
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -113,13 +124,18 @@ def migrate() -> list[str]:
     config: writing the defaults back as explicit values would freeze them, and
     the next release's changed default would silently not apply.
 
+    ``config_version`` records which LazySlurm wrote the file, so the trigger is
+    simply "an older one than this". That ties refreshes to releases rather than
+    to template edits: a template change made mid-cycle reaches a file already
+    stamped with the current version only once the version is bumped, which is
+    also when the user would expect their settings to have moved.
+
     Nothing here may stop the app from starting, so every failure is reported
     and swallowed. The file it replaces is kept at config.toml.bak.
     """
     if not CONFIG_FILE.exists():
         return []
-    latest = template_version()
-    if not latest:
+    if not _template_text():
         return []  # no packaged template to migrate towards
 
     try:
@@ -129,17 +145,16 @@ def migrate() -> list[str]:
         # A file we cannot parse is one we must not rewrite.
         return [f"config.toml could not be read, leaving it alone ({exc})"]
 
-    current = saved.get(VERSION_KEY, 0)
-    if not isinstance(current, int):
-        current = 0
-    if current == latest:
+    written_by = str(saved.get(VERSION_KEY, "") or "0.0.0")
+    was, now = release_tuple(written_by), release_tuple(__version__)
+    if was == now:
         return []
-    if current > latest:
+    if was > now:
         # Shared config directory, older LazySlurm. Downgrading the file would
         # throw away settings this build has never heard of.
         return [
-            f"config.toml is from a newer LazySlurm (v{current} > v{latest}) — "
-            "leaving it untouched"
+            f"config.toml was written by LazySlurm {written_by}, newer than this "
+            f"{__version__} — leaving it untouched"
         ]
 
     notes: list[str] = []
@@ -157,7 +172,7 @@ def migrate() -> list[str]:
     try:
         text, placed = _apply_to_template(_template_text(), values)
         doc = tomlkit.parse(text)
-        doc[VERSION_KEY] = latest
+        doc[VERSION_KEY] = __version__
         # Anything the template has no commented line for -- a nested table, or
         # a key from a build that knows settings this one does not -- is kept by
         # appending it, rather than dropped.
@@ -172,7 +187,8 @@ def migrate() -> list[str]:
 
     kept = len(values)
     notes.append(
-        f"config.toml updated to v{latest} (was v{current}), "
+        f"config.toml rewritten for LazySlurm {__version__} "
+        f"(was written by {written_by}), "
         f"{kept} setting{'' if kept == 1 else 's'} kept, backup at {BACKUP_FILE.name}"
     )
     return notes
@@ -191,6 +207,8 @@ def save(data: dict) -> None:
     doc = tomlkit.parse(existing)
     for key, value in data.items():
         doc[key] = value
+    # Stamp who wrote it, which is what the key means.
+    doc[VERSION_KEY] = __version__
     CONFIG_FILE.write_text(tomlkit.dumps(doc))
 
 

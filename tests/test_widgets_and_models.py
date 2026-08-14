@@ -8,6 +8,7 @@ from lazyslurm.models import JobDetail, RunningJob
 from lazyslurm.widgets.detail_view import parse_mem_bytes, sparkline
 from lazyslurm.widgets import job_table
 from lazyslurm.widgets.partition_view import load_bar
+from lazyslurm import __version__
 from lazyslurm import config as cfg
 
 
@@ -186,9 +187,9 @@ def test_save_writes_types_toml_can_parse(tmp_path, monkeypatch):
     assert cfg.load() == {
         "editor": "vim", "no_gpu": True, "days": 5,
         "partition_order": ["a", "b"], "partition_colors": {"gpu": "green"},
-        # A file written from the template is stamped with its revision, so it
-        # never looks like a config that needs migrating (#67).
-        "config_version": cfg.template_version(),
+        # A file records the LazySlurm that wrote it, so it never looks like a
+        # config that needs migrating (#67).
+        "config_version": __version__,
     }
 
 

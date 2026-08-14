@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 
+from lazyslurm import __version__
 from lazyslurm import config as persistent_config
 from lazyslurm.__main__ import deprecated_config_keys, unknown_config_keys
 
@@ -33,9 +34,8 @@ def _read(config_dir) -> str:
 # --- when it runs ----------------------------------------------------------
 
 
-def test_a_current_file_is_left_alone(config_dir):
-    version = persistent_config.template_version()
-    _write(config_dir, f"config_version = {version}\nrefresh = 9.0\n")
+def test_a_file_written_by_this_version_is_left_alone(config_dir):
+    _write(config_dir, f'config_version = "{__version__}"\nrefresh = 9.0\n')
     before = _read(config_dir)
 
     assert persistent_config.migrate() == []
@@ -49,14 +49,13 @@ def test_no_config_file_is_nothing_to_migrate(config_dir):
 
 def test_a_file_from_a_newer_lazyslurm_is_not_downgraded(config_dir):
     """A shared config directory must not lose settings this build lacks."""
-    future = persistent_config.template_version() + 5
-    _write(config_dir, f"config_version = {future}\nrefresh = 9.0\nfrom_the_future = 1\n")
+    _write(config_dir, 'config_version = "99.0.0"\nrefresh = 9.0\nfrom_the_future = 1\n')
     before = _read(config_dir)
 
     notes = persistent_config.migrate()
 
     assert _read(config_dir) == before
-    assert any("newer LazySlurm" in n for n in notes)
+    assert any("newer than this" in n for n in notes)
 
 
 def test_an_unparsable_file_is_reported_not_rewritten(config_dir):
@@ -139,7 +138,7 @@ def test_the_new_template_arrives(config_dir):
 
     # Options documented since the file was written are now in it.
     assert "resource_monitor" in text
-    assert f"config_version = {persistent_config.template_version()}" in text
+    assert f'config_version = "{__version__}"' in text
 
 
 def test_the_replaced_file_is_kept(config_dir):
@@ -152,11 +151,13 @@ def test_the_replaced_file_is_kept(config_dir):
 
 
 def test_the_migration_says_what_it_did(config_dir):
-    _write(config_dir, "refresh = 15.0\ndays = 3\n")
+    _write(config_dir, 'config_version = "0.1.0"\nrefresh = 15.0\ndays = 3\n')
     notes = persistent_config.migrate()
 
     assert len(notes) == 1
     assert "2 settings kept" in notes[0]
+    assert "was written by 0.1.0" in notes[0]
+    assert __version__ in notes[0]
 
 
 # --- deprecated keys -------------------------------------------------------
@@ -208,8 +209,44 @@ def test_a_removed_key_says_it_is_ignored(monkeypatch):
 # --- the version key itself ------------------------------------------------
 
 
-def test_the_packaged_template_carries_a_version():
-    assert persistent_config.template_version() >= 1
+@pytest.mark.parametrize(
+    "version,expected",
+    [
+        ("0.3.0", (0, 3, 0)),
+        # A checkout's local part names a build, not a release. Comparing it
+        # would make every commit look like a version to migrate towards.
+        ("0.3.0+g1a2b3c4", (0, 3, 0)),
+        ("0.10.2", (0, 10, 2)),
+        ("1.2", (1, 2)),
+        ("", ()),
+        (None, ()),
+        ("nonsense", ()),
+    ],
+)
+def test_a_version_compares_by_release(version, expected):
+    assert persistent_config.release_tuple(version) == expected
+
+
+def test_versions_order_numerically_not_lexically():
+    rel = persistent_config.release_tuple
+    assert rel("0.3.0") < rel("0.10.0") < rel("1.0.0")
+
+
+def test_a_file_with_no_version_is_treated_as_the_oldest(config_dir):
+    _write(config_dir, "refresh = 15.0\n")
+    assert persistent_config.migrate() != []
+    assert persistent_config.load()["config_version"] == __version__
+
+
+def test_an_unreadable_version_does_not_block_the_migration(config_dir):
+    _write(config_dir, 'config_version = "nonsense"\nrefresh = 15.0\n')
+    assert persistent_config.migrate() != []
+    assert persistent_config.load()["config_version"] == __version__
+
+
+def test_a_new_file_records_the_version_that_wrote_it(config_dir):
+    persistent_config.save({"editor": "nano"})
+    assert persistent_config.load()["config_version"] == __version__
 
 
 def test_the_version_key_is_not_an_unknown_setting():

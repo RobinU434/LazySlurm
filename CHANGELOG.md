@@ -15,9 +15,11 @@ the command, the import package and the config directory are all `lazyslurm`.
   releases ago documented two-releases-ago's settings and said nothing about the ones
   added since.
 
-  It now carries a `config_version`, and LazySlurm rewrites the file from the current
-  template when it ships a newer one, putting every value you set back in the position the
-  template documents it, with its explanation intact. Only what is actually *in* your file
+  It now records which LazySlurm wrote it — `config_version = "0.3.0"` — and a newer
+  release rewrites the file from its own template, putting every value you set back in the
+  position the template documents it, with its explanation intact. Refreshes are therefore
+  tied to releases rather than to individual template edits: the file is rewritten once
+  when you upgrade, and left alone for as long as you stay put. Only what is actually *in* your file
   is carried over — writing the defaults back as explicit values would freeze them against
   a later release changing them. The replaced file is kept at `config.toml.bak`, an
   unrecognised key is kept rather than dropped, a file from a *newer* LazySlurm is left
