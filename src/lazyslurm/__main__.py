@@ -40,6 +40,7 @@ _FILE_ONLY_KEYS = frozenset({
     "resource_monitor",
     "node_expand",
     "gpu_column",
+    "config_version",
 })
 
 KNOWN_CONFIG_KEYS = frozenset(_CONFIG_KEYS) | _FILE_ONLY_KEYS
@@ -52,12 +53,33 @@ def unknown_config_keys(saved: dict) -> list[str]:
     problem to diagnose because the file looks right. Reported, never rejected:
     one typo must not cost the user every other setting they configured.
     Nested tables are checked by table name only.
+
+    A key that used to be real is reported by `deprecated_config_keys` instead,
+    which can say what replaced it — much more useful than "unknown".
     """
+    from lazyslurm.config import DEPRECATED
+
     return [
         f"ignoring unknown setting: {key}"
         for key in sorted(saved)
-        if key not in KNOWN_CONFIG_KEYS
+        if key not in KNOWN_CONFIG_KEYS and key not in DEPRECATED
     ]
+
+
+def deprecated_config_keys(saved: dict) -> list[str]:
+    """Warnings for settings that were real once, naming their replacement."""
+    from lazyslurm.config import DEPRECATED
+
+    notes = []
+    for key in sorted(saved):
+        if key not in DEPRECATED:
+            continue
+        replacement = DEPRECATED[key]
+        notes.append(
+            f"{key} has been renamed to {replacement}" if replacement
+            else f"{key} is no longer used and is ignored"
+        )
+    return notes
 
 
 # What the main view cannot work without. Everything else (sinfo, sstat, sprio,
@@ -175,7 +197,9 @@ def parse_gpu_column(raw: object) -> tuple[str, str]:
 def main() -> None:
     from lazyslurm import config as persistent_config
 
-    # Load saved config for defaults
+    # Bring the file up to the packaged template first, so the values read
+    # below are the migrated ones and the notes reach the same warning list.
+    migration_notes = persistent_config.migrate()
     saved = persistent_config.load()
 
     parser = argparse.ArgumentParser(
@@ -328,7 +352,7 @@ def main() -> None:
     )
     node_expand, expand_warning = parse_node_expand(saved.get("node_expand", "gpu"))
     gpu_column, column_warning = parse_gpu_column(saved.get("gpu_column", "count"))
-    warnings = unknown_config_keys(saved)
+    warnings = migration_notes + deprecated_config_keys(saved) + unknown_config_keys(saved)
     for warning in (shell_warning, monitor_warning, expand_warning, column_warning):
         if warning:
             warnings.append(warning)

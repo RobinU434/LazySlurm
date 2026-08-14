@@ -8,6 +8,29 @@ the command, the import package and the config directory are all `lazyslurm`.
 
 ### Added
 
+- **The config file keeps up with the releases**
+  ([#67](https://github.com/RobinU434/LazySlurm/issues/67)). `config.toml` is ~50 lines of
+  comments documenting every setting, and the only reference for them inside the product —
+  but it was written once and then only ever edited in place, so a file created two
+  releases ago documented two-releases-ago's settings and said nothing about the ones
+  added since.
+
+  It now records which LazySlurm wrote it — `config_version = "0.3.0"` — and a newer
+  release rewrites the file from its own template, putting every value you set back in the
+  position the template documents it, with its explanation intact. Refreshes are therefore
+  tied to releases rather than to individual template edits: the file is rewritten once
+  when you upgrade, and left alone for as long as you stay put. Only what is actually *in* your file
+  is carried over — writing the defaults back as explicit values would freeze them against
+  a later release changing them. The replaced file is kept at `config.toml.bak`, an
+  unrecognised key is kept rather than dropped, a file from a *newer* LazySlurm is left
+  strictly alone, and anything that goes wrong is reported and skipped rather than being
+  allowed to stop the app from starting.
+
+  Settings that were real once are now told apart from typos: a renamed one says what
+  replaced it and has its value moved across, a removed one says it is ignored. Every
+  migration writes a line to the command log, so a rewrite of a hand-edited file is never
+  silent.
+
 - **Fold a node open into its GPUs, in the partition monitor**
   ([#66](https://github.com/RobinU434/LazySlurm/issues/66)). The node view stopped one
   level too early on a GPU cluster: `7/8` says how full a node is, but not *which* device

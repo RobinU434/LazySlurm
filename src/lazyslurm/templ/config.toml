@@ -4,6 +4,13 @@
 # All CLI arguments can be set here as defaults.
 # CLI arguments always override config file values.
 
+# The LazySlurm release that last wrote this file. Written for you, not by you.
+# When a newer release runs, it rewrites the file from its own template --
+# keeping every value you set and leaving a copy at config.toml.bak -- so the
+# comments here always document the version you are actually running. Set it to
+# an older version (or delete the line) to force that rewrite.
+config_version = "0.0.0"
+
 # refresh = 5.0              # auto-refresh interval in seconds (0 = off)
 # days = 7                   # how many days back for terminated jobs
 # user = ""                  # Slurm user to monitor (empty = $USER)

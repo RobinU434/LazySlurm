@@ -2060,17 +2060,22 @@ class LazySlurmApp(App):
             parse_cache_max_age,
             parse_gpu_column,
             parse_interactive_shell,
+            deprecated_config_keys,
             parse_node_expand,
             parse_resource_monitor,
             unknown_config_keys,
         )
 
+        # Editing the file in-app goes through the same migration as startup, so
+        # a config written by an older release is brought up to date here too.
+        for note in persistent_config.migrate():
+            self._log("config file", note)
         saved = persistent_config.load()
         old = self.config
 
         # The user has just been editing the file, so a typo made here is the
         # one worth catching immediately.
-        for warning in unknown_config_keys(saved):
+        for warning in deprecated_config_keys(saved) + unknown_config_keys(saved):
             self._log("config file", warning)
         shell, shell_warning = parse_interactive_shell(
             saved.get("interactive_shell", old.interactive_shell)

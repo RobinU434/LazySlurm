@@ -1151,6 +1151,52 @@ debug = "dim"
 
 </details>
 
+### Keeping the file up to date
+
+<details>
+<summary>What happens to your config when LazySlurm gains a setting</summary>
+
+The config file is ~50 lines of comments documenting every setting, and it is the only
+reference for them inside the product. A file written two releases ago carries two
+releases' worth of stale documentation and says nothing about the options added since.
+
+So the file records which LazySlurm wrote it:
+
+```toml
+config_version = "0.3.0"
+```
+
+When a newer release runs, it rewrites the file from its own template and puts every value
+you set back — in the place the template documents it, with its explanation intact:
+
+```toml
+refresh = 15.0  # auto-refresh interval in seconds (0 = off)
+```
+
+What it does and does not do:
+
+- **Only what is actually in your file is carried over**, never the effective config.
+  Writing the defaults back as explicit values would freeze them, and a later release's
+  changed default would silently not apply to you.
+- **The file it replaces is kept** at `config.toml.bak`. The rewrite loses comments you
+  added yourself, so the copy matters.
+- **A key it does not recognise is kept**, not dropped — it may be a typo, but it may
+  equally be a setting from a newer LazySlurm.
+- **A file from a newer LazySlurm is left completely alone**, and says so. Sharing a
+  config directory between machines must not downgrade it.
+- **Anything that goes wrong is reported and skipped.** A config that cannot be parsed is
+  never rewritten, and no failure here stops the app from starting.
+
+Refreshes are tied to releases, not to individual template edits: the file is rewritten
+once when you move to a newer LazySlurm, and left alone for as long as you stay on it.
+
+Every migration writes a line to the command log — `config.toml rewritten for LazySlurm
+0.3.0 (was written by 0.2.1), 2 settings kept, backup at config.toml.bak` — so a rewrite
+of a file you hand-edited is never silent. A setting that has been renamed says so and moves your value across; one
+that has been removed says that instead of being reported as a typo.
+
+</details>
+
 ### CLI vs config file
 
 <details>
