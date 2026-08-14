@@ -208,8 +208,13 @@ A utilisation figure needs two `/proc/stat` snapshots. The first sample after op
 job takes both on the node, half a second apart — which is what that first sample costs.
 Afterwards the previous snapshot is kept and subtracted from, so a refresh returns as
 fast as `srun` can start (625ms → 99ms here), and the percentages cover the interval
-since the last refresh, the way htop covers the gap since its last draw. A snapshot older
-than a minute is not reused: a minute's average is no longer "now".
+since the last refresh, the way htop covers the gap since its last draw.
+
+Because that interval can be minutes — with `refresh = 0`, `r` is the only path and
+presses are far apart — the header says what the numbers average over: `2 cores,
+allocated to this job · last 3m 12s`. A sample that timed itself covers half a second and
+reads as "now", so it goes unmentioned. Past ten minutes the sample times itself again
+rather than averaging over an hour.
 
 Only the tab you are looking at is sampled, on `r` and on the auto-refresh alike.
 

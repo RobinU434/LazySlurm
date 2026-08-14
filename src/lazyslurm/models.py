@@ -788,6 +788,10 @@ class NodeSample:
     mem_scope: str = "node"           # "job" (cgroup) or "node" (/proc/meminfo)
     load: tuple[float, float, float] | None = None
     error: str = ""                   # why there is nothing to show
+    # Seconds the utilisation figures average over. Half a second when the
+    # sample timed itself; the gap since the last refresh when it differenced
+    # against a kept snapshot -- which is not "now", and says so on screen.
+    span: float | None = None
 
     # The /proc/stat counters this reading ended at, kept so the next sample can
     # difference against them instead of pausing on the node to take its own

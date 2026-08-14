@@ -686,7 +686,7 @@ def test_refresh_only_samples_the_tab_being_looked_at(monkeypatch):
         async def _gpu():
             loaded.append("gpu")
 
-        async def _details(job_id):
+        async def _details(job_id, reset_monitors=True):
             return None
 
         async with app.run_test(size=(120, 40)) as pilot:
@@ -704,5 +704,98 @@ def test_refresh_only_samples_the_tab_being_looked_at(monkeypatch):
             loaded.clear()
             await app.action_refresh()
             assert loaded == ["cpu"]
+
+    asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# The window a reading covers (#63 follow-up)
+# ---------------------------------------------------------------------------
+
+
+def test_a_self_timed_sample_covers_half_a_second(monkeypatch):
+    async def _run_cmd(*args):
+        return _sample_text([_stat(0, 100, 100)], [_stat(0, 200, 100)], affinity="0"), "", 0
+
+    monkeypatch.setattr(slurm, "_run_cmd", _run_cmd)
+    sample = asyncio.run(slurm.get_node_sample("node042", "4815"))
+    assert sample.span == slurm._SAMPLE_SLEEP
+
+
+def test_a_differenced_sample_reports_the_gap_it_covers(monkeypatch):
+    responses = [
+        _sample_text([_stat(0, 100, 100)], [_stat(0, 200, 100)], affinity="0"),
+        _one_snapshot([_stat(0, 250, 150)], affinity="0"),
+    ]
+    calls: list[tuple] = []
+
+    async def _run_cmd(*args):
+        calls.append(args)
+        return responses[len(calls) - 1], "", 0
+
+    monkeypatch.setattr(slurm, "_run_cmd", _run_cmd)
+    asyncio.run(slurm.get_node_sample("node042", "4815"))
+    # Age the kept snapshot by three minutes, as a manual refresh would.
+    counters, taken = slurm._stat_cache[("node042", "4815")]
+    slurm._stat_cache[("node042", "4815")] = (counters, taken - timedelta(minutes=3))
+
+    sample = asyncio.run(slurm.get_node_sample("node042", "4815"))
+    assert "sleep" not in calls[1][-1]          # still the fast path
+    assert sample.span == pytest.approx(180, abs=2)
+
+
+def test_a_manual_refresh_minutes_later_still_uses_the_kept_snapshot(monkeypatch):
+    """The whole point: with refresh = 0, presses are minutes apart."""
+    assert slurm._SAMPLE_MAX_AGE >= timedelta(minutes=5)
+
+
+def test_an_hour_old_snapshot_is_not_differenced_against(monkeypatch):
+    calls: list[tuple] = []
+
+    async def _run_cmd(*args):
+        calls.append(args)
+        return _sample_text([_stat(0, 100, 100)], [_stat(0, 200, 100)], affinity="0"), "", 0
+
+    monkeypatch.setattr(slurm, "_run_cmd", _run_cmd)
+    asyncio.run(slurm.get_node_sample("node042", "4815"))
+    counters, taken = slurm._stat_cache[("node042", "4815")]
+    slurm._stat_cache[("node042", "4815")] = (counters, taken - timedelta(hours=1))
+    sample = asyncio.run(slurm.get_node_sample("node042", "4815"))
+
+    assert "sleep" in calls[1][-1]
+    assert sample.span == slurm._SAMPLE_SLEEP
+
+
+@pytest.mark.parametrize(
+    "span,expected",
+    [
+        (None, ""),
+        (0.5, ""),            # a self-timed sample reads as "now"
+        (2.0, ""),
+        (45.0, " · last 45s"),
+        (192.0, " · last 3m 12s"),
+    ],
+)
+def test_the_window_is_only_printed_when_it_is_not_now(span, expected):
+    from lazyslurm.widgets.detail_view import format_span
+    assert format_span(span) == expected
+
+
+def test_the_header_says_what_the_percentages_average_over():
+    sample = _node_sample([0.5, 0.5])
+    sample.span = 192.0
+    assert "last 3m 12s" in render_cpu_monitor(sample, width=100)
+
+
+def test_a_refresh_does_not_wipe_a_sample_already_in_flight(monkeypatch):
+    """_load_job_details resets the meters only when the job actually changed."""
+    async def scenario():
+        app = _app(monkeypatch, no_live=True)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            detail = app.query_one("#detail-view", DetailView)
+            detail.load_cpu("meters for the job on screen")
+            await app._load_job_details("4815", reset_monitors=False)
+            assert "Press" not in str(detail.query_one("#cpu-content").content)
 
     asyncio.run(scenario())

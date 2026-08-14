@@ -1280,7 +1280,7 @@ class LazySlurmApp(App):
                 group="job_detail",
             )
 
-    async def _load_job_details(self, job_id: str) -> None:
+    async def _load_job_details(self, job_id: str, reset_monitors: bool = True) -> None:
         detail_view = self.query_one("#detail-view", DetailView)
         metadata_view = self.query_one("#metadata-view", MetadataView)
 
@@ -1322,11 +1322,15 @@ class LazySlurmApp(App):
         detail_view.load_stderr(stderr_content)
         history = self._resource_history.get(job_id)
         detail_view.load_stats(stats, history=history)
-        detail_view.load_cpu("[dim]Press \\[r] or wait for auto-refresh[/]")
-        try:
-            detail_view.load_gpu("[dim]Press \\[r] or wait for auto-refresh[/]")
-        except NoMatches:
-            pass  # GPU tab not present (--no-gpu / --no-live)
+        # Only when the job changed. On a refresh the meters are for the job
+        # still on screen, and a sample already in flight would be wiped by the
+        # placeholder that replaced it.
+        if reset_monitors:
+            detail_view.load_cpu("[dim]Press \\[r] or wait for auto-refresh[/]")
+            try:
+                detail_view.load_gpu("[dim]Press \\[r] or wait for auto-refresh[/]")
+            except NoMatches:
+                pass  # GPU tab not present (--no-gpu / --no-live)
         metadata_view.load_detail(
             detail,
             priority if isinstance(priority, PriorityInfo) else None,
@@ -2324,14 +2328,27 @@ class LazySlurmApp(App):
         # changed, so a full re-read would cost a second on a wide window to
         # return the same rows -- and with `refresh = 0` this is the *only*
         # path, which is exactly the one worth keeping fast.
+        # The node sample owns most of the wall clock -- up to half a second of
+        # it spent waiting on the node -- and nothing in the poll depends on it.
+        # Started first and collected last, it overlaps the poll instead of
+        # following it. (In remote mode the shared session serializes anyway, so
+        # this neither helps nor hurts there.)
+        monitors = None
+        if self._selected_job_id and self._selected_node and not self.config.no_live:
+            monitors = asyncio.create_task(self._refresh_live_monitors())
+
         await self._poll_jobs(force=True)
         if self._selected_job_id:
-            await self._load_job_details(self._selected_job_id)
+            await self._load_job_details(
+                self._selected_job_id, reset_monitors=monitors is None,
+            )
             # Only the tab being looked at, the way the auto-refresh already
             # does it. Sampling both cost a second round trip -- and, in remote
             # mode, a serialized one -- to update a panel that is not on screen.
-            if not self.config.no_live:
+            if not self.config.no_live and monitors is None:
                 await self._refresh_live_monitors()
+        if monitors is not None:
+            await monitors
         self._log("refresh", "complete")
 
     def _log(self, action: str, result: str = "") -> None:
