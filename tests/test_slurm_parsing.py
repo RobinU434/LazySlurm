@@ -251,7 +251,7 @@ def test_archive_batch_script_writes_cache(tmp_path, monkeypatch):
 
     monkeypatch.setattr(slurm, "_run_cmd", _fake)
     path = asyncio.run(slurm.archive_batch_script("123"))
-    assert path == tmp_path / "scripts" / "123.sh"
+    assert path == tmp_path / "scripts" / cfg.CLUSTER / "123.sh"
     assert path.read_text() == "#!/bin/bash\necho hi\n"
 
 

@@ -6,6 +6,28 @@ the command, the import package and the config directory are all `lazyslurm`.
 
 ## Unreleased
 
+### Fixed
+
+- **Job caches no longer collide across clusters**
+  ([#61](https://github.com/RobinU434/LazySlurm/issues/61)). Both on-disk caches were
+  keyed by job id alone, and Slurm numbers jobs from 1 on every cluster — so job 4815 on
+  one cluster and job 4815 on another were one entry, and whichever was seen last won.
+  The stdout tab then pointed at the other cluster's path, `b` showed the other cluster's
+  batch script, and because resubmit falls back to the archive when the original file is
+  gone, `s` could submit it. All of it silent.
+
+  Both caches now carry a cluster level: `log_cache.json` becomes
+  `{"version": 2, "clusters": {"<name>": {...}}}` and the archive becomes
+  `scripts/<cluster>/<job>.sh`. The cluster is Slurm's own `ClusterName` — the same
+  identity Slurm uses for accounting, stable across login nodes and independent of how
+  you connected — falling back to the `--remote` host and then `"local"`, with
+  `cluster_name` in `config.toml` as an override. Deliberately *not* the login node's IP:
+  those are routinely round-robin, which would split one cluster's cache into several.
+
+  An existing flat cache is read as the current cluster's rather than discarded, and
+  loose `scripts/*.sh` are moved under it, since whoever wrote them had one cluster — the
+  one they are on now. Pruning reaches every cluster, not just the connected one.
+
 ### Changed
 
 - **A refresh no longer re-reads the whole job history**

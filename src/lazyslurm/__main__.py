@@ -38,6 +38,7 @@ _FILE_ONLY_KEYS = frozenset({
     "script_cache_dir",
     "interactive_shell",
     "resource_monitor",
+    "cluster_name",
 })
 
 KNOWN_CONFIG_KEYS = frozenset(_CONFIG_KEYS) | _FILE_ONLY_KEYS
@@ -323,6 +324,7 @@ def main() -> None:
         script_cache_dir=script_cache_dir,
         interactive_shell=interactive_shell,
         resource_monitor=resource_monitor,
+        cluster_name=str(saved.get("cluster_name", "")).strip(),
     )
 
     # Bail out before the TUI starts rather than crashing on the first poll:

@@ -35,6 +35,9 @@ class Config:
     # "meter" (per-core and per-GPU bars) or "graph" (meters plus history).
     # Shift+M cycles it at runtime; see RESOURCE_MONITOR_MODES below.
     resource_monitor: str = "graph"
+    # What to call this cluster in the per-cluster caches. Empty means "ask
+    # Slurm"; see slurm.get_cluster_name() for the fallback chain.
+    cluster_name: str = ""
 
 
 def _array_ranges(job_id: str) -> list[tuple[int, int, int]]:

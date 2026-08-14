@@ -812,12 +812,11 @@ class LazySlurmApp(App):
             collapse_arrays=self.config.collapse_arrays,
         )
 
-        # Prune old cache entries. Point the script cache at the configured
-        # directory first, so we prune the one we will actually be using.
+        # Point the script cache at the configured directory. Pruning waits for
+        # _identify_cluster: both caches are keyed by cluster now, and in remote
+        # mode the cluster cannot be asked until the session is open.
         from lazyslurm import config as persistent_config
-        persistent_config.prune_log_cache(max_age_days=self.config.cache_max_age_days)
         persistent_config.set_script_cache_dir(self.config.script_cache_dir)
-        persistent_config.prune_script_cache(max_age_days=self.config.cache_max_age_days)
 
         self.query_one("#detail-view").border_title = "Job Details"
         self.query_one("#metadata-view").border_title = "Job Metadata"
@@ -859,8 +858,35 @@ class LazySlurmApp(App):
         if self.config.remote:
             self.call_after_refresh(self._start_remote_session)
         else:
-            self.call_after_refresh(self._poll_jobs)
-            self._start_polling()
+            self.call_after_refresh(self._begin_local)
+
+    async def _begin_local(self) -> None:
+        await self._identify_cluster()
+        await self._poll_jobs()
+        self._start_polling()
+
+    async def _identify_cluster(self) -> None:
+        """Name the cluster, then tidy the caches that are keyed by it.
+
+        Job ids are per-cluster, so both on-disk caches carry a cluster level
+        (#61). Nothing may touch them before this has run, or one cluster's log
+        paths and batch script get served for another's job of the same number.
+        """
+        from lazyslurm import config as persistent_config
+
+        name = await slurm.get_cluster_name(self.config)
+        persistent_config.set_cluster(name)
+        self._log("cluster", persistent_config.CLUSTER)
+
+        moved = persistent_config.migrate_script_cache()
+        if moved:
+            self._log(
+                "script cache",
+                f"moved {moved} script{'' if moved == 1 else 's'} "
+                f"under {persistent_config.CLUSTER}/",
+            )
+        persistent_config.prune_log_cache(max_age_days=self.config.cache_max_age_days)
+        persistent_config.prune_script_cache(max_age_days=self.config.cache_max_age_days)
 
     def _start_polling(self) -> None:
         """Begin the refresh timers (refresh=0 disables auto-refresh)."""
@@ -908,6 +934,8 @@ class LazySlurmApp(App):
             self.notify(msg, title="SSH connection failed", severity="error", timeout=10)
             self._log("ssh", "press [bold]r[/] to retry")
             return
+        # Only now can the cluster be asked its name: scontrol runs there.
+        await self._identify_cluster()
         await self._poll_jobs()
         self._start_polling()
 
@@ -1910,6 +1938,7 @@ class LazySlurmApp(App):
             ),
             interactive_shell=shell,
             resource_monitor=monitor,
+            cluster_name=str(saved.get("cluster_name", old.cluster_name)).strip(),
         )
         # An edit to the file is an explicit choice, so it wins over whatever
         # Shift+M left the session on.

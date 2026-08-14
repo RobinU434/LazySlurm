@@ -2,6 +2,7 @@
 
 import pytest
 
+from lazyslurm import config as persistent_config
 from lazyslurm import slurm
 
 
@@ -13,6 +14,7 @@ def _reset_slurm_caches():
     whole session -- so without this a test that stubs `_run_cmd` can be served
     the answer a previous test's stub gave.
     """
+    persistent_config.set_cluster(persistent_config.DEFAULT_CLUSTER)
     slurm.reset_caches()
     yield
     slurm.reset_caches()

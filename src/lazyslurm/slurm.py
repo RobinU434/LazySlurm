@@ -394,8 +394,10 @@ def reset_caches() -> None:
     one imported module and would otherwise see each other's answers.
     """
     global _completed_cache, _partition_cache
+    global _cluster_name
     _completed_cache = None
     _partition_cache = None
+    _cluster_name = ""
     _stat_cache.clear()
 
 
@@ -1794,6 +1796,58 @@ async def get_partitions(config: Config | None = None) -> list[PartitionInfo]:
     for part in parts:
         part.running, part.pending = counts.get(part.name, (0, 0))
     return order_partitions(parts, cfg)
+
+
+_cluster_name: str = ""
+
+
+def _remote_host(remote: str) -> str:
+    """The host part of an SSH target: ``me@login.hpc.edu:22`` -> ``login.hpc.edu``."""
+    host = (remote or "").strip().rpartition("@")[2]
+    return host.partition(":")[0].strip().lower()
+
+
+async def get_cluster_name(config: Config | None = None) -> str:
+    """What to call the cluster these job ids belong to.
+
+    Job ids are per-cluster, so the caches need to know which one they are
+    holding (#61). Three sources, in decreasing order of how well they identify
+    a cluster rather than a route to one:
+
+    1. ``cluster_name`` in config.toml -- the escape hatch, and the only thing
+       that can be right when the rest is not.
+    2. Slurm's own ``ClusterName``. This is precisely the identity wanted: it is
+       what Slurm uses to tell clusters apart in accounting, it is the same from
+       every login node, and it does not change with how you connected. One
+       command, once per session.
+    3. The ``--remote`` host, lowercased. Free, but a route rather than an
+       identity: ``login.hpc.edu`` and ``hpc.edu`` would be two names for one
+       cluster.
+
+    Deliberately not the login node's IP address: those are routinely
+    round-robin, so keying on one would split a single cluster's cache into
+    several and reintroduce the miss this exists to prevent.
+    """
+    global _cluster_name
+    cfg = config or _config
+    if _cluster_name:
+        return _cluster_name
+
+    configured = (cfg.cluster_name or "").strip()
+    if configured:
+        _cluster_name = configured
+        return _cluster_name
+
+    stdout, _, rc = await _run_cmd("scontrol", "show", "config")
+    if rc == 0:
+        for line in stdout.splitlines():
+            key, _, value = line.partition("=")
+            if key.strip() == "ClusterName" and value.strip():
+                _cluster_name = value.strip()
+                return _cluster_name
+
+    _cluster_name = _remote_host(cfg.remote) or "local"
+    return _cluster_name
 
 
 async def get_partition_availability(
