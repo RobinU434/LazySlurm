@@ -2167,11 +2167,16 @@ _NODE_SAMPLE_SCRIPT = f"{_NODE_SAMPLE_BODY}\nsleep {_SAMPLE_SLEEP}\necho '##stat
 
 # How stale a kept snapshot may be and still be worth subtracting from.
 #
-# The delta then covers the gap since the last sample, the way htop reports the
-# gap since its last draw. Past a minute that stops being "now" in any useful
-# sense -- a job that finished its epoch two minutes ago would still be shown
-# busy -- so beyond this the sample pays for its own second snapshot again.
-_SAMPLE_MAX_AGE = timedelta(seconds=60)
+# Generous on purpose. With `refresh = 0` the r key is the only path there is,
+# and presses are usually minutes apart -- a one-minute cap meant the snapshot
+# had always expired and every manual refresh paid the half second again, which
+# is precisely the case the snapshot exists to spare.
+#
+# "Average over the last three minutes" is a fair answer to someone who last
+# looked three minutes ago; it is only misleading if it is presented as "now",
+# so the reading carries the window it covers and the panel prints it. Past
+# this the sample times itself again rather than averaging over an hour.
+_SAMPLE_MAX_AGE = timedelta(minutes=10)
 
 # (node, job_id) -> (per-cpu jiffy counters, when they were read)
 _stat_cache: dict[tuple[str, str], tuple[dict[int, tuple[float, float]], datetime]] = {}
@@ -2379,12 +2384,10 @@ async def get_node_sample(node: str, job_id: str = "") -> NodeSample:
     first_node = _first_node(node)
     key = (first_node, job_id)
     kept = _stat_cache.get(key)
-    previous = (
-        kept[0]
-        if kept is not None and datetime.now() - kept[1] <= _SAMPLE_MAX_AGE
-        else None
-    )
+    age = datetime.now() - kept[1] if kept is not None else None
+    previous = kept[0] if age is not None and age <= _SAMPLE_MAX_AGE else None
     sample = await _sample_node(first_node, job_id, previous)
+    span = age.total_seconds() if previous is not None else _SAMPLE_SLEEP
 
     if previous is not None and not sample.cores and not sample.error:
         # The kept snapshot had no core in common with this one -- the job moved
@@ -2392,7 +2395,10 @@ async def get_node_sample(node: str, job_id: str = "") -> NodeSample:
         # rather than showing an empty meter.
         _stat_cache.pop(key, None)
         sample = await _sample_node(first_node, job_id, None)
+        span = _SAMPLE_SLEEP
 
+    if not sample.error:
+        sample.span = span
     if sample.counters:
         _stat_cache[key] = (sample.counters, datetime.now())
     return sample

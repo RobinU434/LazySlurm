@@ -48,6 +48,16 @@ the command, the import package and the config directory are all `lazyslurm`.
   Pressing `r` on the cpu tab in graph mode, measured against a live job: **~690ms →
   187ms**, of which the sample itself is 625ms → 99ms.
 
+  A follow-up, because the first cut of this helped the wrong person. The kept snapshot
+  expired after a minute, so it never survived from one manual `r` to the next — and with
+  `refresh = 0` that keypress is the only path there is. It is kept for ten minutes now,
+  and the panel says what the percentages average over (`· last 3m 12s`) rather than
+  implying they are current; a sample that timed itself covers half a second and still
+  reads as "now". The node sample is also started before the poll rather than after it,
+  since nothing in the poll depends on it, and a refresh no longer resets the meters to
+  their placeholder when the job on screen has not changed. A manual `r` in graph mode:
+  **~865ms → 150ms**.
+
 ### Added
 
 - **The running version, in the footer**. The right edge of the footer now names the
