@@ -38,6 +38,9 @@ class Config:
     # What to call this cluster in the per-cluster caches. Empty means "ask
     # Slurm"; see slurm.get_cluster_name() for the fallback chain.
     cluster_name: str = ""
+    # Set by the CLI when there is no Slurm here and no --remote: the cluster
+    # browser is the landing page rather than an error. Not a file setting.
+    start_in_browser: bool = False
 
 
 def _array_ranges(job_id: str) -> list[tuple[int, int, int]]:

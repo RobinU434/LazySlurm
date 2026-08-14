@@ -6,6 +6,24 @@ the command, the import package and the config directory are all `lazyslurm`.
 
 ## Unreleased
 
+### Added
+
+- **A cluster browser** ([#62](https://github.com/RobinU434/LazySlurm/issues/62)). `k`
+  lists the clusters this install has connected to — each with its SSH target, user, when
+  you last looked, and whether its connection is still alive. A cluster is remembered the
+  first time you reach it with `--remote`, so there is nothing to set up.
+
+  Two ways to leave one, differing in what coming back costs. **Detach** (`d`) keeps the
+  SSH connection open, so re-attaching is instant and silent — which is what makes moving
+  between three clusters in a morning bearable when each login wants a verification code.
+  **Disconnect** (`x`) closes it, because "detached" is not "closed": on a shared machine,
+  or for a cluster you are done with, a live connection is not what you want left behind.
+  Quitting closes every session either way.
+
+  Started on your own machine with no Slurm and no `--remote`, LazySlurm now opens the
+  browser instead of exiting — that case is not an error, it is what running it on a
+  laptop looks like.
+
 ### Fixed
 
 - **Job caches no longer collide across clusters**

@@ -33,6 +33,7 @@ from lazyslurm.widgets.detail_view import (
 )
 from lazyslurm.widgets.job_table import ActiveJobTable, CompletedJobTable, JobSelected, set_partition_colors, set_display_config
 from lazyslurm.widgets.metadata_view import MetadataView
+from lazyslurm.widgets.cluster_view import ClusterChosen, ClusterTable
 from lazyslurm.widgets.usage_view import UsageTable, format_hours
 from lazyslurm.widgets.version_footer import VersionFooter
 from lazyslurm.widgets.partition_view import (
@@ -677,6 +678,99 @@ def _exit_code(status: int) -> str:
         return f"status {status}"
 
 
+class ClusterScreen(Screen):
+    """The clusters this install has connected to, and how to reach them.
+
+    The landing page when LazySlurm is started on a machine with no Slurm and
+    no --remote: there is nothing else it could usefully show, and the list is
+    exactly what the user needs to get somewhere (#62).
+    """
+
+    BINDINGS = [
+        Binding("escape", "close", "Back"),
+        Binding("q", "close", "Back"),
+        Binding("d", "detach", "Detach (keep connection)"),
+        Binding("x", "disconnect", "Disconnect"),
+        Binding("delete", "forget", "Forget", show=False),
+        Binding("r", "reload", "Refresh", show=False),
+    ]
+
+    def __init__(self, config: Config, landing: bool = False) -> None:
+        super().__init__()
+        self.config = config
+        # On the landing page there is nothing behind this screen to go back to.
+        self.landing = landing
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="cluster-bar-top")
+        yield ClusterTable(id="cluster-table")
+        yield VersionFooter()
+
+    def on_mount(self) -> None:
+        table = self.query_one("#cluster-table", ClusterTable)
+        table.border_title = "Clusters"
+        table.focus()
+        self.reload()
+
+    def reload(self) -> None:
+        from lazyslurm import config as persistent_config
+
+        entries = persistent_config.known_clusters()
+        table = self.query_one("#cluster-table", ClusterTable)
+        table.update_clusters(
+            entries, slurm.attached_host(), tuple(slurm.open_hosts()),
+        )
+        if entries:
+            hint = ("[bold]Enter[/] attach   [bold]d[/] detach, keeping the "
+                    "connection open   [bold]x[/] disconnect   [bold]Del[/] forget")
+        else:
+            hint = (
+                "[dim]No clusters remembered yet. Start with "
+                "[bold]lazyslurm --remote user@login.example.edu[/]; "
+                "it will be listed here afterwards.[/]"
+            )
+        self.query_one("#cluster-bar-top", Static).update(hint)
+
+    def action_reload(self) -> None:
+        self.reload()
+
+    async def on_cluster_chosen(self, event: ClusterChosen) -> None:
+        await self.app.attach_cluster(event.host)
+
+    async def action_detach(self) -> None:
+        self.app.detach_cluster()
+        self.reload()
+
+    async def action_disconnect(self) -> None:
+        table = self.query_one("#cluster-table", ClusterTable)
+        host = table.selected_host()
+        if not host:
+            return
+        await self.app.disconnect_cluster(host)
+        self.reload()
+
+    def action_forget(self) -> None:
+        from lazyslurm import config as persistent_config
+
+        table = self.query_one("#cluster-table", ClusterTable)
+        host = table.selected_host()
+        if host and host not in slurm.open_hosts():
+            persistent_config.forget_cluster(host)
+            self.reload()
+        elif host:
+            self.notify(
+                "Disconnect it first — a cluster with a live session is not "
+                "forgotten out from under it",
+                severity="warning",
+            )
+
+    def action_close(self) -> None:
+        if self.landing and not slurm.attached_host():
+            self.app.exit()
+            return
+        self.app.pop_screen()
+
+
 class LazySlurmApp(App):
     """LazySlurm — a TUI for monitoring Slurm jobs."""
 
@@ -708,6 +802,7 @@ class LazySlurmApp(App):
         Binding("e", "edit_stdout", "Edit Out", show=False),
         Binding("shift+e", "edit_stderr", "Edit Err", show=False),
         Binding("comma", "edit_config", "Config", show=False, key_display=","),
+        Binding("k", "clusters", "Clusters", show=False),
         Binding("r", "refresh", "Refresh", show=True),
         # priority: Textual's own Tab binding moves focus to the next widget,
         # which would fight the panel cycle these implement.
@@ -782,6 +877,8 @@ class LazySlurmApp(App):
         # Whether the refresh timers have been started (remote mode waits for
         # the SSH session, so this can happen well after mount).
         self._polling: bool = False
+        # NB: not `_timers` — Textual's MessagePump owns that name.
+        self._poll_timers: list = []
 
     def compose(self) -> ComposeResult:
         show_gpu = not self.config.no_gpu and not self.config.no_live
@@ -855,15 +952,96 @@ class LazySlurmApp(App):
         # the first poll, so any password / 2FA prompt is answered up front.
         # The timers start only once that succeeds — a tick landing mid-login
         # is a command queued behind the connection for no purpose.
-        if self.config.remote:
+        if self.config.start_in_browser:
+            self.call_after_refresh(self._open_landing_browser)
+        elif self.config.remote:
             self.call_after_refresh(self._start_remote_session)
         else:
             self.call_after_refresh(self._begin_local)
+
+    def _open_landing_browser(self) -> None:
+        self._log("clusters", "no Slurm here — pick a cluster to connect to")
+        self.push_screen(ClusterScreen(self.config, landing=True))
 
     async def _begin_local(self) -> None:
         await self._identify_cluster()
         await self._poll_jobs()
         self._start_polling()
+
+    def action_clusters(self) -> None:
+        """`k`: the cluster browser."""
+        self.push_screen(ClusterScreen(self.config))
+
+    async def attach_cluster(self, host: str) -> bool:
+        """Point the app at `host`, opening or reusing its session.
+
+        Reusing is the common case and the reason detach exists: the session is
+        still on its ControlMaster socket, so this is instant and silent where a
+        reconnect would mean another verification code.
+        """
+        from lazyslurm import config as persistent_config
+
+        if host == slurm.attached_host():
+            self._back_to_jobs()
+            return True
+
+        self.config.remote = host
+        slurm.set_config(self.config)
+        self._log(f"ssh {host}", "attaching...")
+        ok, msg = await slurm.connect_remote(self._ssh_prompt, self.config)
+        self._log("ssh", msg)
+        if not ok:
+            self.notify(msg, title=f"Could not attach to {host}", severity="error",
+                        timeout=10)
+            return False
+
+        await self._identify_cluster()
+        self.title = f"LazySlurm [{host}]"
+        self._back_to_jobs()
+        self._reset_job_view()
+        await self._poll_jobs()
+        self._start_polling()
+        return True
+
+    def detach_cluster(self) -> None:
+        """Leave the cluster but keep its connection open."""
+        host = slurm.detach_remote()
+        if not host:
+            return
+        self._stop_polling()
+        self._reset_job_view()
+        self._log("ssh", f"detached from {host} — connection kept open")
+
+    async def disconnect_cluster(self, host: str) -> None:
+        """Close a cluster's connection for real."""
+        was_attached = host == slurm.attached_host()
+        if was_attached:
+            self._stop_polling()
+            self._reset_job_view()
+        await slurm.disconnect_remote(host)
+        self._log("ssh", f"disconnected from {host}")
+
+    def _back_to_jobs(self) -> None:
+        """Return to the job view from the browser, if that is where we are."""
+        while isinstance(self.screen, ClusterScreen):
+            self.pop_screen()
+
+    def _reset_job_view(self) -> None:
+        """Empty the panels: what they hold belongs to the cluster just left."""
+        self._selected_job_id = None
+        self._selected_node = None
+        self._known_running_ids = set()
+        self._first_poll_done = False
+        self._resource_history.clear()
+        self._monitor_history.clear()
+        self._cpu_marker.clear()
+        for table_id, table_type in (
+            ("#active-jobs", ActiveJobTable), ("#completed-jobs", CompletedJobTable),
+        ):
+            try:
+                self.query_one(table_id, table_type).update_jobs([])
+            except NoMatches:
+                pass
 
     async def _identify_cluster(self) -> None:
         """Name the cluster, then tidy the caches that are keyed by it.
@@ -877,6 +1055,14 @@ class LazySlurmApp(App):
         name = await slurm.get_cluster_name(self.config)
         persistent_config.set_cluster(name)
         self._log("cluster", persistent_config.CLUSTER)
+        if self.config.remote:
+            # Nothing to learn and nothing to type: a cluster you have reached
+            # is one the browser should offer next time (#62).
+            persistent_config.remember_cluster(
+                self.config.remote,
+                cluster=persistent_config.CLUSTER,
+                user=self.config.user or slurm.USER,
+            )
 
         moved = persistent_config.migrate_script_cache()
         if moved:
@@ -890,15 +1076,29 @@ class LazySlurmApp(App):
 
     def _start_polling(self) -> None:
         """Begin the refresh timers (refresh=0 disables auto-refresh)."""
+        if self._poll_timers:
+            for timer in self._poll_timers:
+                timer.resume()
+            self._polling = True
+            return
         if self._polling:
             return
         self._polling = True
         if self.config.refresh > 0:
-            self.set_interval(self.config.refresh, self._poll_jobs)
+            self._poll_timers = [self.set_interval(self.config.refresh, self._poll_jobs)]
             if not self.config.no_live:
-                self.set_interval(self.config.refresh, self._refresh_live_monitors)
+                self._poll_timers.append(
+                    self.set_interval(self.config.refresh, self._refresh_live_monitors)
+                )
         else:
             self._log("auto-refresh", "disabled (refresh=0)")
+
+    def _stop_polling(self) -> None:
+        """Pause the timers. A detached session has nothing to poll, and a tick
+        landing on one would be a command with nowhere to go."""
+        self._polling = False
+        for timer in self._poll_timers:
+            timer.pause()
 
     # ------------------------------------------------------------------
     # Remote SSH session
@@ -943,7 +1143,7 @@ class LazySlurmApp(App):
         # Drop the notice hook first: it points at this app's command log, and
         # anything logged after the widgets are gone would query a dead screen.
         slurm.set_notice_callback(None)
-        await slurm.disconnect_remote()
+        await slurm.disconnect_all()
 
     # ------------------------------------------------------------------
     # Data polling

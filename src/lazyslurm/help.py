@@ -23,6 +23,7 @@ METADATA = "metadata"
 # The filter bar has no context of its own: while its Input has focus, "?" is a
 # character the user is typing, so its keys live under JOBS instead.
 PARTITIONS = "partitions"
+CLUSTERS = "clusters"
 NODES = "nodes"
 USAGE = "usage"
 
@@ -52,6 +53,8 @@ IMPLICIT: dict[str, str] = {
     "up/down in a table": "DataTable cursor movement",
     "enter on a job row": "DataTable RowSelected — expands an array group",
     "up/down in the usage table": "DataTable cursor movement",
+    "enter on a cluster row": "DataTable RowSelected — attaches to it",
+    "up/down in the cluster table": "DataTable cursor movement",
 }
 
 
@@ -64,6 +67,7 @@ GLOBAL: tuple[Key, ...] = (
     Key("Shift+U", "account usage and fair share", ("U",)),
     Key("r", "refresh now", ("r",)),
     Key(",", "edit the config file in your editor", ("comma",)),
+    Key("k", "the clusters you have connected to", ("k",)),
     Key("Tab / Shift+Tab", "cycle: job tables -> details -> metadata", ("tab", "shift+tab")),
     Key("Left / Right", "cycle the panels the other way", ("left", "right")),
     Key("q", "quit (on a full-screen panel: back)", ("q",)),
@@ -160,6 +164,25 @@ PANELS: tuple[Panel, ...] = (
             Key("Tab", "switch panel", ("tab", "shift+tab")),
             Key("r", "refresh now", ("r",)),
             Key("Escape / q", "back to the partition monitor", ("escape", "q")),
+        ),
+    ),
+    Panel(
+        context=CLUSTERS,
+        title="Clusters",
+        subtitle="opened with k",
+        keys=(
+            Key("Up / Down", "move between clusters"),
+            Key("Enter", "attach to this cluster"),
+            Key("d", "detach — leave, but keep the connection open", ("d",)),
+            Key("x", "disconnect — close it; reconnecting means logging in again", ("x",)),
+            Key("Delete", "forget a cluster you are not connected to", ("delete",)),
+            Key("Escape / q", "back", ("escape", "q")),
+        ),
+        notes=(
+            "Detach and disconnect differ in what they cost to undo: a detached "
+            "session is still open, so re-attaching is instant, while a "
+            "disconnected one has to authenticate again — a verification code "
+            "included. Quitting LazySlurm closes every session either way.",
         ),
     ),
     Panel(

@@ -17,6 +17,7 @@ from lazyslurm import help as help_topics
 from lazyslurm.app import (
     HelpScreen,
     LazySlurmApp,
+    ClusterScreen,
     NodeScreen,
     PartitionScreen,
     UsageScreen,
@@ -43,6 +44,7 @@ SCREEN_CONTEXTS = [
     (PartitionScreen, help_topics.PARTITIONS),
     (NodeScreen, help_topics.NODES),
     (UsageScreen, help_topics.USAGE),
+    (ClusterScreen, help_topics.CLUSTERS),
 ]
 
 

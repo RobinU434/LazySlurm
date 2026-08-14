@@ -266,6 +266,77 @@ def prune_log_cache(max_age_days: int | None = 30) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Known clusters — the ones this install has connected to
+# ---------------------------------------------------------------------------
+# Format: {"version": 1, "clusters": [{"host": ..., "cluster": ..., "user": ...,
+#          "last_seen": <epoch>}]}
+#
+# Remembered state, not configuration, so it lives beside log_cache.json rather
+# than in config.toml — which is hand-edited and comment-preserving (#62).
+
+CLUSTERS_FILE = CONFIG_DIR / "clusters.json"
+CLUSTERS_VERSION = 1
+
+
+def known_clusters() -> list[dict]:
+    """Every cluster connected to before, most recently seen first."""
+    if not CLUSTERS_FILE.exists():
+        return []
+    try:
+        data = json.loads(CLUSTERS_FILE.read_text())
+    except (OSError, ValueError):
+        return []
+    entries = data.get("clusters") if isinstance(data, dict) else None
+    if not isinstance(entries, list):
+        return []
+    clean = [e for e in entries if isinstance(e, dict) and e.get("host")]
+    return sorted(clean, key=lambda e: e.get("last_seen", 0), reverse=True)
+
+
+def remember_cluster(host: str, cluster: str = "", user: str = "") -> None:
+    """Record a successful connection, or refresh what is known about one.
+
+    Keyed by the SSH target rather than the cluster name: the target is what
+    reconnecting needs, and it is known before the cluster can be asked its
+    name. A second target for the same cluster is a separate row, which is
+    honest -- they are different routes and may not behave the same.
+    """
+    host = (host or "").strip()
+    if not host:
+        return
+    entries = [e for e in known_clusters() if e.get("host") != host]
+    entry = {"host": host, "last_seen": time.time()}
+    if cluster:
+        entry["cluster"] = cluster
+    if user:
+        entry["user"] = user
+    entries.append(entry)
+    _write_clusters(entries)
+
+
+def forget_cluster(host: str) -> bool:
+    """Drop a remembered cluster. True if there was one."""
+    entries = known_clusters()
+    remaining = [e for e in entries if e.get("host") != host]
+    if len(remaining) == len(entries):
+        return False
+    _write_clusters(remaining)
+    return True
+
+
+def _write_clusters(entries: list[dict]) -> None:
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = CLUSTERS_FILE.with_suffix(f".tmp{os.getpid()}")
+        tmp.write_text(json.dumps(
+            {"version": CLUSTERS_VERSION, "clusters": entries}, indent=2,
+        ))
+        os.replace(tmp, CLUSTERS_FILE)
+    except OSError:
+        pass  # a list of clusters is not worth failing a session over
+
+
+# ---------------------------------------------------------------------------
 # Batch script cache — archives the sbatch script text itself
 # ---------------------------------------------------------------------------
 # Slurm only keeps a job's batch script until MinJobAge seconds after it ends

@@ -129,45 +129,113 @@ def _notice(action: str, detail: str = "") -> None:
 # ---------------------------------------------------------------------------
 
 
-# The single background SSH session used by every remote command. Created by
-# connect_remote() at startup; None in local mode.
-_session: SSHSession | None = None
+# The background SSH sessions, one per cluster, keyed by SSH target. Every
+# remote command runs in whichever one is currently attached.
+#
+# A dict rather than a single session because switching clusters should not
+# cost a fresh login: a detached session stays open on its ControlMaster
+# socket, so re-attaching is instant and silent where reconnecting would mean
+# another 2FA prompt (#62).
+_sessions: dict[str, SSHSession] = {}
+_attached: str = ""
 
 
 def get_session() -> SSHSession | None:
-    """Return the active SSH session, or None in local mode."""
-    return _session
+    """The session commands currently run in, or None in local mode."""
+    return _sessions.get(_attached)
+
+
+def attached_host() -> str:
+    """The SSH target currently attached, or "" in local mode."""
+    return _attached
+
+
+def open_hosts() -> list[str]:
+    """Every host with a session still open, attached or merely detached."""
+    return sorted(_sessions)
 
 
 async def connect_remote(
     prompt_cb: PromptCallback | None = None,
     config: Config | None = None,
 ) -> tuple[bool, str]:
-    """Open the one SSH session that all remote commands then share.
+    """Attach to `config.remote`, opening a session for it if there is none.
 
     `prompt_cb(prompt, is_secret)` is awaited whenever the cluster asks for a
     password or a 2FA verification code, and returns the answer (or None to
-    abort). Called once at startup; a no-op when not in remote mode.
+    abort). A no-op when not in remote mode.
     """
-    global _session
+    global _attached
     cfg = config or _config
     if not cfg.remote:
         return True, "Local mode"
-    if _session is not None:
-        await _session.close()
-    _session = SSHSession(cfg.remote, prompt_cb=prompt_cb)
-    ok, msg = await _session.connect()
+
+    existing = _sessions.get(cfg.remote)
+    if existing is not None and existing.connected:
+        # Detached, not closed: this is the switch that costs nothing.
+        _attached = cfg.remote
+        reset_caches()
+        return True, f"Reattached to {cfg.remote}"
+    if existing is not None:
+        await existing.close()
+
+    session = SSHSession(cfg.remote, prompt_cb=prompt_cb)
+    ok, msg = await session.connect()
     if not ok:
-        _session = None
+        _sessions.pop(cfg.remote, None)
+        return ok, msg
+    _sessions[cfg.remote] = session
+    _attached = cfg.remote
+    reset_caches()
     return ok, msg
 
 
-async def disconnect_remote() -> None:
-    """Tear the shared SSH session down (called when the app exits)."""
-    global _session
-    if _session is not None:
-        await _session.close()
-        _session = None
+def detach_remote() -> str:
+    """Stop running commands here, but leave the connection open.
+
+    The counterpart to disconnect: coming back is instant, and on a cluster
+    with two-factor authentication that is the difference between switching
+    clusters freely and being asked for a code each time.
+    """
+    global _attached
+    host, _attached = _attached, ""
+    reset_caches()
+    return host
+
+
+async def disconnect_remote(host: str | None = None) -> str:
+    """Close a session for real. Reconnecting means authenticating again.
+
+    Defaults to the attached one. "Detached" is not the same as "closed": on a
+    shared or untrusted machine, and for a cluster you are done with, a live
+    master is not what you want left behind.
+    """
+    global _attached
+    target = host if host is not None else _attached
+    session = _sessions.pop(target, None)
+    if session is not None:
+        await session.close()
+    if target == _attached:
+        _attached = ""
+        reset_caches()
+    return target
+
+
+async def disconnect_all() -> None:
+    """Close every session (called when the app exits).
+
+    Quitting closes everything, detached sessions included: a master outliving
+    the app that made it is a surprise, and there is no UI left to find it with.
+    """
+    global _attached
+    sessions = list(_sessions.values())
+    _sessions.clear()
+    _attached = ""
+    for session in sessions:
+        try:
+            await session.close()
+        except (OSError, RuntimeError):
+            pass
 
 
 # Commands already reported as unavailable, so a missing binary is mentioned
@@ -207,9 +275,10 @@ async def _run_cmd(*args: str) -> tuple[str, str, int]:
 
 async def _run_remote(remote_cmd: str, timeout: float | None = None) -> tuple[str, str, int]:
     """Run a shell command on the login node through the shared session."""
-    if _session is None:
+    session = get_session()
+    if session is None:
         return "", "No SSH session — remote mode is not connected", 1
-    return await _session.run(remote_cmd, timeout=timeout)
+    return await session.run(remote_cmd, timeout=timeout)
 
 
 async def _ssh_cmd(node: str, remote_cmd: str) -> tuple[str, int]:

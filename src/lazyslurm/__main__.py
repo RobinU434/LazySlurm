@@ -332,8 +332,22 @@ def main() -> None:
     # nothing about what to do instead.
     absent = missing_commands(str(resolved["remote"]))
     if absent:
-        print(_no_slurm_message(absent, str(resolved["remote"])), file=sys.stderr)
-        raise SystemExit(1)
+        # No Slurm here and no --remote is not necessarily an error: it is what
+        # running LazySlurm on your own machine looks like, and the clusters you
+        # have connected to before are exactly what you need to get somewhere.
+        # Only when there is no ssh either — or no cluster to offer — is there
+        # genuinely nothing to show (#62).
+        from lazyslurm import config as persistent_config
+
+        browsable = (
+            not resolved["remote"]
+            and shutil.which("ssh") is not None
+            and persistent_config.known_clusters()
+        )
+        if not browsable:
+            print(_no_slurm_message(absent, str(resolved["remote"])), file=sys.stderr)
+            raise SystemExit(1)
+        config.start_in_browser = True
 
     from lazyslurm.app import LazySlurmApp
     app = LazySlurmApp(
