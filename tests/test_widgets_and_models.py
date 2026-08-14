@@ -186,6 +186,9 @@ def test_save_writes_types_toml_can_parse(tmp_path, monkeypatch):
     assert cfg.load() == {
         "editor": "vim", "no_gpu": True, "days": 5,
         "partition_order": ["a", "b"], "partition_colors": {"gpu": "green"},
+        # A file written from the template is stamped with its revision, so it
+        # never looks like a config that needs migrating (#67).
+        "config_version": cfg.template_version(),
     }
 
 

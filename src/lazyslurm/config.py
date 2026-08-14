@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -41,6 +42,140 @@ def _template_text() -> str:
         return files("lazyslurm").joinpath("templ", "config.toml").read_text()
     except (OSError, ModuleNotFoundError):
         return ""  # packaged template unavailable; start from an empty file
+
+
+VERSION_KEY = "config_version"
+
+# Settings that were real once. A key here gets told what replaced it instead of
+# being reported as a typo, and a rename is carried across by the migration.
+#
+#   "old_name": "new_name"   -- renamed; the value moves
+#   "gone":     ""           -- removed; the value is dropped, with a note
+DEPRECATED: dict[str, str] = {}
+
+# Where a migration leaves the file it replaced.
+BACKUP_FILE = CONFIG_DIR / "config.toml.bak"
+
+
+def template_version() -> int:
+    """The revision of the packaged template, or 0 if it cannot be read."""
+    text = _template_text()
+    if not text:
+        return 0
+    try:
+        return int(tomllib.loads(text).get(VERSION_KEY, 0))
+    except (tomllib.TOMLDecodeError, TypeError, ValueError):
+        return 0
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    tmp = path.with_suffix(f".tmp{os.getpid()}")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
+
+def _apply_to_template(text: str, values: dict) -> tuple[str, set[str]]:
+    """Uncomment the template's own line for each value the user set.
+
+    Appending them instead would leave the file saying two things about one
+    setting -- a commented default where it is documented, and the real value
+    forty lines below it. Returns the text and which keys found a home.
+    """
+    lines = text.splitlines()
+    placed: set[str] = set()
+    for index, line in enumerate(lines):
+        match = re.match(r"^#\s*([A-Za-z_][A-Za-z0-9_]*)\s*=", line)
+        if match is None:
+            continue
+        key = match.group(1)
+        if key not in values or key in placed:
+            continue
+        # Keep the explanation that trails the commented default, if any:
+        # "# refresh = 5.0   # auto-refresh interval in seconds".
+        _, _, trailing = line.lstrip("#").partition("#")
+        rendered = tomlkit.item(values[key]).as_string().strip()
+        lines[index] = f"{key} = {rendered}" + (f"  #{trailing}" if trailing else "")
+        placed.add(key)
+    return "\n".join(lines) + "\n", placed
+
+
+def migrate() -> list[str]:
+    """Bring config.toml up to the packaged template. Returns log messages.
+
+    The template is ~50 lines of comments documenting every setting, and it is
+    the only in-product reference for them -- but `save()` edits the file rather
+    than regenerating it, so a config written two releases ago still carries two
+    releases' worth of stale documentation and knows nothing of the settings
+    added since. This rewrites it from the current template and puts every value
+    the user set back on top.
+
+    Only what is actually *in* the file is carried over, never the effective
+    config: writing the defaults back as explicit values would freeze them, and
+    the next release's changed default would silently not apply.
+
+    Nothing here may stop the app from starting, so every failure is reported
+    and swallowed. The file it replaces is kept at config.toml.bak.
+    """
+    if not CONFIG_FILE.exists():
+        return []
+    latest = template_version()
+    if not latest:
+        return []  # no packaged template to migrate towards
+
+    try:
+        raw = CONFIG_FILE.read_text()
+        saved = tomllib.loads(raw)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        # A file we cannot parse is one we must not rewrite.
+        return [f"config.toml could not be read, leaving it alone ({exc})"]
+
+    current = saved.get(VERSION_KEY, 0)
+    if not isinstance(current, int):
+        current = 0
+    if current == latest:
+        return []
+    if current > latest:
+        # Shared config directory, older LazySlurm. Downgrading the file would
+        # throw away settings this build has never heard of.
+        return [
+            f"config.toml is from a newer LazySlurm (v{current} > v{latest}) — "
+            "leaving it untouched"
+        ]
+
+    notes: list[str] = []
+    values = {k: v for k, v in saved.items() if k != VERSION_KEY}
+    for old, new in DEPRECATED.items():
+        if old not in values:
+            continue
+        value = values.pop(old)
+        if new:
+            values.setdefault(new, value)
+            notes.append(f"{old} has been renamed to {new} — moved your value across")
+        else:
+            notes.append(f"{old} is no longer used — removed")
+
+    try:
+        text, placed = _apply_to_template(_template_text(), values)
+        doc = tomlkit.parse(text)
+        doc[VERSION_KEY] = latest
+        # Anything the template has no commented line for -- a nested table, or
+        # a key from a build that knows settings this one does not -- is kept by
+        # appending it, rather than dropped.
+        for key, value in values.items():
+            if key not in placed:
+                doc[key] = value
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        _atomic_write(BACKUP_FILE, raw)
+        _atomic_write(CONFIG_FILE, tomlkit.dumps(doc))
+    except (OSError, ValueError) as exc:
+        return notes + [f"could not update config.toml ({exc}) — left as it was"]
+
+    kept = len(values)
+    notes.append(
+        f"config.toml updated to v{latest} (was v{current}), "
+        f"{kept} setting{'' if kept == 1 else 's'} kept, backup at {BACKUP_FILE.name}"
+    )
+    return notes
 
 
 def save(data: dict) -> None:
