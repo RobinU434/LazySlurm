@@ -29,10 +29,16 @@ background SSH connection that handles two-factor authentication once at startup
   <img src="https://raw.githubusercontent.com/RobinU434/LazySlurm/main/img/main.png" alt="LazySlurm main view" width="100%">
 </p>
 
-**Jump to:** [Installation](#installation) · [Quick Start](#quick-start) ·
-[Layout](#layout) · [Key Bindings](#key-bindings) · [Detail Tabs](#detail-tabs) ·
-[Metadata Tabs](#metadata-tabs) · [Features](#features) · [Job Cache](#job-cache) ·
-[Remote Mode](#remote-mode) · [Configuration](#configuration) ·
+**Getting started:** [Installation](#installation) · [Quick Start](#quick-start) ·
+[Layout](#layout) · [Key Bindings](#key-bindings)
+
+**Using it:** [Watching your jobs](#watching-your-jobs) ·
+[The detail panels](#the-detail-panels) · [Acting on a job](#acting-on-a-job) ·
+[Looking at the whole cluster](#looking-at-the-whole-cluster) ·
+[More than one cluster](#working-with-more-than-one-cluster)
+
+**Settings and internals:** [Appearance](#appearance) ·
+[Configuration](#configuration) · [What LazySlurm remembers](#what-lazyslurm-remembers) ·
 [CLI Reference](#cli-reference) · [Requirements](#requirements)
 
 Every section below folds open — the headings are the menu.
@@ -161,9 +167,107 @@ Press `?` at any time for this list inside the app:
 
 </details>
 
-## Detail Tabs
+## Watching your jobs
 
-Select a job in either table (Up/Down) and use `[` / `]` to switch between these tabs:
+The main view, and the keys that change what it shows you.
+
+### Filtering
+
+<details>
+<summary>Filter syntax: fields, comparisons and aliases</summary>
+
+`/` opens the filter bar. Plain words search the job id, name and partition (and state,
+in the Terminated table) as before, and `key:value` terms narrow by field. Terms are
+ANDed.
+
+**`Enter` accepts** the filter: the bar closes, the query stays in force, and the cursor
+lands back on the matching rows so you can cancel, edit or inspect them. **`Escape`
+abandons** it, clearing the query and showing every job again. While a filter is active
+the table's border title says so — `Active Jobs — 2/4 match`.
+
+```
+state:pend part:gpu        pending jobs on the gpu partition
+train state:run            running jobs whose row mentions "train"
+gpu:>0                     jobs that asked for at least one GPU
+name:sweep id:4815         both must match
+```
+
+| Term | Matches | Aliases |
+|------|---------|---------|
+| `state:pend` | job state, **prefix** match, case-insensitive (`fail` finds FAILED, `out` finds OUT_OF_MEMORY) | `st:`, `s:` |
+| `part:gpu` | partition, substring | `partition:`, `p:` |
+| `name:train` | job name, substring | `n:` |
+| `id:4815` | job id, substring | `job:` |
+| `gpu:>0` | GPUs requested; `>`, `>=`, `<`, `<=`, `=`, `!=` | `gpus:`, `gres:` |
+
+Quote values containing spaces: `name:"my long job"`. An unknown key is treated as plain
+text — `foo:bar` just searches for the string `foo:bar`, so nothing you type can break the
+filter. The panel border shows how much matched (`Active Jobs — 2/4 match`), and a filter
+that matches nothing says **no jobs match** instead of showing an empty table.
+
+`gpu:` only applies to the Active table: sacct rows carry no GRES, so the term matches
+nothing among terminated jobs.
+
+</details>
+
+### Job Arrays
+
+<details>
+<summary>A 40-task array as one expandable row</summary>
+
+A 40-task array would otherwise fill the table with 40 near-identical rows, so tasks of
+one array are folded into a single row:
+
+```
+▸ 4815201_[0-11] ×12   sweep-lr   2run 10pend   gpu
+```
+
+The Job ID cell shows the task-index range and the total task count; `×12` counts *tasks*,
+not rows, so a pending `4815201_[3-11]` block counts as the nine tasks it stands for. The
+Elapsed column carries a state tally instead of a time, which means little across a dozen
+tasks that started at different moments. In the Terminated table the tally sits in the
+State column and Elapsed shows the longest run of the array.
+
+<img src="https://raw.githubusercontent.com/RobinU434/LazySlurm/main/img/job-array.png" alt="An expanded job array" width="100%">
+
+`Enter` expands the row into its tasks (`├`/`└` prefixed) and collapses it again.
+Expansion survives refreshes and filter changes, so a group you opened stays open.
+
+Actions on a collapsed row act on the **whole array**: `c` cancels it with a single
+`scancel <base id>`, `u` edits every pending task in it, `m` bookmarks the group so it
+pins to the top as a unit. On an expanded task, everything behaves per task as usual.
+The detail panels always show a real task (the first one) — Slurm cannot describe a bare
+base id.
+
+Turn it off with `collapse_arrays = false` in `config.toml` to get one row per task again.
+
+</details>
+
+### Bookmarks
+
+<details>
+<summary>Pin the jobs you keep coming back to</summary>
+
+Press `m` to bookmark any job. Bookmarked jobs are pinned to the top of their table with
+a ★ prefix. Bookmarks persist for the duration of the session.
+
+</details>
+
+### Job Completion Notifications
+
+<details>
+<summary>Bell, desktop notification, log line</summary>
+
+When a running job finishes (completes, fails, times out, etc.), LazySlurm:
+- Rings the terminal bell
+- Attempts a desktop notification via `notify-send` (Linux)
+- Logs the event in the Command Log panel
+
+</details>
+
+## The detail panels
+
+What the right-hand side shows about the job under the cursor. `[` and `]` move through the top panel's tabs, `(` and `)` through the middle one's.
 
 ### stdout / stderr
 
@@ -313,10 +417,6 @@ Then the raw accounting fields:
 
 </details>
 
-## Metadata Tabs
-
-Use `(` / `)` to switch between these tabs:
-
 ### Resources
 
 <details>
@@ -346,329 +446,9 @@ All key-value pairs from `scontrol show job` or `sacct`, displayed verbatim.
 
 </details>
 
-## Features
+## Acting on a job
 
-One heading per feature — open the ones you want.
-
-### Column Width Limits
-
-<details>
-<summary>Keep long job names from eating the table</summary>
-
-Job names and partition names are truncated to 16 characters by default (with `…` when
-truncated). This keeps the tables compact. Configure via `config.toml`:
-
-```toml
-max_name_width = 20       # wider name column
-max_partition_width = 10  # narrower partition column
-```
-
-Set to `0` for unlimited width.
-
-</details>
-
-### State Abbreviations
-
-<details>
-<summary>COMPLETED -> COMP, and the full mapping</summary>
-
-For compact displays, enable abbreviated state names in the Terminated Jobs table:
-
-```toml
-abbreviate_states = true
-```
-
-| Full State | Abbreviation |
-|------------|-------------|
-| COMPLETED | COMP |
-| FAILED | FAIL |
-| TIMEOUT | TIME |
-| CANCELLED | CAN |
-| OUT_OF_MEMORY | OOM |
-| NODE_FAIL | NFAIL |
-| PREEMPTED | PREEMPT |
-
-</details>
-
-### Color-Coded Partitions
-
-<details>
-<summary>Automatic colors, and how to override them</summary>
-
-Each partition is assigned a consistent color across both job tables. Colors are
-deterministic (based on the partition name) so they stay stable across sessions. You can
-override colors in the config file (see [Configuration](#configuration)).
-
-</details>
-
-### Color-Coded Job States
-
-<details>
-<summary>What each color means, in both tables</summary>
-
-**Active Jobs** (Job ID column):
-
-| State | Color |
-|-------|-------|
-| RUNNING | Green |
-| PENDING | Yellow |
-| COMPLETING | Orange |
-| SUSPENDED, REQUEUED | Dim |
-
-**Terminated Jobs** (State column):
-
-| State | Color |
-|-------|-------|
-| COMPLETED | Green |
-| FAILED, OUT_OF_MEMORY, NODE_FAIL | Red |
-| TIMEOUT | Yellow |
-| CANCELLED | Dim grey |
-| PREEMPTED | Dim yellow |
-
-</details>
-
-### Cluster Overview Bar
-
-<details>
-<summary>The one-line summary at the top</summary>
-
-The top line shows a summary of your jobs and cluster partitions:
-
-```
-jdoe  5 running  2 pending    gpu:10/5/1/16  cpu:42/58/0/100
-```
-
-Partition format is `name:A/I/O/T`:
-
-| Field | Meaning |
-|-------|---------|
-| **A** | Allocated — nodes currently running jobs |
-| **I** | Idle — nodes available for new jobs |
-| **O** | Other — nodes that are down, drained, or in maintenance |
-| **T** | Total — total nodes in the partition |
-
-</details>
-
-### Filtering
-
-<details>
-<summary>Filter syntax: fields, comparisons and aliases</summary>
-
-`/` opens the filter bar. Plain words search the job id, name and partition (and state,
-in the Terminated table) as before, and `key:value` terms narrow by field. Terms are
-ANDed.
-
-**`Enter` accepts** the filter: the bar closes, the query stays in force, and the cursor
-lands back on the matching rows so you can cancel, edit or inspect them. **`Escape`
-abandons** it, clearing the query and showing every job again. While a filter is active
-the table's border title says so — `Active Jobs — 2/4 match`.
-
-```
-state:pend part:gpu        pending jobs on the gpu partition
-train state:run            running jobs whose row mentions "train"
-gpu:>0                     jobs that asked for at least one GPU
-name:sweep id:4815         both must match
-```
-
-| Term | Matches | Aliases |
-|------|---------|---------|
-| `state:pend` | job state, **prefix** match, case-insensitive (`fail` finds FAILED, `out` finds OUT_OF_MEMORY) | `st:`, `s:` |
-| `part:gpu` | partition, substring | `partition:`, `p:` |
-| `name:train` | job name, substring | `n:` |
-| `id:4815` | job id, substring | `job:` |
-| `gpu:>0` | GPUs requested; `>`, `>=`, `<`, `<=`, `=`, `!=` | `gpus:`, `gres:` |
-
-Quote values containing spaces: `name:"my long job"`. An unknown key is treated as plain
-text — `foo:bar` just searches for the string `foo:bar`, so nothing you type can break the
-filter. The panel border shows how much matched (`Active Jobs — 2/4 match`), and a filter
-that matches nothing says **no jobs match** instead of showing an empty table.
-
-`gpu:` only applies to the Active table: sacct rows carry no GRES, so the term matches
-nothing among terminated jobs.
-
-</details>
-
-### Job Arrays
-
-<details>
-<summary>A 40-task array as one expandable row</summary>
-
-A 40-task array would otherwise fill the table with 40 near-identical rows, so tasks of
-one array are folded into a single row:
-
-```
-▸ 4815201_[0-11] ×12   sweep-lr   2run 10pend   gpu
-```
-
-The Job ID cell shows the task-index range and the total task count; `×12` counts *tasks*,
-not rows, so a pending `4815201_[3-11]` block counts as the nine tasks it stands for. The
-Elapsed column carries a state tally instead of a time, which means little across a dozen
-tasks that started at different moments. In the Terminated table the tally sits in the
-State column and Elapsed shows the longest run of the array.
-
-<img src="https://raw.githubusercontent.com/RobinU434/LazySlurm/main/img/job-array.png" alt="An expanded job array" width="100%">
-
-`Enter` expands the row into its tasks (`├`/`└` prefixed) and collapses it again.
-Expansion survives refreshes and filter changes, so a group you opened stays open.
-
-Actions on a collapsed row act on the **whole array**: `c` cancels it with a single
-`scancel <base id>`, `u` edits every pending task in it, `m` bookmarks the group so it
-pins to the top as a unit. On an expanded task, everything behaves per task as usual.
-The detail panels always show a real task (the first one) — Slurm cannot describe a bare
-base id.
-
-Turn it off with `collapse_arrays = false` in `config.toml` to get one row per task again.
-
-</details>
-
-### Bookmarks
-
-<details>
-<summary>Pin the jobs you keep coming back to</summary>
-
-Press `m` to bookmark any job. Bookmarked jobs are pinned to the top of their table with
-a ★ prefix. Bookmarks persist for the duration of the session.
-
-</details>
-
-### Account Usage
-
-<details>
-<summary>CPU-hours per user and your fair-share factor</summary>
-
-Press `Shift+U` for what the allocation has cost so far and what it is doing to your
-priority:
-
-```
-this month   8 200 CPU-hours used by you   account total 12 500  66% of it yours   (w cycles window)
-+------------------------------- Fair share -------------------------------+
-| physics  factor 0.437  entitled 1.68%  used 5.64%                        |
-|   over your share — your jobs get reduced priority (using 3.3x your share)|
-+------------------------------ Account usage -----------------------------+
-| User      Name        CPU hours  Share              %                    |
-| ▸ jdoe    Jane Doe        8 200  ████████████░░░░  66.1%                 |
-|   asmith  A Smith        3 100   ████░░░░░░░░░░░░  25.0%                 |
-|   bpatel  B Patel        1 200   ██░░░░░░░░░░░░░░   9.7%                 |
-+--------------------------------------------------------------------------+
-```
-
-- **Hours** come from `sreport cluster AccountUtilizationByUser`, per user in your account,
-  biggest consumer first, your own row marked `▸`.
-- **Fair share** comes from `sshare` — this is what actually drives queue priority.
-  `entitled` is your slice of the cluster, `used` is the slice you have consumed, and the
-  factor is Slurm's verdict: above 0.5 you are under-consuming and get boosted, below it
-  you are over-consuming and get pushed back. The sentence underneath says which.
-- `w` cycles the window: **this month → last 30 days → this year**. `r` refetches,
-  `Escape` / `Shift+U` / `q` returns.
-
-`sreport` can take seconds on a busy accounting database, so the screen opens immediately
-with `loading usage...` and fills in when the data arrives. Nothing here runs in the poll
-loop — it is fetched on open, on `r`, and when the window changes. On a cluster without
-Slurm accounting the panel says so rather than showing an empty table.
-
-</details>
-
-### Partition Monitor
-
-<details>
-<summary>Cluster-wide load and every user's jobs</summary>
-
-Press `p` for a full-screen view of the cluster's partitions. The main job tables only
-ever show **your** jobs — this screen shows everyone's, so you can see what a partition is
-actually busy with before you queue into it.
-
-<img src="https://raw.githubusercontent.com/RobinU434/LazySlurm/main/img/partitions.png" alt="Partition monitor" width="100%">
-
-**Partition table** — `A/I/O/T` is Slurm's allocated / idle / other / total counter, given
-for both nodes and CPUs. "Other" is down, drained, or reserved capacity. The **Load** bar
-is allocated CPUs over *usable* CPUs (allocated + idle), so drained nodes don't make a
-saturated partition look half empty; it turns yellow past 60% and red past 90%. `Run` and
-`Pend` are job counts across all users, and a pending job that names several partitions
-counts in each. Partitions that are `down` are shown struck-through instead of with a bar,
-rather than hidden.
-
-**Job table** — every user's jobs on the highlighted partition, running first then pending,
-newest first. Your own jobs are marked `▸` and highlighted. For pending jobs the last
-column shows Slurm's reason (`(Resources)`, `(QOSMaxGRESPerUser)`, `(Dependency)`, …)
-instead of a node list.
-
-| Key | Action |
-|-----|--------|
-| `Enter` | Open the [node view](#node-view) for the highlighted partition |
-| `Up`/`Down` | Move between partitions; the job table follows the highlighted one |
-| `Tab` | Switch focus between the partition and job tables (to scroll a long job list) |
-| `r` | Refresh now |
-| `Escape` / `p` / `q` | Back to the main view |
-
-The screen re-polls on your `--refresh` interval while it is open, and stops when you
-leave. `--partition-order` also orders this table. Note that `sinfo --summarize` reports
-one row per node *configuration*, so partitions with mixed hardware are summed into a
-single row here.
-
-</details>
-
-### Node View
-
-<details>
-<summary>Per-node state, load, memory and GPU occupancy</summary>
-
-Press `Enter` on a partition to see its individual nodes:
-
-<img src="https://raw.githubusercontent.com/RobinU434/LazySlurm/main/img/nodes.png" alt="Nodes of a partition" width="100%">
-
-| Column | Meaning |
-|--------|---------|
-| State | Slurm's node state — `idle`, `mixed`, `allocated`, `drained`, `down`, … A trailing `*` means the node is not responding, and the node name is bolded |
-| CPUs A/I/O/T | allocated / idle / other / total cores on that node |
-| Load | the node's load average over its core count — this is *actual* CPU usage, unlike the allocation counters next to it |
-| Memory | in use (configured minus free) over configured, red past 90% |
-| GPUs | GRES in use over GRES configured, from `GresUsed`; green while any are free, red when the node is full |
-| Reason | why Slurm drained or downed the node (`kernel patch`, `Faulty GPU #7`, …) |
-
-Nodes without GRES show `—` in the GPU column, and a drained node's load is shown as `—`
-because its counters say nothing useful — the reason does. Its GPUs are dimmed for the
-same reason: eight idle devices on a node nothing can be scheduled onto are not eight
-free devices.
-
-**Press `Enter` on a node to fold it open into its GPUs.** `7/8` says how full a node is
-but not *which* device is free, and that is the question you are usually asking:
-
-```
-▾ galvani-cn109  mixed    70/2/0/72  ██░░░░ 33%  110/346G  7/8
-  ├ GPU 0        busy     4                                rtx2080ti  2743012 koh882 vs
-  ├ GPU 1        free                                      rtx2080ti
-  └ GPU 7        busy     2                                rtx2080ti  2735799 bep055 codex
-```
-
-Each child cell carries the same kind of thing as the node cell above it, so the columns
-keep meaning something: identity stays identity, `Load` is already a bar on the same 0–1
-scale, `Memory` keeps its used/total shape.
-
-Which devices are taken **costs nothing** — `sinfo` reports the allocated indices, so
-folding a node open needs no extra call. The two columns that do cost something wait for
-a key:
-
-| Key | Fills in | Cost |
-|-----|----------|------|
-| `g` | which job holds each GPU, and its cores | one `scontrol` per job on the node |
-| `Shift+G` | live utilisation and memory per device | one round trip to the node |
-
-Neither runs on the refresh, because browsing a large partition would otherwise turn
-every cursor move into a burst of round trips.
-
-Two config options shape this — `node_expand` (what a node unfolds into, default `gpu`,
-falling back to CPUs on a node without GRES) and `gpu_column` (`count` for `7/8`, or
-`glyphs` for `▣▣▢▣▣▣▣▣`, which shows the free slot without expanding anything).
-
-The bar at the top counts the partition's nodes by state and totals GPUs in use.
-The lower panel lists **all users'** jobs running on the highlighted node, so you can see
-who you would be sharing it with. `Up`/`Down` moves between nodes and the job list follows,
-`Tab` switches panels, `r` refreshes, `Escape` or `q` goes back to the partition list.
-
-Older Slurm versions that do not support the `GresUsed` output field fall back
-automatically to a shorter query; everything except the GPU column still works.
-
-</details>
+Everything that changes something, rather than just showing it.
 
 ### Edit Pending Jobs
 
@@ -704,6 +484,36 @@ non-pending jobs in the selection are skipped and listed in the Command Log.
 
 </details>
 
+### Resubmit with more resources
+
+<details>
+<summary>Run it again, but bigger</summary>
+
+The loop after a failure is usually "run it again, but bigger" — more time after a
+TIMEOUT, more memory after an OOM kill. `u` cannot help there: Slurm fixes a job's
+allocation once it starts, so the property editor only works on jobs still queued.
+
+**`Shift+S`** opens that same editor for a *terminated* job, prefilled with what the job
+actually had, and submits with the changed fields as sbatch flags:
+
+```
+sbatch --chdir /work --time=4:00:00 --mem=16G job.sh
+```
+
+- Fields map to `--time`, `--partition`, `--nodes`, `--cpus-per-task` and `--mem`.
+- An override **replaces** the same option in the original submit line rather than being
+  appended next to it, so the command log shows exactly what was requested.
+- A field left blank keeps whatever the original line had. Options after the script name
+  belong to the script and are never touched.
+- After a **TIMEOUT** the runtime field is prefilled with double the old limit, and after
+  **OUT_OF_MEMORY** the memory field with double the old request. They are suggestions —
+  overwrite or clear them.
+- The full `sbatch` line is written to the Command Log before it runs.
+
+The [archived-script fallback](#resubmit-fallback) applies here too.
+
+</details>
+
 ### View sbatch Script
 
 <details>
@@ -724,7 +534,7 @@ share one script: `123_11`, `123_[1-40]`, and `123` all resolve to the same file
 **Slurm only keeps a job's script until `MinJobAge` seconds after it ends** — often just
 300. A job that finished before LazySlurm ever saw it has no archived copy and Slurm can no
 longer produce one; pressing `b` reports that the script is unavailable. See
-[Job Cache](#job-cache) for the cache location and `script_cache_dir`.
+[Job Cache](#what-lazyslurm-remembers) for the cache location and `script_cache_dir`.
 
 </details>
 
@@ -834,81 +644,182 @@ fails, it reports the exit status rather than silently connecting you somewhere 
 
 </details>
 
-### Job Completion Notifications
+## Looking at the whole cluster
+
+Beyond your own jobs: what the machine is doing and how much of it you have used.
+
+### Cluster Overview Bar
 
 <details>
-<summary>Bell, desktop notification, log line</summary>
+<summary>The one-line summary at the top</summary>
 
-When a running job finishes (completes, fails, times out, etc.), LazySlurm:
-- Rings the terminal bell
-- Attempts a desktop notification via `notify-send` (Linux)
-- Logs the event in the Command Log panel
+The top line shows a summary of your jobs and cluster partitions:
+
+```
+jdoe  5 running  2 pending    gpu:10/5/1/16  cpu:42/58/0/100
+```
+
+Partition format is `name:A/I/O/T`:
+
+| Field | Meaning |
+|-------|---------|
+| **A** | Allocated — nodes currently running jobs |
+| **I** | Idle — nodes available for new jobs |
+| **O** | Other — nodes that are down, drained, or in maintenance |
+| **T** | Total — total nodes in the partition |
 
 </details>
 
-### Command Log
+### Partition Monitor
 
 <details>
-<summary>What LazySlurm ran, and what came back</summary>
+<summary>Cluster-wide load and every user's jobs</summary>
 
-The bottom-right panel shows a timestamped log of all actions and their results:
+Press `p` for a full-screen view of the cluster's partitions. The main job tables only
+ever show **your** jobs — this screen shows everyone's, so you can see what a partition is
+actually busy with before you queue into it.
 
-```
-14:23:05 refresh
-  >>> complete
-14:23:12 scancel 2465400
-  >>> Job 2465400 cancelled.
-14:23:30 ssh galvani-cn109
-  >>> session to galvani-cn109 closed
-14:24:01 job completed
-  >>> 2465485 COMPLETED
-```
+<img src="https://raw.githubusercontent.com/RobinU434/LazySlurm/main/img/partitions.png" alt="Partition monitor" width="100%">
+
+**Partition table** — `A/I/O/T` is Slurm's allocated / idle / other / total counter, given
+for both nodes and CPUs. "Other" is down, drained, or reserved capacity. The **Load** bar
+is allocated CPUs over *usable* CPUs (allocated + idle), so drained nodes don't make a
+saturated partition look half empty; it turns yellow past 60% and red past 90%. `Run` and
+`Pend` are job counts across all users, and a pending job that names several partitions
+counts in each. Partitions that are `down` are shown struck-through instead of with a bar,
+rather than hidden.
+
+**Job table** — every user's jobs on the highlighted partition, running first then pending,
+newest first. Your own jobs are marked `▸` and highlighted. For pending jobs the last
+column shows Slurm's reason (`(Resources)`, `(QOSMaxGRESPerUser)`, `(Dependency)`, …)
+instead of a node list.
+
+| Key | Action |
+|-----|--------|
+| `Enter` | Open the [node view](#node-view) for the highlighted partition |
+| `Up`/`Down` | Move between partitions; the job table follows the highlighted one |
+| `Tab` | Switch focus between the partition and job tables (to scroll a long job list) |
+| `r` | Refresh now |
+| `Escape` / `p` / `q` | Back to the main view |
+
+The screen re-polls on your `--refresh` interval while it is open, and stops when you
+leave. `--partition-order` also orders this table. Note that `sinfo --summarize` reports
+one row per node *configuration*, so partitions with mixed hardware are summed into a
+single row here.
 
 </details>
 
-### What a refresh costs
+### Node View
 
 <details>
-<summary>Why a wide <code>--days</code> window is no longer slow</summary>
+<summary>Per-node state, load, memory and GPU occupancy</summary>
 
-`sacct` gets expensive as the history window grows — on one cluster, 112ms for seven
-days, 1.5 seconds for thirty, 4.5 for ninety. LazySlurm used to pay that on every
-refresh, to be told the same thing each time: a job that has ended does not change
-again.
+Press `Enter` on a partition to see its individual nodes:
 
-The window is now read once and held in memory. Each refresh re-reads only the last
-couple of minutes and merges the result, which still catches a job that started days
-ago and ended a moment ago — `sacct --starttime` selects jobs in any state *during* the
-window, not jobs that started in it. Every ten minutes the whole window is re-read
-anyway, in case an accounting row was revised after the fact.
+<img src="https://raw.githubusercontent.com/RobinU434/LazySlurm/main/img/nodes.png" alt="Nodes of a partition" width="100%">
 
-Steady-state poll, measured on a login node: 132ms → 33ms at `--days 7`, and ~1.6s →
-44ms at `--days 30`. A wide window now costs its full price only once, at startup.
+| Column | Meaning |
+|--------|---------|
+| State | Slurm's node state — `idle`, `mixed`, `allocated`, `drained`, `down`, … A trailing `*` means the node is not responding, and the node name is bolded |
+| CPUs A/I/O/T | allocated / idle / other / total cores on that node |
+| Load | the node's load average over its core count — this is *actual* CPU usage, unlike the allocation counters next to it |
+| Memory | in use (configured minus free) over configured, red past 90% |
+| GPUs | GRES in use over GRES configured, from `GresUsed`; green while any are free, red when the node is full |
+| Reason | why Slurm drained or downed the node (`kernel patch`, `Faulty GPU #7`, …) |
 
-`r` does not force the expensive re-read: the incremental query is already current, and
-with `refresh = 0` it is the only path there is. It does refresh the cluster bar, whose
-`sinfo` data is otherwise cached for 45 seconds.
-### Version in the footer
+Nodes without GRES show `—` in the GPU column, and a drained node's load is shown as `—`
+because its counters say nothing useful — the reason does. Its GPUs are dimmed for the
+same reason: eight idle devices on a node nothing can be scheduled onto are not eight
+free devices.
 
-<details>
-<summary>Which build is this?</summary>
-
-The right edge of the footer names the running version:
+**Press `Enter` on a node to fold it open into its GPUs.** `7/8` says how full a node is
+but not *which* device is free, and that is the question you are usually asking:
 
 ```
- q Quit  ? Help  / Search  r Refresh                          v0.3.0+g1a2b3c4
+▾ galvani-cn109  mixed    70/2/0/72  ██░░░░ 33%  110/346G  7/8
+  ├ GPU 0        busy     4                                rtx2080ti  2743012 koh882 vs
+  ├ GPU 1        free                                      rtx2080ti
+  └ GPU 7        busy     2                                rtx2080ti  2735799 bep055 codex
 ```
 
-A plain `v0.3.0` is a release, installed from PyPI. The `+g1a2b3c4` suffix is the
-short commit hash, and appears whenever the code came from git — an editable
-install, a clone you run in place, or `pip install git+https://...`, which records
-the commit it built from. `lazyslurm --version` prints the same string.
+Each child cell carries the same kind of thing as the node cell above it, so the columns
+keep meaning something: identity stays identity, `Load` is already a bar on the same 0–1
+scale, `Memory` keeps its used/total shape.
 
-Between a login node, a laptop and two clusters it is easy to lose track of which
-install you are looking at; a bug report that names the commit is worth rather more
-than one that names the version.
+Which devices are taken **costs nothing** — `sinfo` reports the allocated indices, so
+folding a node open needs no extra call. The two columns that do cost something wait for
+a key:
+
+| Key | Fills in | Cost |
+|-----|----------|------|
+| `g` | which job holds each GPU, and its cores | one `scontrol` per job on the node |
+| `Shift+G` | live utilisation and memory per device | one round trip to the node |
+
+Neither runs on the refresh, because browsing a large partition would otherwise turn
+every cursor move into a burst of round trips.
+
+Two config options shape this — `node_expand` (what a node unfolds into, default `gpu`,
+falling back to CPUs on a node without GRES) and `gpu_column` (`count` for `7/8`, or
+`glyphs` for `▣▣▢▣▣▣▣▣`, which shows the free slot without expanding anything).
+
+The bar at the top counts the partition's nodes by state and totals GPUs in use.
+The lower panel lists **all users'** jobs running on the highlighted node, so you can see
+who you would be sharing it with. `Up`/`Down` moves between nodes and the job list follows,
+`Tab` switches panels, `r` refreshes, `Escape` or `q` goes back to the partition list.
+
+Older Slurm versions that do not support the `GresUsed` output field fall back
+automatically to a shorter query; everything except the GPU column still works.
 
 </details>
+
+### Account Usage
+
+<details>
+<summary>CPU-hours per user and your fair-share factor</summary>
+
+Press `Shift+U` for what the allocation has cost so far and what it is doing to your
+priority:
+
+```
+this month   8 200 CPU-hours used by you   account total 12 500  66% of it yours   (w cycles window)
++------------------------------- Fair share -------------------------------+
+| physics  factor 0.437  entitled 1.68%  used 5.64%                        |
+|   over your share — your jobs get reduced priority (using 3.3x your share)|
++------------------------------ Account usage -----------------------------+
+| User      Name        CPU hours  Share              %                    |
+| ▸ jdoe    Jane Doe        8 200  ████████████░░░░  66.1%                 |
+|   asmith  A Smith        3 100   ████░░░░░░░░░░░░  25.0%                 |
+|   bpatel  B Patel        1 200   ██░░░░░░░░░░░░░░   9.7%                 |
++--------------------------------------------------------------------------+
+```
+
+- **Hours** come from `sreport cluster AccountUtilizationByUser`, per user in your account,
+  biggest consumer first, your own row marked `▸`.
+- **Fair share** comes from `sshare` — this is what actually drives queue priority.
+  `entitled` is your slice of the cluster, `used` is the slice you have consumed, and the
+  factor is Slurm's verdict: above 0.5 you are under-consuming and get boosted, below it
+  you are over-consuming and get pushed back. The sentence underneath says which.
+- `w` cycles the window: **this month → last 30 days → this year**. `r` refetches,
+  `Escape` / `Shift+U` / `q` returns.
+
+`sreport` can take seconds on a busy accounting database, so the screen opens immediately
+with `loading usage...` and fills in when the data arrives. Nothing here runs in the poll
+loop — it is fetched on open, on `r`, and when the window changes. On a cluster without
+Slurm accounting the panel says so rather than showing an empty table.
+
+</details>
+
+## Working with more than one cluster
+
+Run LazySlurm on your own machine against a cluster somewhere else:
+
+```bash
+lazyslurm --remote user@login.hpc.edu
+```
+
+Everything below is about doing that well — one connection rather than many, a
+two-factor prompt once rather than every few seconds, and switching between clusters
+without logging in again.
 
 ### Cluster browser
 
@@ -949,110 +860,6 @@ instead of exiting — it is the one thing that can usefully be shown, and it is
 get somewhere.
 
 </details>
-
-## Job Cache
-
-Slurm forgets a job shortly after it ends — `MinJobAge` seconds, often just 300. Until
-then, `scontrol` can tell you the job's exact `StdOut`/`StdErr` paths and hand you its
-sbatch script; afterwards both are gone and only `sacct` remains, which knows neither.
-
-LazySlurm caches both while a job is still live, so they survive the job.
-
-Check your cluster's window with:
-
-```bash
-scontrol show config | grep MinJobAge
-```
-
-### Batch scripts
-
-<details>
-<summary>Archived so an old job's script is still readable</summary>
-
-Archived as text under the base job ID, so all tasks of an array share one file. See
-[View sbatch Script](#view-sbatch-script) for the `b` keybinding and its limitations.
-
-</details>
-
-### Log paths
-
-<details>
-<summary>Remembered, so logs outlive scontrol</summary>
-
-Log paths are cached the same way, into `log_cache.json`, whenever you select a job that
-Slurm still knows about. For older jobs LazySlurm falls back to guessing from filename
-patterns (`slurm-JOBID.out`, `JOBNAME-JOBID.out`, `logs/` subdirectories), which can fail
-if you use custom `--output`/`--error` names.
-
-</details>
-
-### Resubmit fallback
-
-<details>
-<summary>What happens when the original script is gone</summary>
-
-Resubmit (**`s`**) runs the job's original sbatch command. If the script file it names no
-longer exists, LazySlurm substitutes the archived copy and says so in the Command Log. Not
-available in remote mode, where the archive is local but `sbatch` runs on the login node.
-
-</details>
-
-### Resubmit with more resources
-
-<details>
-<summary>Run it again, but bigger</summary>
-
-The loop after a failure is usually "run it again, but bigger" — more time after a
-TIMEOUT, more memory after an OOM kill. `u` cannot help there: Slurm fixes a job's
-allocation once it starts, so the property editor only works on jobs still queued.
-
-**`Shift+S`** opens that same editor for a *terminated* job, prefilled with what the job
-actually had, and submits with the changed fields as sbatch flags:
-
-```
-sbatch --chdir /work --time=4:00:00 --mem=16G job.sh
-```
-
-- Fields map to `--time`, `--partition`, `--nodes`, `--cpus-per-task` and `--mem`.
-- An override **replaces** the same option in the original submit line rather than being
-  appended next to it, so the command log shows exactly what was requested.
-- A field left blank keeps whatever the original line had. Options after the script name
-  belong to the script and are never touched.
-- After a **TIMEOUT** the runtime field is prefilled with double the old limit, and after
-  **OUT_OF_MEMORY** the memory field with double the old request. They are suggestions —
-  overwrite or clear them.
-- The full `sbatch` line is written to the Command Log before it runs.
-
-The [archived-script fallback](#resubmit-fallback) applies here too.
-
-</details>
-
-### Cache files
-
-<details>
-<summary>Where the cache lives and when it is pruned</summary>
-
-| File | Purpose |
-|------|---------|
-| `~/.config/lazyslurm/log_cache.json` | Cached `StdOut`/`StdErr` paths, work dir, and submit command per job ID |
-| `~/.config/lazyslurm/scripts/<job_id>.sh` | Archived sbatch scripts, mode `600` (they often contain tokens and private paths) |
-
-Both are pruned on startup using `cache_max_age_days` (default 30, `0` to never prune).
-Set `script_cache_dir` in `config.toml` to archive scripts somewhere else.
-
-> Earlier versions shipped a `lazyslurm-daemon` that polled for log paths in the background.
-> It has been removed — caching now happens inline. A leftover
-> `~/.config/lazyslurm/daemon.pid` is inert and can be deleted.
-
-</details>
-
-## Remote Mode
-
-Run LazySlurm on your local machine while monitoring a remote cluster:
-
-```bash
-lazyslurm --remote user@login.hpc.edu
-```
 
 ### One connection, opened once
 
@@ -1124,6 +931,87 @@ machine while `sbatch` runs on the login node.
 
 **Login node warning**: If the local or remote hostname contains "login", LazySlurm shows
 a warning popup reminding you to be mindful of resource usage on shared login nodes.
+
+</details>
+
+## Appearance
+
+Cosmetic settings, all of them optional and all in [config.toml](#configuration).
+
+### Column Width Limits
+
+<details>
+<summary>Keep long job names from eating the table</summary>
+
+Job names and partition names are truncated to 16 characters by default (with `…` when
+truncated). This keeps the tables compact. Configure via `config.toml`:
+
+```toml
+max_name_width = 20       # wider name column
+max_partition_width = 10  # narrower partition column
+```
+
+Set to `0` for unlimited width.
+
+</details>
+
+### State Abbreviations
+
+<details>
+<summary>COMPLETED -> COMP, and the full mapping</summary>
+
+For compact displays, enable abbreviated state names in the Terminated Jobs table:
+
+```toml
+abbreviate_states = true
+```
+
+| Full State | Abbreviation |
+|------------|-------------|
+| COMPLETED | COMP |
+| FAILED | FAIL |
+| TIMEOUT | TIME |
+| CANCELLED | CAN |
+| OUT_OF_MEMORY | OOM |
+| NODE_FAIL | NFAIL |
+| PREEMPTED | PREEMPT |
+
+</details>
+
+### Color-Coded Partitions
+
+<details>
+<summary>Automatic colors, and how to override them</summary>
+
+Each partition is assigned a consistent color across both job tables. Colors are
+deterministic (based on the partition name) so they stay stable across sessions. You can
+override colors in the config file (see [Configuration](#configuration)).
+
+</details>
+
+### Color-Coded Job States
+
+<details>
+<summary>What each color means, in both tables</summary>
+
+**Active Jobs** (Job ID column):
+
+| State | Color |
+|-------|-------|
+| RUNNING | Green |
+| PENDING | Yellow |
+| COMPLETING | Orange |
+| SUSPENDED, REQUEUED | Dim |
+
+**Terminated Jobs** (State column):
+
+| State | Color |
+|-------|-------|
+| COMPLETED | Green |
+| FAILED, OUT_OF_MEMORY, NODE_FAIL | Red |
+| TIMEOUT | Yellow |
+| CANCELLED | Dim grey |
+| PREEMPTED | Dim yellow |
 
 </details>
 
@@ -1266,7 +1154,148 @@ lazyslurm --partition-order gpu,cpu,fat
 
 </details>
 
+## What LazySlurm remembers
+
+Slurm forgets a job shortly after it ends. These are the caches that let LazySlurm still answer questions about it — and what they cost.
+
+Slurm forgets a job shortly after it ends — `MinJobAge` seconds, often just 300. Until
+then, `scontrol` can tell you the job's exact `StdOut`/`StdErr` paths and hand you its
+sbatch script; afterwards both are gone and only `sacct` remains, which knows neither.
+
+LazySlurm caches both while a job is still live, so they survive the job.
+
+Check your cluster's window with:
+
+```bash
+scontrol show config | grep MinJobAge
+```
+
+### Batch scripts
+
+<details>
+<summary>Archived so an old job's script is still readable</summary>
+
+Archived as text under the base job ID, so all tasks of an array share one file. See
+[View sbatch Script](#view-sbatch-script) for the `b` keybinding and its limitations.
+
+</details>
+
+### Log paths
+
+<details>
+<summary>Remembered, so logs outlive scontrol</summary>
+
+Log paths are cached the same way, into `log_cache.json`, whenever you select a job that
+Slurm still knows about. For older jobs LazySlurm falls back to guessing from filename
+patterns (`slurm-JOBID.out`, `JOBNAME-JOBID.out`, `logs/` subdirectories), which can fail
+if you use custom `--output`/`--error` names.
+
+</details>
+
+### Resubmit fallback
+
+<details>
+<summary>What happens when the original script is gone</summary>
+
+Resubmit (**`s`**) runs the job's original sbatch command. If the script file it names no
+longer exists, LazySlurm substitutes the archived copy and says so in the Command Log. Not
+available in remote mode, where the archive is local but `sbatch` runs on the login node.
+
+</details>
+
+### Cache files
+
+<details>
+<summary>Where the cache lives and when it is pruned</summary>
+
+| File | Purpose |
+|------|---------|
+| `~/.config/lazyslurm/log_cache.json` | Cached `StdOut`/`StdErr` paths, work dir, and submit command per job ID |
+| `~/.config/lazyslurm/scripts/<job_id>.sh` | Archived sbatch scripts, mode `600` (they often contain tokens and private paths) |
+
+Both are pruned on startup using `cache_max_age_days` (default 30, `0` to never prune).
+Set `script_cache_dir` in `config.toml` to archive scripts somewhere else.
+
+> Earlier versions shipped a `lazyslurm-daemon` that polled for log paths in the background.
+> It has been removed — caching now happens inline. A leftover
+> `~/.config/lazyslurm/daemon.pid` is inert and can be deleted.
+
+</details>
+
+### What a refresh costs
+
+<details>
+<summary>Why a wide <code>--days</code> window is no longer slow</summary>
+
+`sacct` gets expensive as the history window grows — on one cluster, 112ms for seven
+days, 1.5 seconds for thirty, 4.5 for ninety. LazySlurm used to pay that on every
+refresh, to be told the same thing each time: a job that has ended does not change
+again.
+
+The window is now read once and held in memory. Each refresh re-reads only the last
+couple of minutes and merges the result, which still catches a job that started days
+ago and ended a moment ago — `sacct --starttime` selects jobs in any state *during* the
+window, not jobs that started in it. Every ten minutes the whole window is re-read
+anyway, in case an accounting row was revised after the fact.
+
+Steady-state poll, measured on a login node: 132ms → 33ms at `--days 7`, and ~1.6s →
+44ms at `--days 30`. A wide window now costs its full price only once, at startup.
+
+`r` does not force the expensive re-read: the incremental query is already current, and
+with `refresh = 0` it is the only path there is. It does refresh the cluster bar, whose
+`sinfo` data is otherwise cached for 45 seconds.
+
+</details>
+
+## Knowing what you are running
+
+Which build is on screen, and what it has been doing.
+
+### Version in the footer
+
+<details>
+<summary>Which build is this?</summary>
+
+The right edge of the footer names the running version:
+
+```
+ q Quit  ? Help  / Search  r Refresh                          v0.3.0+g1a2b3c4
+```
+
+A plain `v0.3.0` is a release, installed from PyPI. The `+g1a2b3c4` suffix is the
+short commit hash, and appears whenever the code came from git — an editable
+install, a clone you run in place, or `pip install git+https://...`, which records
+the commit it built from. `lazyslurm --version` prints the same string.
+
+Between a login node, a laptop and two clusters it is easy to lose track of which
+install you are looking at; a bug report that names the commit is worth rather more
+than one that names the version.
+
+</details>
+
+### Command Log
+
+<details>
+<summary>What LazySlurm ran, and what came back</summary>
+
+The bottom-right panel shows a timestamped log of all actions and their results:
+
+```
+14:23:05 refresh
+  >>> complete
+14:23:12 scancel 2465400
+  >>> Job 2465400 cancelled.
+14:23:30 ssh galvani-cn109
+  >>> session to galvani-cn109 closed
+14:24:01 job completed
+  >>> 2465485 COMPLETED
+```
+
+</details>
+
 ## CLI Reference
+
+
 
 ### lazyslurm
 
