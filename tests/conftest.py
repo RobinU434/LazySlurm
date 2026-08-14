@@ -10,9 +10,10 @@ from lazyslurm import slurm
 def _isolate_config_dir(tmp_path, monkeypatch):
     """Never let a test read or write the real ~/.config/lazyslurm.
 
-    The paths are module-level, so anything that reaches them without saying so
-    lands in the user's own config — and since #67 that includes rewriting it.
-    Redirecting them for every test makes that impossible rather than unlikely.
+    The paths are module-level, so anything reaching them without saying so
+    lands in the developer's own config — which is not merely untidy: a cache
+    written by a newer LazySlurm decides whether unrelated tests pass, and
+    since #67 the config file itself would be rewritten.
     """
     config_dir = tmp_path / "lazyslurm-config"
     config_dir.mkdir()
