@@ -161,9 +161,18 @@ PANELS: tuple[Panel, ...] = (
         subtitle="Enter on a partition",
         keys=(
             Key("Up / Down", "move between nodes"),
+            Key("Enter", "fold a node open into its GPUs, one row per device"),
+            Key("g", "fill in which job holds each GPU", ("g",)),
+            Key("Shift+G", "fill in each GPU's live utilisation and memory", ("G",)),
             Key("Tab", "switch panel", ("tab", "shift+tab")),
             Key("r", "refresh now", ("r",)),
             Key("Escape / q", "back to the partition monitor", ("escape", "q")),
+        ),
+        notes=(
+            "Which GPUs are taken costs nothing — sinfo reports the allocated "
+            "indices, so folding a node open is free. Who holds them and how "
+            "hard they are working each cost a round trip, which is why they "
+            "wait for a key rather than arriving with every refresh.",
         ),
     ),
     Panel(

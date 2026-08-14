@@ -38,6 +38,9 @@ _FILE_ONLY_KEYS = frozenset({
     "script_cache_dir",
     "interactive_shell",
     "resource_monitor",
+    "node_expand",
+    "gpu_column",
+    "config_version",
     "cluster_name",
 })
 
@@ -51,12 +54,33 @@ def unknown_config_keys(saved: dict) -> list[str]:
     problem to diagnose because the file looks right. Reported, never rejected:
     one typo must not cost the user every other setting they configured.
     Nested tables are checked by table name only.
+
+    A key that used to be real is reported by `deprecated_config_keys` instead,
+    which can say what replaced it — much more useful than "unknown".
     """
+    from lazyslurm.config import DEPRECATED
+
     return [
         f"ignoring unknown setting: {key}"
         for key in sorted(saved)
-        if key not in KNOWN_CONFIG_KEYS
+        if key not in KNOWN_CONFIG_KEYS and key not in DEPRECATED
     ]
+
+
+def deprecated_config_keys(saved: dict) -> list[str]:
+    """Warnings for settings that were real once, naming their replacement."""
+    from lazyslurm.config import DEPRECATED
+
+    notes = []
+    for key in sorted(saved):
+        if key not in DEPRECATED:
+            continue
+        replacement = DEPRECATED[key]
+        notes.append(
+            f"{key} has been renamed to {replacement}" if replacement
+            else f"{key} is no longer used and is ignored"
+        )
+    return notes
 
 
 # What the main view cannot work without. Everything else (sinfo, sstat, sprio,
@@ -144,10 +168,39 @@ def parse_resource_monitor(raw: object) -> tuple[str, str]:
     return "graph", f"resource_monitor: {raw!r} is not one of {options} — using graph"
 
 
+def _parse_mode(raw: object, modes: tuple[str, ...], key: str) -> tuple[str, str]:
+    """Validate one of the fixed-vocabulary settings. Returns (value, warning).
+
+    The first mode is the default, and an unknown value falls back to it with a
+    warning rather than being rejected -- the panel would otherwise look
+    unchanged with no hint that the setting was ignored.
+    """
+    value = str(raw).strip().lower()
+    if value in modes:
+        return value, ""
+    return modes[0], f"{key}: {raw!r} is not one of {' | '.join(modes)} — using {modes[0]}"
+
+
+def parse_node_expand(raw: object) -> tuple[str, str]:
+    """Validate ``node_expand``: what a node row unfolds into."""
+    from lazyslurm.models import NODE_EXPAND_MODES
+
+    return _parse_mode(raw, NODE_EXPAND_MODES, "node_expand")
+
+
+def parse_gpu_column(raw: object) -> tuple[str, str]:
+    """Validate ``gpu_column``: the node table's GPUs column, count or marks."""
+    from lazyslurm.models import GPU_COLUMN_MODES
+
+    return _parse_mode(raw, GPU_COLUMN_MODES, "gpu_column")
+
+
 def main() -> None:
     from lazyslurm import config as persistent_config
 
-    # Load saved config for defaults
+    # Bring the file up to the packaged template first, so the values read
+    # below are the migrated ones and the notes reach the same warning list.
+    migration_notes = persistent_config.migrate()
     saved = persistent_config.load()
 
     parser = argparse.ArgumentParser(
@@ -298,11 +351,12 @@ def main() -> None:
     resource_monitor, monitor_warning = parse_resource_monitor(
         saved.get("resource_monitor", "graph")
     )
-    warnings = unknown_config_keys(saved)
-    if shell_warning:
-        warnings.append(shell_warning)
-    if monitor_warning:
-        warnings.append(monitor_warning)
+    node_expand, expand_warning = parse_node_expand(saved.get("node_expand", "gpu"))
+    gpu_column, column_warning = parse_gpu_column(saved.get("gpu_column", "count"))
+    warnings = migration_notes + deprecated_config_keys(saved) + unknown_config_keys(saved)
+    for warning in (shell_warning, monitor_warning, expand_warning, column_warning):
+        if warning:
+            warnings.append(warning)
 
     config = Config(
         refresh=float(resolved["refresh"]),
@@ -324,6 +378,8 @@ def main() -> None:
         script_cache_dir=script_cache_dir,
         interactive_shell=interactive_shell,
         resource_monitor=resource_monitor,
+        node_expand=node_expand,
+        gpu_column=gpu_column,
         cluster_name=str(saved.get("cluster_name", "")).strip(),
     )
 

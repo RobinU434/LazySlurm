@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Callable, Iterable
 from pathlib import Path
 
 from lazyslurm.ssh import PromptCallback, SSHSession, quote_argv
 from lazyslurm.models import (
+    _gres_entries,
+    gres_indices,
     CompletedJob,
     array_task_count,
     Config,
@@ -20,6 +23,7 @@ from lazyslurm.models import (
     GpuSample,
     JobDetail,
     JobStats,
+    NodeDevice,
     NodeInfo,
     NodeSample,
     PartitionInfo,
@@ -452,8 +456,18 @@ _completed_cache: _CompletedCache | None = None
 # do not drain and come back on a five-second cadence.
 _SINFO_TTL = timedelta(seconds=45)
 
-# (partition_order, fetched at, rendered entries)
-_partition_cache: tuple[tuple[str, ...], datetime, list[str]] | None = None
+# (fetched at, every partition sinfo reported). One cache behind both the
+# cluster bar and the partition monitor: they ask the same question of the same
+# command, and used to each pay for it.
+_sinfo_cache: tuple[datetime, list[PartitionInfo]] | None = None
+
+# How long the per-partition running/pending counts may be out of date. Shorter
+# than the sinfo TTL because the queue does move on that scale -- but not zero,
+# because the command behind it is a cluster-wide squeue (#72).
+_QUEUE_COUNT_TTL = timedelta(seconds=15)
+
+# (fetched at, {partition: (running, pending)})
+_job_count_cache: tuple[datetime, dict[str, tuple[int, int]]] | None = None
 
 
 def reset_caches() -> None:
@@ -462,10 +476,10 @@ def reset_caches() -> None:
     Called when the config changes under the module, and by tests, which share
     one imported module and would otherwise see each other's answers.
     """
-    global _completed_cache, _partition_cache
-    global _cluster_name
+    global _completed_cache, _sinfo_cache, _job_count_cache, _cluster_name
     _completed_cache = None
-    _partition_cache = None
+    _sinfo_cache = None
+    _job_count_cache = None
     _cluster_name = ""
     _stat_cache.clear()
 
@@ -1837,34 +1851,71 @@ def parse_partition_job_counts(stdout: str) -> dict[str, tuple[int, int]]:
     return {name: (run, pend) for name, (run, pend) in counts.items()}
 
 
-async def get_partition_job_counts() -> dict[str, tuple[int, int]]:
-    """Running/pending job counts per partition, across all users."""
+async def get_partition_job_counts(*, force: bool = False) -> dict[str, tuple[int, int]]:
+    """Running/pending job counts per partition, across all users.
+
+    The command behind this is the most expensive one LazySlurm runs: a
+    cluster-wide `squeue` with no user or partition filter, which on a busy
+    controller returns tens of thousands of rows. Cached for
+    `_QUEUE_COUNT_TTL` so a refresh tick -- or reopening the monitor a second
+    after closing it -- does not ask slurmctld for the whole queue again (#72).
+    """
+    global _job_count_cache
+    now = datetime.now()
+    cached = _job_count_cache
+    if not force and cached is not None and now - cached[0] < _QUEUE_COUNT_TTL:
+        return dict(cached[1])
+
     stdout, _, rc = await _run_cmd(
         "squeue", "--noheader", "--format=%P|%T", "--states=RUNNING,PENDING",
     )
     if rc != 0 or not stdout.strip():
+        # An empty queue and a failed squeue look the same here, and caching
+        # the failure would hide the recovery for a quarter of a minute.
         return {}
-    return parse_partition_job_counts(stdout)
+    counts = parse_partition_job_counts(stdout)
+    _job_count_cache = (now, counts)
+    return dict(counts)
 
 
-async def get_partitions(config: Config | None = None) -> list[PartitionInfo]:
+async def _sinfo_partitions(*, force: bool = False) -> list[PartitionInfo]:
+    """Every partition as `sinfo --summarize` sees it, cached for `_SINFO_TTL`.
+
+    The one place that runs sinfo for the partition list. Callers get fresh
+    copies because they fill `running`/`pending` in, and the cache must not
+    come back carrying the last screen's job counts.
+    """
+    global _sinfo_cache
+    now = datetime.now()
+    cached = _sinfo_cache
+    if not force and cached is not None and now - cached[0] < _SINFO_TTL:
+        return [replace(p) for p in cached[1]]
+
+    stdout, _, rc = await _run_cmd(
+        "sinfo", "--noheader", "--summarize", f"--format={_SINFO_FORMAT}",
+    )
+    if rc != 0 or not stdout.strip():
+        # Nothing to cache: an empty answer here usually means sinfo failed,
+        # and holding onto that for a minute would hide the recovery.
+        return []
+    parts = parse_sinfo(stdout)
+    _sinfo_cache = (now, parts)
+    return [replace(p) for p in parts]
+
+
+async def get_partitions(
+    config: Config | None = None, *, force: bool = False,
+) -> list[PartitionInfo]:
     """Fetch every partition's node/CPU state from `sinfo`.
 
     Unlike the cluster bar this keeps unavailable ("down") partitions — the
     monitor screen shows them greyed out rather than hiding them.
+
+    Job counts are *not* filled in here; `get_partition_job_counts` is a
+    separate, much slower call and the monitor paints this first (#72).
     """
     cfg = config or _config
-    stdout, counts = await asyncio.gather(
-        _run_cmd("sinfo", "--noheader", "--summarize", f"--format={_SINFO_FORMAT}"),
-        get_partition_job_counts(),
-    )
-    out, _, rc = stdout
-    if rc != 0 or not out.strip():
-        return []
-    parts = parse_sinfo(out)
-    for part in parts:
-        part.running, part.pending = counts.get(part.name, (0, 0))
-    return order_partitions(parts, cfg)
+    return order_partitions(await _sinfo_partitions(force=force), cfg)
 
 
 _cluster_name: str = ""
@@ -1928,37 +1979,16 @@ async def get_partition_availability(
     Honors cfg.partition_order for display ordering; down partitions are
     dropped.
 
-    Cached for `_SINFO_TTL`. This feeds the cluster bar, which describes the
-    shape of the whole machine -- how many nodes a partition has, and roughly
-    how busy it is. That is not a five-second quantity, and asking for it at
-    five-second granularity costs a command (and, remotely, a round trip) to
-    redraw the same string. `force=True` on the manual refresh, where the user
-    has asked for everything to be current.
+    Served from the shared `_sinfo_partitions` cache. This feeds the cluster
+    bar, which describes the shape of the whole machine -- how many nodes a
+    partition has, and roughly how busy it is. That is not a five-second
+    quantity, and asking for it at five-second granularity costs a command
+    (and, remotely, a round trip) to redraw the same string. `force=True` on
+    the manual refresh, where the user has asked for everything to be current.
     """
-    global _partition_cache
     cfg = config or _config
-    key = tuple(cfg.partition_order or ())
-    now = datetime.now()
-    cached = _partition_cache
-    if (
-        not force
-        and cached is not None
-        and cached[0] == key
-        and now - cached[1] < _SINFO_TTL
-    ):
-        return cached[2]
-
-    stdout, _, _ = await _run_cmd(
-        "sinfo", "--noheader", "--summarize", f"--format={_SINFO_FORMAT}",
-    )
-    if not stdout.strip():
-        # Nothing to cache: an empty answer here usually means sinfo failed,
-        # and holding onto that for a minute would hide the recovery.
-        return []
-    parts = [p for p in parse_sinfo(stdout) if p.avail == "up"]
-    result = [f"{p.name}:{p.nodes_aiot}" for p in order_partitions(parts, cfg)]
-    _partition_cache = (key, now, result)
-    return result
+    parts = [p for p in await _sinfo_partitions(force=force) if p.avail == "up"]
+    return [f"{p.name}:{p.nodes_aiot}" for p in order_partitions(parts, cfg)]
 
 
 # ---------------------------------------------------------------------------
@@ -1996,6 +2026,71 @@ def _as_float(value: str) -> float:
         return float(value.strip())
     except (ValueError, AttributeError):
         return 0.0
+
+
+# One "Nodes=... CPU_IDs=... Mem=... GRES=..." line of `scontrol show job -d`,
+# which is the only place Slurm says *which* device a job was given.
+_JOB_ALLOC = re.compile(
+    r"Nodes=(?P<nodes>\S+)\s+CPU_IDs=(?P<cpus>\S+)\s+Mem=\S+\s+GRES=(?P<gres>\S*)"
+)
+
+
+def expand_node_spec(spec: str) -> list[str]:
+    """``cn[1-3],cn9`` -> ``["cn1", "cn2", "cn3", "cn9"]``.
+
+    A multi-node job reports its allocation against a bracketed host list, so
+    matching the spec literally would drop the owner of every GPU held by a job
+    spanning more than one node.
+    """
+    names: list[str] = []
+    for match in re.finditer(r"([^,\[\]]+)(?:\[([^\]]*)\])?", spec or ""):
+        prefix, ranges = match.group(1), match.group(2)
+        if not prefix:
+            continue
+        if not ranges:
+            names.append(prefix)
+            continue
+        for part in ranges.split(","):
+            lo, _, hi = part.partition("-")
+            if lo.isdigit() and hi.isdigit():
+                width = len(lo)
+                names.extend(f"{prefix}{i:0{width}d}" for i in range(int(lo), int(hi) + 1))
+            elif lo:
+                names.append(f"{prefix}{lo}")
+    return names
+
+
+def parse_job_allocation(stdout: str, node: str) -> tuple[str, list[int]]:
+    """What one job holds on `node`: (CPU count, GPU indices)."""
+    for match in _JOB_ALLOC.finditer(stdout):
+        if node not in expand_node_spec(match.group("nodes")):
+            continue
+        cpus = len(parse_cpu_list(match.group("cpus")))
+        indices: list[int] = []
+        for _, _, detail in _gres_entries(match.group("gres")):
+            indices.extend(gres_indices(detail))
+        return (str(cpus) if cpus else ""), indices
+    return "", []
+
+
+async def get_device_owners(
+    node: str, jobs: Iterable[tuple[str, str, str]],
+) -> dict[int, tuple[str, str, str, str]]:
+    """Map GPU index -> (job id, user, name, cpus) for the jobs on `node`.
+
+    One `scontrol show job -d` per job: it refuses a comma-separated list, and
+    asking for every job on the cluster instead costs ~360ms and most of a
+    megabyte. Only ever called when the user presses the key for it.
+    """
+    owners: dict[int, tuple[str, str, str, str]] = {}
+    for job_id, user, name in jobs:
+        stdout, _, rc = await _run_cmd("scontrol", "show", "job", "-d", job_id)
+        if rc != 0 or not stdout.strip():
+            continue
+        cpus, indices = parse_job_allocation(stdout, node)
+        for index in indices:
+            owners[index] = (job_id, user, name, cpus)
+    return owners
 
 
 def parse_sinfo_nodes(stdout: str) -> list[NodeInfo]:
@@ -2290,11 +2385,16 @@ _NODE_SAMPLE_SCRIPT = f"{_NODE_SAMPLE_BODY}\nsleep {_SAMPLE_SLEEP}\necho '##stat
 
 # How stale a kept snapshot may be and still be worth subtracting from.
 #
-# The delta then covers the gap since the last sample, the way htop reports the
-# gap since its last draw. Past a minute that stops being "now" in any useful
-# sense -- a job that finished its epoch two minutes ago would still be shown
-# busy -- so beyond this the sample pays for its own second snapshot again.
-_SAMPLE_MAX_AGE = timedelta(seconds=60)
+# Generous on purpose. With `refresh = 0` the r key is the only path there is,
+# and presses are usually minutes apart -- a one-minute cap meant the snapshot
+# had always expired and every manual refresh paid the half second again, which
+# is precisely the case the snapshot exists to spare.
+#
+# "Average over the last three minutes" is a fair answer to someone who last
+# looked three minutes ago; it is only misleading if it is presented as "now",
+# so the reading carries the window it covers and the panel prints it. Past
+# this the sample times itself again rather than averaging over an hour.
+_SAMPLE_MAX_AGE = timedelta(minutes=10)
 
 # (node, job_id) -> (per-cpu jiffy counters, when they were read)
 _stat_cache: dict[tuple[str, str], tuple[dict[int, tuple[float, float]], datetime]] = {}
@@ -2502,12 +2602,10 @@ async def get_node_sample(node: str, job_id: str = "") -> NodeSample:
     first_node = _first_node(node)
     key = (first_node, job_id)
     kept = _stat_cache.get(key)
-    previous = (
-        kept[0]
-        if kept is not None and datetime.now() - kept[1] <= _SAMPLE_MAX_AGE
-        else None
-    )
+    age = datetime.now() - kept[1] if kept is not None else None
+    previous = kept[0] if age is not None and age <= _SAMPLE_MAX_AGE else None
     sample = await _sample_node(first_node, job_id, previous)
+    span = age.total_seconds() if previous is not None else _SAMPLE_SLEEP
 
     if previous is not None and not sample.cores and not sample.error:
         # The kept snapshot had no core in common with this one -- the job moved
@@ -2515,7 +2613,10 @@ async def get_node_sample(node: str, job_id: str = "") -> NodeSample:
         # rather than showing an empty meter.
         _stat_cache.pop(key, None)
         sample = await _sample_node(first_node, job_id, None)
+        span = _SAMPLE_SLEEP
 
+    if not sample.error:
+        sample.span = span
     if sample.counters:
         _stat_cache[key] = (sample.counters, datetime.now())
     return sample

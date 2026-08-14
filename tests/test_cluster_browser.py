@@ -181,10 +181,12 @@ def test_switching_clusters_drops_the_poll_caches(monkeypatch):
     monkeypatch.setattr(slurm, "SSHSession", _FakeSession)
 
     asyncio.run(slurm.connect_remote(config=Config(remote="me@a.edu")))
-    slurm._partition_cache = (("gpu",), None, ["gpu:1/2/0/3"])
+    slurm._sinfo_cache = object()
+    slurm._job_count_cache = object()
     asyncio.run(slurm.connect_remote(config=Config(remote="me@b.edu")))
 
-    assert slurm._partition_cache is None
+    assert slurm._sinfo_cache is None
+    assert slurm._job_count_cache is None
 
 
 # --- the table -------------------------------------------------------------

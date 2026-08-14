@@ -253,8 +253,8 @@ def test_the_cluster_bar_refreshes_once_the_ttl_passes(monkeypatch):
     monkeypatch.setattr(slurm, "_run_cmd", fake)
 
     _availability()
-    key, fetched, result = slurm._partition_cache
-    slurm._partition_cache = (key, fetched - slurm._SINFO_TTL, result)
+    fetched, parts = slurm._sinfo_cache
+    slurm._sinfo_cache = (fetched - slurm._SINFO_TTL, parts)
     _availability()
 
     assert fake.commands == ["sinfo", "sinfo"]
@@ -321,3 +321,78 @@ def test_an_empty_sinfo_is_not_cached(monkeypatch):
 
     assert _availability() == []
     assert _availability() != []
+
+
+# --- the partition monitor's own calls (#72) -------------------------------
+
+
+def test_the_monitor_and_the_cluster_bar_share_one_sinfo(monkeypatch):
+    # Both describe the same partitions from the same command. Opening the
+    # monitor right after a poll should not re-run it.
+    fake = _Sacct(_SINFO)
+    monkeypatch.setattr(slurm, "_run_cmd", fake)
+
+    _availability()
+    parts = asyncio.run(slurm.get_partitions(Config()))
+
+    assert [p.name for p in parts] == ["gpu"]
+    assert fake.commands == ["sinfo"]
+
+
+def test_the_cached_sinfo_never_carries_stale_job_counts(monkeypatch):
+    # The monitor writes running/pending onto what it gets back; the cache
+    # must hand out copies, not the objects it is holding.
+    fake = _Sacct(_SINFO)
+    monkeypatch.setattr(slurm, "_run_cmd", fake)
+
+    first = asyncio.run(slurm.get_partitions(Config()))
+    first[0].running, first[0].pending = 7, 3
+    second = asyncio.run(slurm.get_partitions(Config()))
+
+    assert (second[0].running, second[0].pending) == (0, 0)
+
+
+_QUEUE = "gpu|RUNNING\ngpu|PENDING\n"
+
+
+def test_the_job_counts_are_not_refetched_every_tick(monkeypatch):
+    # The cluster-wide squeue behind these is the most expensive command in
+    # the app; a refresh tick inside the TTL must not repeat it.
+    fake = _Sacct(_QUEUE)
+    monkeypatch.setattr(slurm, "_run_cmd", fake)
+
+    first = asyncio.run(slurm.get_partition_job_counts())
+    assert asyncio.run(slurm.get_partition_job_counts()) == first
+    assert fake.commands == ["squeue"]
+
+
+def test_forcing_refetches_the_job_counts(monkeypatch):
+    fake = _Sacct(_QUEUE)
+    monkeypatch.setattr(slurm, "_run_cmd", fake)
+
+    asyncio.run(slurm.get_partition_job_counts())
+    asyncio.run(slurm.get_partition_job_counts(force=True))
+
+    assert fake.commands == ["squeue", "squeue"]
+
+
+def test_the_job_counts_refresh_once_their_ttl_passes(monkeypatch):
+    fake = _Sacct(_QUEUE)
+    monkeypatch.setattr(slurm, "_run_cmd", fake)
+
+    asyncio.run(slurm.get_partition_job_counts())
+    fetched, counts = slurm._job_count_cache
+    slurm._job_count_cache = (fetched - slurm._QUEUE_COUNT_TTL, counts)
+    asyncio.run(slurm.get_partition_job_counts())
+
+    assert fake.commands == ["squeue", "squeue"]
+
+
+def test_an_empty_queue_answer_is_not_cached(monkeypatch):
+    # Same reasoning as the empty sinfo: a failed squeue and an empty cluster
+    # are indistinguishable here, and caching the failure hides the recovery.
+    fake = _Sacct("", _QUEUE)
+    monkeypatch.setattr(slurm, "_run_cmd", fake)
+
+    assert asyncio.run(slurm.get_partition_job_counts()) == {}
+    assert asyncio.run(slurm.get_partition_job_counts()) != {}

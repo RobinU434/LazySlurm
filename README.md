@@ -209,8 +209,13 @@ A utilisation figure needs two `/proc/stat` snapshots. The first sample after op
 job takes both on the node, half a second apart — which is what that first sample costs.
 Afterwards the previous snapshot is kept and subtracted from, so a refresh returns as
 fast as `srun` can start (625ms → 99ms here), and the percentages cover the interval
-since the last refresh, the way htop covers the gap since its last draw. A snapshot older
-than a minute is not reused: a minute's average is no longer "now".
+since the last refresh, the way htop covers the gap since its last draw.
+
+Because that interval can be minutes — with `refresh = 0`, `r` is the only path and
+presses are far apart — the header says what the numbers average over: `2 cores,
+allocated to this job · last 3m 12s`. A sample that timed itself covers half a second and
+reads as "now", so it goes unmentioned. Past ten minutes the sample times itself again
+rather than averaging over an hour.
 
 Only the tab you are looking at is sampled, on `r` and on the auto-refresh alike.
 
@@ -259,6 +264,8 @@ What they *start* on comes from the config file:
 
 ```toml
 resource_monitor = "graph"   # "text" | "meter" | "graph"
+node_expand = "gpu"          # what Enter unfolds a node into: gpu | cpu | both | off
+gpu_column = "count"         # node view GPUs column: count (7/8) | glyphs (▣▣▢▣)
 ```
 
 History is kept per job, up to 60 samples, and only accumulates while the tab is open —
@@ -619,7 +626,39 @@ Press `Enter` on a partition to see its individual nodes:
 | Reason | why Slurm drained or downed the node (`kernel patch`, `Faulty GPU #7`, …) |
 
 Nodes without GRES show `—` in the GPU column, and a drained node's load is shown as `—`
-because its counters say nothing useful — the reason does.
+because its counters say nothing useful — the reason does. Its GPUs are dimmed for the
+same reason: eight idle devices on a node nothing can be scheduled onto are not eight
+free devices.
+
+**Press `Enter` on a node to fold it open into its GPUs.** `7/8` says how full a node is
+but not *which* device is free, and that is the question you are usually asking:
+
+```
+▾ galvani-cn109  mixed    70/2/0/72  ██░░░░ 33%  110/346G  7/8
+  ├ GPU 0        busy     4                                rtx2080ti  2743012 koh882 vs
+  ├ GPU 1        free                                      rtx2080ti
+  └ GPU 7        busy     2                                rtx2080ti  2735799 bep055 codex
+```
+
+Each child cell carries the same kind of thing as the node cell above it, so the columns
+keep meaning something: identity stays identity, `Load` is already a bar on the same 0–1
+scale, `Memory` keeps its used/total shape.
+
+Which devices are taken **costs nothing** — `sinfo` reports the allocated indices, so
+folding a node open needs no extra call. The two columns that do cost something wait for
+a key:
+
+| Key | Fills in | Cost |
+|-----|----------|------|
+| `g` | which job holds each GPU, and its cores | one `scontrol` per job on the node |
+| `Shift+G` | live utilisation and memory per device | one round trip to the node |
+
+Neither runs on the refresh, because browsing a large partition would otherwise turn
+every cursor move into a burst of round trips.
+
+Two config options shape this — `node_expand` (what a node unfolds into, default `gpu`,
+falling back to CPUs on a node without GRES) and `gpu_column` (`count` for `7/8`, or
+`glyphs` for `▣▣▢▣▣▣▣▣`, which shows the free slot without expanding anything).
 
 The bar at the top counts the partition's nodes by state and totals GPUs in use.
 The lower panel lists **all users'** jobs running on the highlighted node, so you can see
@@ -1119,6 +1158,8 @@ pager = "less"           # pager for browsing whole logs with 'l' ("less", "more
 #   meter = per-core and per-GPU bars, htop/nvtop style
 #   graph = the meters plus a history band per metric
 resource_monitor = "graph"
+node_expand = "gpu"      # partition monitor: what Enter unfolds a node row into
+gpu_column = "count"     # node view GPUs column: "count" (7/8) or "glyphs" (▣▣▢▣)
 
 # Column display settings
 max_name_width = 16      # max characters for job name column (0 = unlimited)
@@ -1148,6 +1189,52 @@ cpu = "cyan"
 fat = "magenta"
 debug = "dim"
 ```
+
+</details>
+
+### Keeping the file up to date
+
+<details>
+<summary>What happens to your config when LazySlurm gains a setting</summary>
+
+The config file is ~50 lines of comments documenting every setting, and it is the only
+reference for them inside the product. A file written two releases ago carries two
+releases' worth of stale documentation and says nothing about the options added since.
+
+So the file records which LazySlurm wrote it:
+
+```toml
+config_version = "0.3.0"
+```
+
+When a newer release runs, it rewrites the file from its own template and puts every value
+you set back — in the place the template documents it, with its explanation intact:
+
+```toml
+refresh = 15.0  # auto-refresh interval in seconds (0 = off)
+```
+
+What it does and does not do:
+
+- **Only what is actually in your file is carried over**, never the effective config.
+  Writing the defaults back as explicit values would freeze them, and a later release's
+  changed default would silently not apply to you.
+- **The file it replaces is kept** at `config.toml.bak`. The rewrite loses comments you
+  added yourself, so the copy matters.
+- **A key it does not recognise is kept**, not dropped — it may be a typo, but it may
+  equally be a setting from a newer LazySlurm.
+- **A file from a newer LazySlurm is left completely alone**, and says so. Sharing a
+  config directory between machines must not downgrade it.
+- **Anything that goes wrong is reported and skipped.** A config that cannot be parsed is
+  never rewritten, and no failure here stops the app from starting.
+
+Refreshes are tied to releases, not to individual template edits: the file is rewritten
+once when you move to a newer LazySlurm, and left alone for as long as you stay on it.
+
+Every migration writes a line to the command log — `config.toml rewritten for LazySlurm
+0.3.0 (was written by 0.2.1), 2 settings kept, backup at config.toml.bak` — so a rewrite
+of a file you hand-edited is never silent. A setting that has been renamed says so and moves your value across; one
+that has been removed says that instead of being reported as a typo.
 
 </details>
 

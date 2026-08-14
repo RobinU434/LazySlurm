@@ -27,6 +27,7 @@ __all__ = [
     "parse_mem_bytes",
     "sparkline",
     "efficiency_bar",
+    "format_span",
     "meter_bar",
     "render_cpu_monitor",
     "render_gpu_monitor",
@@ -128,6 +129,21 @@ def _grid(cells: list[str], columns: int) -> list[str]:
             for r in range(rows)]
 
 
+def format_span(span: float | None) -> str:
+    """How long the percentages average over, when that is worth saying.
+
+    A sample that timed itself covers half a second and reads as "now", so it
+    goes unmentioned. One differenced against the previous refresh covers the
+    gap since -- which can be minutes, and must not be passed off as current.
+    """
+    if span is None or span <= 2:
+        return ""
+    if span < 90:
+        return f" · last {span:.0f}s"
+    minutes, seconds = divmod(int(span), 60)
+    return f" · last {minutes}m {seconds:02d}s"
+
+
 def render_cpu_monitor(
     sample: NodeSample,
     history: dict | None = None,
@@ -149,7 +165,8 @@ def render_cpu_monitor(
              else "on the node — srun --overlap unavailable, showing the whole machine")
     count = len(sample.cores)
     lines.append(f"[bold]Node: {sample.node}[/]  "
-                 f"[dim]{count} core{'' if count == 1 else 's'}, {scope}[/]")
+                 f"[dim]{count} core{'' if count == 1 else 's'}, {scope}"
+                 f"{format_span(sample.span)}[/]")
     lines.append("")
 
     if not sample.cores:
