@@ -9,6 +9,7 @@ shapes that go wrong: a cgroup with no limit, an nvidia-smi that reports
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -533,3 +534,175 @@ def test_history_is_dropped_when_the_job_ends(monkeypatch):
 def test_the_monitor_width_survives_an_unlaid_out_widget():
     view = DetailView()
     assert view.monitor_width >= 40
+
+
+# ---------------------------------------------------------------------------
+# Keeping the last snapshot, so a sample need not pause on the node
+# ---------------------------------------------------------------------------
+
+
+def _one_snapshot(stats: list[str], affinity: str = "0-1") -> str:
+    """What the script emits when it is not taking its own second snapshot."""
+    return "\n".join([
+        "##stat1", *stats,
+        "##affinity", f"Cpus_allowed_list:\t{affinity}",
+        "##load", "1.50 2.00 2.50 3/900 12345",
+        "##meminfo", "MemTotal:       16000000 kB\nMemAvailable:    8000000 kB",
+        "##cgroup", "used 1073741824\nlimit 4294967296",
+    ])
+
+
+def _script_of(call) -> str:
+    """The shell script an srun call carried."""
+    return call[-1]
+
+
+def test_the_first_sample_pays_for_its_own_second_snapshot(monkeypatch):
+    calls: list[tuple] = []
+
+    async def _run_cmd(*args):
+        calls.append(args)
+        return _sample_text([_stat(0, 100, 100)], [_stat(0, 200, 100)], affinity="0"), "", 0
+
+    monkeypatch.setattr(slurm, "_run_cmd", _run_cmd)
+
+    sample = asyncio.run(slurm.get_node_sample("node042", "4815"))
+
+    assert "sleep" in _script_of(calls[0])
+    assert sample.busy == pytest.approx(1.0)
+
+
+def test_the_next_sample_differences_against_the_kept_one(monkeypatch):
+    calls: list[tuple] = []
+    responses = [
+        # First: two snapshots taken on the node, ending at busy=200 total=200.
+        _sample_text([_stat(0, 100, 100)], [_stat(0, 200, 100)], affinity="0"),
+        # Second: one snapshot. Half of the new jiffies were busy.
+        _one_snapshot([_stat(0, 250, 150)], affinity="0"),
+    ]
+
+    async def _run_cmd(*args):
+        calls.append(args)
+        return responses[len(calls) - 1], "", 0
+
+    monkeypatch.setattr(slurm, "_run_cmd", _run_cmd)
+
+    asyncio.run(slurm.get_node_sample("node042", "4815"))
+    second = asyncio.run(slurm.get_node_sample("node042", "4815"))
+
+    # The half second of wall clock is what this saves, so it must be gone.
+    assert "sleep" not in _script_of(calls[1])
+    # busy 200->250 (+50) of total 300->400 (+100).
+    assert second.busy == pytest.approx(0.5)
+
+
+def test_a_stale_snapshot_is_not_differenced_against(monkeypatch):
+    # An hour-old baseline would report the hour's average as if it were now.
+    calls: list[tuple] = []
+
+    async def _run_cmd(*args):
+        calls.append(args)
+        return _sample_text([_stat(0, 100, 100)], [_stat(0, 200, 100)], affinity="0"), "", 0
+
+    monkeypatch.setattr(slurm, "_run_cmd", _run_cmd)
+
+    asyncio.run(slurm.get_node_sample("node042", "4815"))
+    counters, _ = slurm._stat_cache[("node042", "4815")]
+    slurm._stat_cache[("node042", "4815")] = (
+        counters, datetime.now() - slurm._SAMPLE_MAX_AGE - timedelta(seconds=1),
+    )
+    asyncio.run(slurm.get_node_sample("node042", "4815"))
+
+    assert "sleep" in _script_of(calls[1])
+
+
+def test_each_job_keeps_its_own_snapshot(monkeypatch):
+    calls: list[tuple] = []
+
+    async def _run_cmd(*args):
+        calls.append(args)
+        return _sample_text([_stat(0, 100, 100)], [_stat(0, 200, 100)], affinity="0"), "", 0
+
+    monkeypatch.setattr(slurm, "_run_cmd", _run_cmd)
+
+    asyncio.run(slurm.get_node_sample("node042", "4815"))
+    asyncio.run(slurm.get_node_sample("node042", "9999"))
+
+    # A different job on the same node has nothing kept for it yet.
+    assert "sleep" in _script_of(calls[1])
+
+
+def test_a_snapshot_with_no_core_in_common_falls_back_to_the_slow_path(monkeypatch):
+    # The job moved node, or its allocation changed: differencing against the
+    # kept snapshot would leave an empty meter.
+    calls: list[tuple] = []
+    responses = [
+        _sample_text([_stat(0, 100, 100)], [_stat(0, 200, 100)], affinity="0"),
+        _one_snapshot([_stat(7, 500, 500)], affinity="7"),
+        _sample_text([_stat(7, 500, 500)], [_stat(7, 600, 500)], affinity="7"),
+    ]
+
+    async def _run_cmd(*args):
+        calls.append(args)
+        return responses[len(calls) - 1], "", 0
+
+    monkeypatch.setattr(slurm, "_run_cmd", _run_cmd)
+
+    asyncio.run(slurm.get_node_sample("node042", "4815"))
+    sample = asyncio.run(slurm.get_node_sample("node042", "4815"))
+
+    assert len(calls) == 3
+    assert "sleep" in _script_of(calls[2])
+    assert [c.cpu for c in sample.cores] == [7]
+
+
+def test_the_kept_snapshot_is_dropped_with_the_other_caches(monkeypatch):
+    async def _run_cmd(*args):
+        return _sample_text([_stat(0, 100, 100)], [_stat(0, 200, 100)], affinity="0"), "", 0
+
+    monkeypatch.setattr(slurm, "_run_cmd", _run_cmd)
+    asyncio.run(slurm.get_node_sample("node042", "4815"))
+    assert slurm._stat_cache
+    slurm.reset_caches()
+    assert not slurm._stat_cache
+
+
+def test_a_single_snapshot_with_nothing_kept_reports_no_cores():
+    # Differencing against zero would show the machine's lifetime average as
+    # the current load.
+    sample = parse_node_sample(_one_snapshot([_stat(0, 5000, 5000)], affinity="0"))
+    assert sample.cores == []
+
+
+def test_refresh_only_samples_the_tab_being_looked_at(monkeypatch):
+    """Sampling the hidden tab cost a second round trip for nothing."""
+    async def scenario():
+        app = _app(monkeypatch, resource_monitor="graph")
+        loaded: list[str] = []
+
+        async def _cpu():
+            loaded.append("cpu")
+
+        async def _gpu():
+            loaded.append("gpu")
+
+        async def _details(job_id):
+            return None
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            monkeypatch.setattr(app, "_load_cpu_monitor", _cpu)
+            monkeypatch.setattr(app, "_load_gpu_monitor", _gpu)
+            # The stubbed job detail carries no node, which would otherwise
+            # clear the selection before the monitors are reached.
+            monkeypatch.setattr(app, "_load_job_details", _details)
+            app._selected_node = "node042"
+            detail = app.query_one("#detail-view", DetailView)
+            detail.query_one("#detail-tabs").active = "tab-cpu"
+            await pilot.pause()
+
+            loaded.clear()
+            await app.action_refresh()
+            assert loaded == ["cpu"]
+
+    asyncio.run(scenario())

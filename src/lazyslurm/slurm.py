@@ -396,6 +396,7 @@ def reset_caches() -> None:
     global _completed_cache, _partition_cache
     _completed_cache = None
     _partition_cache = None
+    _stat_cache.clear()
 
 
 def _parse_end_time(value: str) -> datetime | None:
@@ -2126,7 +2127,7 @@ _SAMPLE_SLEEP = 0.5  # seconds between the two /proc/stat snapshots
 
 # Sections are marked rather than positional, so a node missing one of these
 # files (no cgroup, no loadavg) drops that section instead of shifting the rest.
-_NODE_SAMPLE_SCRIPT = f"""
+_NODE_SAMPLE_BODY = """
 echo '##stat1'; grep '^cpu' /proc/stat
 echo '##affinity'; grep -i '^Cpus_allowed_list' /proc/self/status
 echo '##load'; cat /proc/loadavg
@@ -2152,9 +2153,28 @@ while [ -n "$cg1" ] && [ "$m1" != "/sys/fs/cgroup/memory" ] && [ "$m1" != "/" ];
   fi
   m1=$(dirname "$m1")
 done
-sleep {_SAMPLE_SLEEP}
-echo '##stat2'; grep '^cpu' /proc/stat
 """.strip()
+
+# Taking the second snapshot on the node is what makes utilisation
+# instantaneous rather than an average over the refresh interval -- but it also
+# makes every sample cost half a second of wall clock, which is most of what a
+# refresh of the cpu tab feels like.
+#
+# It is only needed when there is nothing to subtract from. Once a snapshot has
+# been kept from the previous sample, the delta can be taken against that, and
+# the script returns as fast as srun can start it.
+_NODE_SAMPLE_SCRIPT = f"{_NODE_SAMPLE_BODY}\nsleep {_SAMPLE_SLEEP}\necho '##stat2'; grep '^cpu' /proc/stat"
+
+# How stale a kept snapshot may be and still be worth subtracting from.
+#
+# The delta then covers the gap since the last sample, the way htop reports the
+# gap since its last draw. Past a minute that stops being "now" in any useful
+# sense -- a job that finished its epoch two minutes ago would still be shown
+# busy -- so beyond this the sample pays for its own second snapshot again.
+_SAMPLE_MAX_AGE = timedelta(seconds=60)
+
+# (node, job_id) -> (per-cpu jiffy counters, when they were read)
+_stat_cache: dict[tuple[str, str], tuple[dict[int, tuple[float, float]], datetime]] = {}
 
 # nounits keeps the CSV free of "MiB"/"W" suffixes; unsupported fields still
 # come back as "[N/A]" or "[Not Supported]", which the parser drops to None.
@@ -2225,13 +2245,29 @@ def parse_cpu_list(spec: str) -> list[int]:
     return cpus
 
 
-def parse_node_sample(text: str, node: str = "", scope: str = "node") -> NodeSample:
-    """Turn the sampling script's output into a :class:`NodeSample`."""
+def parse_node_sample(
+    text: str,
+    node: str = "",
+    scope: str = "node",
+    previous: dict[int, tuple[float, float]] | None = None,
+) -> NodeSample:
+    """Turn the sampling script's output into a :class:`NodeSample`.
+
+    The script emits either two ``/proc/stat`` snapshots half a second apart, or
+    a single one -- in which case `previous` is the snapshot the last sample
+    ended at, and the delta spans the gap between the two samples instead.
+    """
     sections = _split_sections(text)
     sample = NodeSample(node=node, scope=scope)
 
-    first = _parse_stat(sections.get("stat1", []))
-    second = _parse_stat(sections.get("stat2", []))
+    stat1 = _parse_stat(sections.get("stat1", []))
+    stat2 = _parse_stat(sections.get("stat2", []))
+    if stat2:
+        first, second = stat1, stat2
+    else:
+        first, second = previous or {}, stat1
+    # Kept so the next sample can subtract from it rather than sleeping.
+    sample.counters = second
 
     allowed: list[int] = []
     for line in sections.get("affinity", []):
@@ -2241,6 +2277,11 @@ def parse_node_sample(text: str, node: str = "", scope: str = "node") -> NodeSam
     # node's: inside the cgroup it is exactly the allocation. Without it (or on
     # the SSH fallback, where it covers the machine) every core is shown.
     cpus = [c for c in allowed if c in second] or sorted(second)
+    if not stat2:
+        # Only cores the kept snapshot also has can be differenced. A core it
+        # is missing would otherwise difference against zero and report the
+        # machine's lifetime average as if it were the current load.
+        cpus = [c for c in cpus if c in first]
 
     for cpu in cpus:
         busy_now, total_now = second[cpu]
@@ -2336,21 +2377,48 @@ async def get_node_sample(node: str, job_id: str = "") -> NodeSample:
         return NodeSample(error="[dim]No node assigned[/]")
 
     first_node = _first_node(node)
+    key = (first_node, job_id)
+    kept = _stat_cache.get(key)
+    previous = (
+        kept[0]
+        if kept is not None and datetime.now() - kept[1] <= _SAMPLE_MAX_AGE
+        else None
+    )
+    sample = await _sample_node(first_node, job_id, previous)
+
+    if previous is not None and not sample.cores and not sample.error:
+        # The kept snapshot had no core in common with this one -- the job moved
+        # node, or the allocation changed under us. Pay for the slow path once
+        # rather than showing an empty meter.
+        _stat_cache.pop(key, None)
+        sample = await _sample_node(first_node, job_id, None)
+
+    if sample.counters:
+        _stat_cache[key] = (sample.counters, datetime.now())
+    return sample
+
+
+async def _sample_node(
+    node: str, job_id: str, previous: dict[int, tuple[float, float]] | None,
+) -> NodeSample:
+    """One sampling round trip. Sleeps on the node only without a `previous`."""
+    script = _NODE_SAMPLE_BODY if previous is not None else _NODE_SAMPLE_SCRIPT
+    done = "##stat1" if previous is not None else "##stat2"
+
     if job_id:
         stdout, _, rc = await _run_cmd(
-            "srun", "--overlap", f"--jobid={job_id}",
-            "bash", "-c", _NODE_SAMPLE_SCRIPT,
+            "srun", "--overlap", f"--jobid={job_id}", "bash", "-c", script,
         )
-        if rc == 0 and "##stat2" in stdout:
-            return parse_node_sample(stdout, first_node, scope="job")
+        if rc == 0 and done in stdout:
+            return parse_node_sample(stdout, node, scope="job", previous=previous)
 
-    stdout, rc = await _ssh_cmd(first_node, _NODE_SAMPLE_SCRIPT)
-    if rc != 0 or "##stat2" not in stdout:
+    stdout, rc = await _ssh_cmd(node, script)
+    if rc != 0 or done not in stdout:
         return NodeSample(
-            node=first_node,
-            error=f"[dim]Could not sample {first_node} (srun and SSH both failed)[/]",
+            node=node,
+            error=f"[dim]Could not sample {node} (srun and SSH both failed)[/]",
         )
-    return parse_node_sample(stdout, first_node, scope="node")
+    return parse_node_sample(stdout, node, scope="node", previous=previous)
 
 
 async def get_gpu_sample(node: str, job_id: str = "") -> GpuReading:

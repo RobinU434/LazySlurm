@@ -202,10 +202,16 @@ one that has plateaued and one that has stalled. `Shift+M` switches to `text` fo
 tab showed before 0.4.0 and the only view that names the processes.
 
 The sample comes from inside the job's cgroup via `srun --overlap`, falling back to SSH
-(which sees the whole machine, and says so). Each refresh is **one** round trip: the two
-`/proc/stat` snapshots a utilisation figure needs are taken on the node itself, half a
-second apart, so the percentages are instantaneous rather than averaged over the refresh
-interval. Auto-refreshes while the tab is active.
+(which sees the whole machine, and says so). Each refresh is **one** round trip.
+
+A utilisation figure needs two `/proc/stat` snapshots. The first sample after opening a
+job takes both on the node, half a second apart — which is what that first sample costs.
+Afterwards the previous snapshot is kept and subtracted from, so a refresh returns as
+fast as `srun` can start (625ms → 99ms here), and the percentages cover the interval
+since the last refresh, the way htop covers the gap since its last draw. A snapshot older
+than a minute is not reused: a minute's average is no longer "now".
+
+Only the tab you are looking at is sampled, on `r` and on the auto-refresh alike.
 
 </details>
 
