@@ -30,6 +30,20 @@
 #   graph = the meters plus a history band per metric (default)
 # resource_monitor = "graph"
 
+# What Enter unfolds a node row into, in the partition monitor's node view.
+#   gpu  = one row per GPU, so you can see *which* device is free; a node with
+#          no GRES unfolds its CPU allocation instead (default)
+#   cpu  = always the CPU allocation
+#   both = a GPU block and a CPU block
+#   off  = node rows do not expand
+# node_expand = "gpu"
+
+# How that node view's GPUs column reads.
+#   count  = 7/8 (default)
+#   glyphs = one mark per device, busy or free, so a free slot shows without
+#            expanding anything. Falls back to the count past 12 devices.
+# gpu_column = "count"
+
 # Column display settings
 # max_name_width = 16        # max characters for job name column (0 = unlimited)
 # max_partition_width = 16   # max characters for partition column (0 = unlimited)

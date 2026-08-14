@@ -6,7 +6,49 @@ the command, the import package and the config directory are all `lazyslurm`.
 
 ## Unreleased
 
+### Added
+
+- **Fold a node open into its GPUs, in the partition monitor**
+  ([#66](https://github.com/RobinU434/LazySlurm/issues/66)). The node view stopped one
+  level too early on a GPU cluster: `7/8` says how full a node is, but not *which* device
+  is free, who has the rest, or whether they are being used. `Enter` on a node now unfolds
+  one row per GPU, each cell carrying the same kind of thing as the node cell above it —
+  identity stays identity, `Load` is already a bar on the same 0–1 scale, `Memory` keeps
+  its used/total shape.
+
+  Which devices are taken costs nothing: `sinfo` reports the allocated indices
+  (`gpu:a100:7(IDX:0-4,6-7)`), and the node view already fetches that. The two columns
+  that do cost something wait for a key — `g` resolves which job holds each GPU (one
+  `scontrol` per job on the node), `Shift+G` reads live utilisation and memory (one round
+  trip). Neither runs on the refresh: browsing a large partition would otherwise turn
+  every cursor move into a burst of round trips.
+
+  `node_expand` chooses what a row unfolds into (`gpu` by default, falling back to the CPU
+  allocation on a node with no GRES) and `gpu_column` chooses whether the GPUs column reads
+  `7/8` or `▣▣▢▣▣▣▣▣`, which shows the free slot without expanding anything.
+
 ### Changed
+
+- **The partition monitor opens on what it already knows**
+  ([#72](https://github.com/RobinU434/LazySlurm/issues/72)). Pressing `p` used to await
+  three Slurm calls before drawing anything: `sinfo`, a **cluster-wide `squeue`** across
+  every user and partition (only to fill the running/pending column), and then a third
+  call for the highlighted partition's jobs. Nothing was cached and the screen was
+  rebuilt on every open, so closing and reopening it paid the whole bill again. On a
+  busy controller — or over SSH, where the shared shell serialises all three behind
+  whatever poll is already in flight — that is seconds of empty tables.
+
+  Now `sinfo` paints the table (served from the same 45-second cache the cluster bar
+  already fills, so opening the monitor after a poll usually costs no command at all),
+  and the two `squeue` calls fill the job list and the running/pending column behind the
+  paint. The cluster-wide count is cached for 15 seconds, the screen is kept alive
+  between opens so reopening is instant, and moving the cursor debounces by 150ms
+  instead of firing one `squeue` per row it passes over. `r` still bypasses every cache.
+
+- **A drained node's GPUs no longer read as free.** The GPUs column coloured `0/8` green
+  on a node nothing can be scheduled onto, which is exactly the wrong conclusion — the
+  same reasoning the Load column already applied by showing `—` there. Both readings of
+  the column are now dimmed for a node that is down, drained, failing or in maintenance.
 
 - **A refresh no longer re-reads the whole job history**
   ([#63](https://github.com/RobinU434/LazySlurm/issues/63)). `sacct` was 69% of every
@@ -57,6 +99,15 @@ the command, the import package and the config directory are all `lazyslurm`.
   since nothing in the poll depends on it, and a refresh no longer resets the meters to
   their placeholder when the job on screen has not changed. A manual `r` in graph mode:
   **~865ms → 150ms**.
+
+### Fixed
+
+- **The job list kept polling into a screen it could not see**
+  ([#72](https://github.com/RobinU434/LazySlurm/issues/72)). With `refresh` on, a poll
+  that landed while the partition monitor was open looked for the job tables on the
+  *visible* screen and raised `NoMatches`, taking the tick down with it. It now
+  addresses the job list directly, and the cpu/gpu sampler skips its ssh round trip
+  entirely while a full-screen monitor is on top of it.
 
 ### Added
 
