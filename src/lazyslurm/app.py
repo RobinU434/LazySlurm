@@ -14,7 +14,7 @@ from textual.binding import Binding
 from textual.css.query import NoMatches
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
-from textual.widgets import DataTable, Footer, Input, RichLog, Static
+from textual.widgets import DataTable, Input, RichLog, Static
 
 from lazyslurm import help as help_topics
 from lazyslurm import slurm
@@ -34,6 +34,7 @@ from lazyslurm.widgets.detail_view import (
 from lazyslurm.widgets.job_table import ActiveJobTable, CompletedJobTable, JobSelected, set_partition_colors, set_display_config
 from lazyslurm.widgets.metadata_view import MetadataView
 from lazyslurm.widgets.usage_view import UsageTable, format_hours
+from lazyslurm.widgets.version_footer import VersionFooter
 from lazyslurm.widgets.partition_view import (
     NodeSelected,
     NodeTable,
@@ -411,7 +412,7 @@ class NodeScreen(Screen):
             id="node-jobs",
             user=self.config.user or slurm.USER,
         )
-        yield Footer()
+        yield VersionFooter()
 
     async def on_mount(self) -> None:
         self.query_one("#node-table").border_title = f"Nodes of {self.partition}"
@@ -499,7 +500,7 @@ class PartitionScreen(Screen):
             id="partition-jobs",
             user=self.config.user or slurm.USER,
         )
-        yield Footer()
+        yield VersionFooter()
 
     async def on_mount(self) -> None:
         self.query_one("#partition-table").border_title = "Partitions"
@@ -593,7 +594,7 @@ class UsageScreen(Screen):
         yield Static(id="usage-bar")
         yield Static(id="usage-fairshare")
         yield UsageTable(id="usage-table", user=self.user)
-        yield Footer()
+        yield VersionFooter()
 
     async def on_mount(self) -> None:
         self.query_one("#usage-table").border_title = "Account usage"
@@ -798,7 +799,7 @@ class LazySlurmApp(App):
                 yield MetadataView(id="metadata-view")
                 yield RichLog(id="command-log", wrap=True, markup=True)
         yield Static(id="status-line")
-        yield Footer()
+        yield VersionFooter()
 
     def on_mount(self) -> None:
         slurm.set_config(self.config)

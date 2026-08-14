@@ -8,6 +8,7 @@ import shutil
 import sys
 
 from lazyslurm.models import Config
+from lazyslurm.version import version_string
 
 
 # Map from config file key → (CLI dest, type converter)
@@ -151,6 +152,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         prog="lazyslurm",
         description="A TUI for monitoring Slurm HPC jobs.",
+    )
+    parser.add_argument(
+        "-V", "--version",
+        action="version",
+        version=f"lazyslurm {version_string()}",
+        help="Show the version (plus the commit, when running from a checkout)",
     )
     parser.add_argument(
         "-r", "--refresh",
