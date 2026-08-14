@@ -526,17 +526,30 @@ def test_order_partitions_honors_config_then_appends_rest():
     assert [p.name for p in ordered] == ["cpu", "a100", "maint"]
 
 
-def test_get_partitions_fills_job_counts(monkeypatch):
+def test_get_partitions_only_runs_sinfo(monkeypatch):
+    """The cluster-wide squeue is not on the partition table's path (#72)."""
+    commands = []
+
     async def _fake(*args):
-        if args[0] == "sinfo":
-            return _SINFO_OUT, "", 0
-        return "a100|RUNNING\na100|PENDING\ncpu|RUNNING\n", "", 0
+        commands.append(args[0])
+        return _SINFO_OUT, "", 0
 
     monkeypatch.setattr(slurm, "_run_cmd", _fake)
     parts = {p.name: p for p in asyncio.run(slurm.get_partitions(Config()))}
-    assert (parts["a100"].running, parts["a100"].pending) == (1, 1)
-    assert (parts["cpu"].running, parts["cpu"].pending) == (1, 0)
-    assert (parts["maint"].running, parts["maint"].pending) == (0, 0)
+    assert commands == ["sinfo"]
+    assert set(parts) == {"a100", "cpu", "maint"}  # down partitions kept
+    assert (parts["a100"].running, parts["a100"].pending) == (0, 0)
+
+
+def test_get_partition_job_counts_parses_the_queue(monkeypatch):
+    async def _fake(*args):
+        return "a100|RUNNING\na100|PENDING\ncpu|RUNNING\n", "", 0
+
+    monkeypatch.setattr(slurm, "_run_cmd", _fake)
+    counts = asyncio.run(slurm.get_partition_job_counts())
+    assert counts["a100"] == (1, 1)
+    assert counts["cpu"] == (1, 0)
+    assert "maint" not in counts
 
 
 def test_get_partition_availability_keeps_only_up_partitions(monkeypatch):
