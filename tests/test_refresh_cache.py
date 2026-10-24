@@ -21,7 +21,7 @@ from lazyslurm.slurm import get_completed_jobs, get_partition_availability
 def _row(job_id: str, state: str = "COMPLETED", end: str = "", name: str = "train") -> str:
     end = end or datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     start = "2026-08-14T09:00:00"
-    return f"{job_id}|{name}|{state}|0:0|{start}|{end}|00:10:00|gpu"
+    return f"{job_id}|{name}|{state}|0:0|{start}|{end}|00:10:00|gpu|{start}"
 
 
 class _Sacct:

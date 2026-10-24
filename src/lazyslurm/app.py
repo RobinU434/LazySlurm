@@ -1064,6 +1064,7 @@ class LazySlurmApp(App):
             max_partition=self.config.max_partition_width,
             abbreviate=self.config.abbreviate_states,
             collapse_arrays=self.config.collapse_arrays,
+            history_days=self.config.days,
         )
         set_node_display(
             node_expand=self.config.node_expand,
@@ -2378,6 +2379,7 @@ class LazySlurmApp(App):
             max_partition=self.config.max_partition_width,
             abbreviate=self.config.abbreviate_states,
             collapse_arrays=self.config.collapse_arrays,
+            history_days=self.config.days,
         )
         set_node_display(
             node_expand=self.config.node_expand,

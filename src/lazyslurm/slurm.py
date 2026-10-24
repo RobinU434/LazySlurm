@@ -370,7 +370,7 @@ def job_sort_key(job_id: str) -> tuple[int, int]:
 # squeue – running / pending jobs
 # ---------------------------------------------------------------------------
 
-_SQUEUE_FORMAT = "%i|%j|%M|%P|%T|%l|%D|%C|%m|%b|%Z"
+_SQUEUE_FORMAT = "%i|%j|%M|%P|%T|%l|%D|%C|%m|%b|%Z|%V"
 
 
 async def get_running_jobs(config: Config | None = None) -> list[RunningJob]:
@@ -392,7 +392,7 @@ async def get_running_jobs(config: Config | None = None) -> list[RunningJob]:
 
     jobs: list[RunningJob] = []
     for line in stdout.strip().splitlines():
-        parts = _split_row(line, 11, free_text=1)   # %j, the job name
+        parts = _split_row(line, 12, free_text=1)   # %j, the job name
         if parts is None:
             continue
         jobs.append(RunningJob(
@@ -407,6 +407,7 @@ async def get_running_jobs(config: Config | None = None) -> list[RunningJob]:
             memory=parts[8].strip(),
             gres=parts[9].strip() or "None",
             work_dir=parts[10].strip(),
+            submit=parts[11].strip(),
         ))
     jobs.sort(key=lambda j: job_sort_key(j.job_id), reverse=True)
     return jobs
@@ -416,7 +417,7 @@ async def get_running_jobs(config: Config | None = None) -> list[RunningJob]:
 # sacct – completed / past jobs
 # ---------------------------------------------------------------------------
 
-_SACCT_FORMAT = "JobID,JobName,State,ExitCode,Start,End,Elapsed,Partition"
+_SACCT_FORMAT = "JobID,JobName,State,ExitCode,Start,End,Elapsed,Partition,Submit"
 
 # States a job can still leave, so its row is not worth remembering yet. The
 # next poll's window will pick it up again once it has settled.
@@ -499,7 +500,7 @@ def parse_sacct_jobs(stdout: str, partition: str = "") -> list[CompletedJob]:
     """Parse `sacct --parsable2` output into the jobs worth showing."""
     jobs: list[CompletedJob] = []
     for line in stdout.strip().splitlines():
-        parts = _split_row(line, 8, free_text=1)    # JobName
+        parts = _split_row(line, 9, free_text=1)    # JobName
         if parts is None:
             continue
         job_id = parts[0].strip()
@@ -519,6 +520,7 @@ def parse_sacct_jobs(stdout: str, partition: str = "") -> list[CompletedJob]:
             end=parts[5].strip(),
             elapsed=parts[6].strip(),
             partition=parts[7].strip(),
+            submit=parts[8].strip(),
         ))
     return jobs
 

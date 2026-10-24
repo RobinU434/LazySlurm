@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shlex
+from datetime import date, datetime, timedelta
 from typing import NamedTuple
 
 from textual.message import Message
@@ -54,6 +55,9 @@ _max_name_width: int = 16
 _max_partition_width: int = 16
 _abbreviate_states: bool = False
 _collapse_arrays: bool = True
+# How many days of terminated jobs sacct was asked for; a date filter reaching
+# further back than this cannot find anything, and should say why.
+_history_days: int | None = None
 
 # State abbreviations
 _STATE_ABBREV: dict[str, str] = {
@@ -84,14 +88,16 @@ def set_display_config(
     max_partition: int = 16,
     abbreviate: bool = False,
     collapse_arrays: bool = True,
+    history_days: int | None = None,
 ) -> None:
-    """Set column width, abbreviation and array-collapsing settings."""
+    """Set column width, abbreviation, array-collapsing and history settings."""
     global _max_name_width, _max_partition_width, _abbreviate_states
-    global _collapse_arrays
+    global _collapse_arrays, _history_days
     _max_name_width = max_name
     _max_partition_width = max_partition
     _abbreviate_states = abbreviate
     _collapse_arrays = collapse_arrays
+    _history_days = history_days
 
 
 def _truncate(text: str, max_width: int) -> str:
@@ -133,7 +139,11 @@ _QUERY_KEYS: dict[str, str] = {
     "name": "name", "n": "name",
     "id": "id", "job": "id",
     "gpu": "gpu", "gpus": "gpu", "gres": "gpu",
+    "date": "date", "day": "date",
+    "age": "age", "since": "age",
 }
+
+_AGE_UNITS: dict[str, int] = {"m": 60, "h": 3600, "d": 86400, "w": 7 * 86400}
 
 _COMPARISONS: tuple[str, ...] = (">=", "<=", "!=", ">", "<", "=")
 
@@ -192,6 +202,59 @@ def _compare(actual: float, op: str, expected: float) -> bool:
     if op == "!=":
         return actual != expected
     return actual == expected
+
+
+def parse_age(text: str) -> timedelta | None:
+    """``10h``, ``30m``, ``2d``, ``1w`` as a timedelta; None if it is not one."""
+    text = text.strip()
+    unit = _AGE_UNITS.get(text[-1:])
+    if unit is None or not text[:-1].isdigit():
+        return None
+    return timedelta(seconds=int(text[:-1]) * unit)
+
+
+def parse_day(text: str, today: date | None = None) -> date | None:
+    """``2026-10-10``, ``today`` or ``yesterday``; None if it is none of them."""
+    today = today or date.today()
+    if text == "today":
+        return today
+    if text == "yesterday":
+        return today - timedelta(days=1)
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def parse_slurm_time(text: str) -> datetime | None:
+    """A Slurm timestamp (``2026-10-10T14:02:11``), or None for Unknown/N/A."""
+    text = (text or "").strip()
+    if not text or not text[0].isdigit():
+        return None
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def time_term_reaches(term: Term, now: datetime | None = None) -> datetime | None:
+    """The earliest submit time a date:/age: term can match.
+
+    None means it is unbounded into the past (`date:<2026-10-01`, `age:>2d`).
+    Used only to warn that the loaded history may not go back that far.
+    """
+    now = now or datetime.now()
+    if term.field == "date":
+        day = parse_day(term.value, now.date())
+        if day is None or term.op in ("<", "<=", "!="):
+            return None
+        if term.op == ">":
+            day += timedelta(days=1)
+        return datetime.combine(day, datetime.min.time())
+    age = parse_age(term.value)
+    if age is None or term.op in (">", ">=", "!="):
+        return None
+    return now - age
 
 
 def elapsed_seconds(text: str) -> int:
@@ -312,6 +375,8 @@ class _BaseJobTable(DataTable):
     SOURCE: str = ""
     TITLE: str = ""
     SHOW_CURSOR_INITIAL: bool = True
+    # Holds only the last `days` of history (sacct), not everything there is.
+    WINDOWED: bool = False
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -499,10 +564,16 @@ class _BaseJobTable(DataTable):
         if not self._terms:
             self.border_title = self.TITLE
             return
-        self.border_title = f"{self.TITLE} — {matched}/{len(self._all_jobs)} match"
+        title = f"{self.TITLE} — {matched}/{len(self._all_jobs)} match"
+        if self._beyond_history():
+            title += f" (last {_history_days}d loaded)"
+        self.border_title = title
 
     def _placeholder_row(self) -> tuple:
-        cells = [Text("no jobs match", style="dim")]
+        message = "no jobs match"
+        if self._beyond_history():
+            message += f" — only the last {_history_days} days are loaded"
+        cells = [Text(message, style="dim")]
         cells += [""] * (len(self.COLUMNS) - 1)
         return tuple(cells)
 
@@ -533,6 +604,38 @@ class _BaseJobTable(DataTable):
             except ValueError:
                 return False
             return _compare(float(gres_count(gres)), term.op, wanted)
+        if term.field in ("date", "age"):
+            submitted = parse_slurm_time(getattr(job, "submit", ""))
+            if submitted is None:
+                return False
+            if term.field == "date":
+                day = parse_day(term.value)
+                if day is None:
+                    return False
+                # A bare date means that day, not a substring of it.
+                op = "=" if term.op == "~" else term.op
+                return _compare(submitted.date().toordinal(), op, day.toordinal())
+            age = parse_age(term.value)
+            if age is None:
+                return False
+            # `age:10h` reads as "in the last 10 hours", i.e. younger than.
+            op = "<=" if term.op in ("~", "=") else term.op
+            return _compare(
+                (datetime.now() - submitted).total_seconds(), op, age.total_seconds()
+            )
+        return False
+
+    def _beyond_history(self) -> bool:
+        """Does a date:/age: term ask for older jobs than sacct was asked for?"""
+        if not self.WINDOWED or _history_days is None:
+            return False
+        oldest = datetime.now() - timedelta(days=_history_days)
+        for term in self._terms:
+            if term.field not in ("date", "age"):
+                continue
+            reaches = time_term_reaches(term)
+            if reaches is None or reaches < oldest:
+                return True
         return False
 
     def _group_label(self, base: str, members: list, expanded: bool) -> Text:
@@ -629,6 +732,7 @@ class CompletedJobTable(_BaseJobTable):
     SOURCE = "completed"
     TITLE = "Terminated Jobs"
     SHOW_CURSOR_INITIAL = False
+    WINDOWED = True
 
     def _search_fields(self, job: CompletedJob) -> tuple[str, ...]:
         return (job.job_id, job.name, job.partition, job.state)

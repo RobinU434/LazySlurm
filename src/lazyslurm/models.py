@@ -118,6 +118,7 @@ class RunningJob:
     memory: str = ""
     gres: str = ""
     work_dir: str = ""
+    submit: str = ""
 
 
 @dataclass
@@ -132,6 +133,7 @@ class CompletedJob:
     end: str = ""
     elapsed: str = ""
     partition: str = ""
+    submit: str = ""
 
 
 @dataclass

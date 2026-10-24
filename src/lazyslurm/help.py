@@ -101,8 +101,10 @@ PANELS: tuple[Panel, ...] = (
             "back on the matches; Escape abandons it. Plain words match",
             "id, name and partition; key:value terms are ANDed —",
             "  state:pend  part:gpu  name:train  id:4815  gpu:>=2",
-            "Aliases: st: s: · partition: p: · n: · job: · gpus: gres:. An unknown",
-            "key is searched as plain text, so nothing you type can break the filter.",
+            "  date:2026-10-10  date:today  age:<10h  age:>2d  (by submit time)",
+            "Aliases: st: s: · partition: p: · n: · job: · gpus: gres: · day: ·",
+            "since:. An unknown key is searched as plain text, so nothing you type",
+            "can break the filter.",
         ),
     ),
     Panel(

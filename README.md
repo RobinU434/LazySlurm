@@ -141,7 +141,7 @@ Press `?` at any time for this list inside the app:
 
 | Key | Action |
 |-----|--------|
-| `/` | Open the [filter bar](#filtering) — plain text or `state:`/`part:`/`name:`/`id:`/`gpu:` terms. `Enter` accepts, `Escape` abandons |
+| `/` | Open the [filter bar](#filtering) — plain text or `state:`/`part:`/`name:`/`id:`/`gpu:`/`date:`/`age:` terms. `Enter` accepts, `Escape` abandons |
 | `Enter` | Expand / collapse a [job array](#job-arrays) row |
 | `m` | Bookmark / unbookmark the selected job. Bookmarked jobs show a ★ prefix and are pinned to the top of their table |
 | `Shift+M` | Cycle how the **cpu** and **gpu** tabs present themselves: [`text` → `meter` → `graph`](#resource-monitor-modes) |
@@ -190,6 +190,8 @@ state:pend part:gpu        pending jobs on the gpu partition
 train state:run            running jobs whose row mentions "train"
 gpu:>0                     jobs that asked for at least one GPU
 name:sweep id:4815         both must match
+date:2026-10-10            jobs submitted on 10 October
+age:<10h state:fail        jobs that failed, submitted in the last 10 hours
 ```
 
 | Term | Matches | Aliases |
@@ -199,6 +201,8 @@ name:sweep id:4815         both must match
 | `name:train` | job name, substring | `n:` |
 | `id:4815` | job id, substring | `job:` |
 | `gpu:>0` | GPUs requested; `>`, `>=`, `<`, `<=`, `=`, `!=` | `gpus:`, `gres:` |
+| `date:2026-10-10` | submitted that day; also `today`, `yesterday`, and `>`, `>=`, `<`, `<=`, `!=` | `day:` |
+| `age:<10h` | submitted within the last 10h (`m`, `h`, `d`, `w`); a bare `age:10h` means the same, `age:>2d` is older than two days | `since:` |
 
 Quote values containing spaces: `name:"my long job"`. An unknown key is treated as plain
 text — `foo:bar` just searches for the string `foo:bar`, so nothing you type can break the
@@ -207,6 +211,10 @@ that matches nothing says **no jobs match** instead of showing an empty table.
 
 `gpu:` only applies to the Active table: sacct rows carry no GRES, so the term matches
 nothing among terminated jobs.
+
+The Terminated table only holds the last `days` of history (`-d`, default 7). A `date:` or
+`age:` term that reaches further back says so in the border title (`last 7d loaded`)
+rather than quietly showing fewer jobs; raise `days` to look further.
 
 </details>
 

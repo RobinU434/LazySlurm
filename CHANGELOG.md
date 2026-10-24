@@ -8,6 +8,13 @@ the command, the import package and the config directory are all `lazyslurm`.
 
 ### Added
 
+- **Filter jobs by date or recency**
+  ([#78](https://github.com/RobinU434/LazySlurm/issues/78)). Two new filter keys:
+  `date:2026-10-10` (also `today`, `yesterday`, and `>`, `<`, `!=`) for jobs submitted that
+  day, and `age:<10h` for jobs submitted in the last ten hours (`m`, `h`, `d`, `w`). squeue
+  and sacct now also report submit time. A term that reaches past the loaded `days` window
+  says so instead of looking like there were no jobs.
+
 - **The config file keeps up with the releases**
   ([#67](https://github.com/RobinU434/LazySlurm/issues/67)). `config.toml` is ~50 lines of
   comments documenting every setting, and the only reference for them inside the product —

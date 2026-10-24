@@ -104,14 +104,15 @@ def _fake_run_cmd(stdout: str, rc: int = 0):
 
 def test_get_running_jobs_parses_and_sorts(monkeypatch):
     rows = "\n".join([
-        "101|jobA|1:00|gpu|RUNNING|2:00|1|4|8G|gpu:1|/work/a",
-        "205|jobB|0:10|cpu|PENDING|1:00|1|2|4G|None|/work/b",
+        "101|jobA|1:00|gpu|RUNNING|2:00|1|4|8G|gpu:1|/work/a|2026-10-10T09:00:00",
+        "205|jobB|0:10|cpu|PENDING|1:00|1|2|4G|None|/work/b|2026-10-10T09:00:00",
     ])
     monkeypatch.setattr(slurm, "_run_cmd", _fake_run_cmd(rows))
     jobs = asyncio.run(slurm.get_running_jobs(Config()))
     assert [j.job_id for j in jobs] == ["205", "101"]  # descending
     assert jobs[1].name == "jobA"
     assert jobs[1].gres == "gpu:1"
+    assert jobs[1].submit == "2026-10-10T09:00:00"
 
 
 def test_get_running_jobs_empty(monkeypatch):
@@ -121,21 +122,22 @@ def test_get_running_jobs_empty(monkeypatch):
 
 def test_get_completed_jobs_filters_substeps_and_running(monkeypatch):
     rows = "\n".join([
-        "300|jobX|COMPLETED|0:0|s|e|1:00|gpu",
-        "300.batch|batch|COMPLETED|0:0|s|e|1:00|gpu",  # sub-step, dropped
-        "301|jobY|RUNNING|0:0|s|e|0:30|gpu",           # still running, dropped
-        "302|jobZ|FAILED|1:0|s|e|0:05|cpu",
+        "300|jobX|COMPLETED|0:0|s|e|1:00|gpu|2026-10-10T09:00:00",
+        "300.batch|batch|COMPLETED|0:0|s|e|1:00|gpu|2026-10-10T09:00:00",  # sub-step, dropped
+        "301|jobY|RUNNING|0:0|s|e|0:30|gpu|2026-10-10T09:00:00",           # still running, dropped
+        "302|jobZ|FAILED|1:0|s|e|0:05|cpu|2026-10-10T09:00:00",
     ])
     monkeypatch.setattr(slurm, "_run_cmd", _fake_run_cmd(rows))
     jobs = asyncio.run(slurm.get_completed_jobs(Config()))
     assert [j.job_id for j in jobs] == ["302", "300"]
     assert jobs[1].state == "COMPLETED"
+    assert jobs[1].submit == "2026-10-10T09:00:00"
 
 
 def test_get_completed_jobs_partition_filter(monkeypatch):
     rows = "\n".join([
-        "300|jobX|COMPLETED|0:0|s|e|1:00|gpu",
-        "302|jobZ|FAILED|1:0|s|e|0:05|cpu",
+        "300|jobX|COMPLETED|0:0|s|e|1:00|gpu|2026-10-10T09:00:00",
+        "302|jobZ|FAILED|1:0|s|e|0:05|cpu|2026-10-10T09:00:00",
     ])
     monkeypatch.setattr(slurm, "_run_cmd", _fake_run_cmd(rows))
     jobs = asyncio.run(slurm.get_completed_jobs(Config(partition="cpu")))
@@ -735,7 +737,7 @@ def test_job_sort_key_handles_het_jobs_steps_and_junk():
 def test_get_running_jobs_keeps_array_tasks_together(monkeypatch):
     """Regression: array ids are not ints, so they all used to key to 0."""
     rows = "\n".join([
-        f"{jid}|arr|0:10|gpu|PENDING|1:00|1|2|4G|None|/work"
+        f"{jid}|arr|0:10|gpu|PENDING|1:00|1|2|4G|None|/work|2026-10-10T09:00:00"
         for jid in ["500_3", "600", "500_11", "499", "500_1"]
     ])
     monkeypatch.setattr(slurm, "_run_cmd", _fake_run_cmd(rows))
@@ -745,7 +747,7 @@ def test_get_running_jobs_keeps_array_tasks_together(monkeypatch):
 
 def test_get_completed_jobs_keeps_array_tasks_together(monkeypatch):
     rows = "\n".join([
-        f"{jid}|arr|COMPLETED|0:0|s|e|1:00|gpu"
+        f"{jid}|arr|COMPLETED|0:0|s|e|1:00|gpu|2026-10-10T09:00:00"
         for jid in ["500_3", "600", "500_11", "499", "500_1"]
     ])
     monkeypatch.setattr(slurm, "_run_cmd", _fake_run_cmd(rows))
@@ -1094,7 +1096,7 @@ def test_read_log_file_reports_not_found_locally_not_on_the_cluster(monkeypatch)
 
 
 def test_pipe_in_job_name_does_not_shift_squeue_columns(monkeypatch):
-    row = "101|train|v2|1:00|gpu|RUNNING|2:00|1|4|8G|gpu:1|/work/a"
+    row = "101|train|v2|1:00|gpu|RUNNING|2:00|1|4|8G|gpu:1|/work/a|2026-10-10T09:00:00"
     monkeypatch.setattr(slurm, "_run_cmd", _fake_run_cmd(row))
 
     job = asyncio.run(slurm.get_running_jobs(Config()))[0]
@@ -1108,7 +1110,7 @@ def test_pipe_in_job_name_does_not_shift_squeue_columns(monkeypatch):
 
 
 def test_several_pipes_in_a_job_name_still_parse(monkeypatch):
-    row = "101|a|b|c|1:00|gpu|RUNNING|2:00|1|4|8G|gpu:1|/work/a"
+    row = "101|a|b|c|1:00|gpu|RUNNING|2:00|1|4|8G|gpu:1|/work/a|2026-10-10T09:00:00"
     monkeypatch.setattr(slurm, "_run_cmd", _fake_run_cmd(row))
     job = asyncio.run(slurm.get_running_jobs(Config()))[0]
     assert job.name == "a|b|c"
@@ -1121,7 +1123,7 @@ def test_short_row_is_still_rejected(monkeypatch):
 
 
 def test_pipe_in_job_name_does_not_shift_sacct_columns(monkeypatch):
-    row = "300|job|X|COMPLETED|0:0|s|e|1:00|gpu"
+    row = "300|job|X|COMPLETED|0:0|s|e|1:00|gpu|2026-10-10T09:00:00"
     monkeypatch.setattr(slurm, "_run_cmd", _fake_run_cmd(row))
     job = asyncio.run(slurm.get_completed_jobs(Config()))[0]
     assert job.name == "job|X"
