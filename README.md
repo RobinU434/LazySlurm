@@ -880,6 +880,22 @@ Commands are serialized on the channel, so they queue rather than interleave. If
 channel dies (network drop, remote logout), the next command reopens it automatically, and
 only re-authenticates if the master itself is gone. The session is closed when you quit.
 
+**Reusing your own ssh connection.** If your `~/.ssh/config` already keeps a connection
+open for the cluster, LazySlurm rides it instead of logging in again, and leaves it running
+when you quit. That makes one `ssh cluster` in the morning cover every LazySlurm start for
+as long as the connection persists:
+
+```
+Host cluster login.cluster.example
+  HostName login.cluster.example
+  User jdoe
+  ControlMaster auto
+  ControlPath ~/.ssh/cm-%r@%h-%p
+  ControlPersist 4h
+```
+
+An alias and the `user@host` it stands for count as the same cluster.
+
 </details>
 
 ### Two-factor authentication

@@ -891,8 +891,11 @@ class ClusterScreen(Screen):
     def action_reload(self) -> None:
         self.reload()
 
-    async def on_cluster_chosen(self, event: ClusterChosen) -> None:
-        await self.app.attach_cluster(event.host)
+    def on_cluster_chosen(self, event: ClusterChosen) -> None:
+        # A worker, because attaching may ask for a password: see _connect_remote.
+        self.app.run_worker(
+            self.app.attach_cluster(event.host), group="ssh-connect", exclusive=True,
+        )
 
     async def action_detach(self) -> None:
         self.app.detach_cluster()
@@ -1116,7 +1119,7 @@ class LazySlurmApp(App):
         if self.config.start_in_browser:
             self.call_after_refresh(self._open_landing_browser)
         elif self.config.remote:
-            self.call_after_refresh(self._start_remote_session)
+            self.call_after_refresh(self._connect_remote)
         else:
             self.call_after_refresh(self._begin_local)
 
@@ -1285,6 +1288,19 @@ class LazySlurmApp(App):
         return await self.push_screen_wait(
             SSHPromptScreen(self.config.remote, prompt, secret)
         )
+
+    def _connect_remote(self) -> None:
+        """Open the remote session in a worker, unless one is already opening.
+
+        Logging in may stop at a password or verification-code prompt, which
+        waits on a modal for the user's answer -- and Textual only lets a
+        worker wait on a screen. Awaited from an event handler instead, the
+        prompt raised NoActiveWorker the moment it appeared. One at a time, so
+        `r` pressed during a slow login does not start a second one.
+        """
+        if any(w.group == "ssh-connect" and w.is_running for w in self.workers):
+            return
+        self.run_worker(self._start_remote_session(), group="ssh-connect")
 
     async def _start_remote_session(self) -> None:
         """Connect the shared SSH session, then start polling."""
@@ -2554,7 +2570,7 @@ class LazySlurmApp(App):
         # In remote mode a failed or dropped session is retried here — the
         # user's only way back after cancelling or mistyping a 2FA code.
         if self.config.remote and slurm.get_session() is None:
-            await self._start_remote_session()
+            self._connect_remote()
             return
         # `force` here means the cluster bar, whose cache is a plain TTL and
         # can genuinely be stale. The completed-job list is not forced: its

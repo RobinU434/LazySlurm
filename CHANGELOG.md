@@ -163,6 +163,14 @@ the command, the import package and the config directory are all `lazyslurm`.
 
 ### Fixed
 
+- **Password logins from macOS, and fewer logins overall**
+  ([#79](https://github.com/RobinU434/LazySlurm/issues/79)). ssh could not open a terminal
+  to ask for the password, so a password login failed with "Permission denied" before any
+  prompt; once it could, the prompt crashed the app with `NoActiveWorker`. Both are fixed.
+  An ssh alias and the `user@host` it stands for now share one connection, and a
+  connection your own ssh config keeps open (`ControlMaster`) is reused instead of logging
+  in again.
+
 - **The job list kept polling into a screen it could not see**
   ([#72](https://github.com/RobinU434/LazySlurm/issues/72)). With `refresh` on, a poll
   that landed while the partition monitor was open looked for the job tables on the

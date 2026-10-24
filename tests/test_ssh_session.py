@@ -18,6 +18,7 @@ import sys
 import pytest
 
 from lazyslurm import slurm
+from lazyslurm import ssh as ssh_module
 from lazyslurm.models import Config
 from lazyslurm.ssh import SSHSession, _control_path, _PROMPT_RE, _NON_SECRET_RE
 
@@ -77,6 +78,33 @@ def test_control_path_is_stable_and_per_host():
     assert a == _control_path("user@login.hpc.edu")
     assert a != _control_path("user@other.hpc.edu")
     assert a.endswith(".sock")
+
+
+def test_an_ssh_alias_shares_the_socket_of_its_target(tmp_path, monkeypatch):
+    """`daic` and the user@host it stands for are one connection (#79)."""
+    config = tmp_path / "ssh_config"
+    config.write_text(
+        "Host daic\n  HostName login.daic.example\n  User jdoe\n"
+    )
+    real_run = ssh_module.subprocess.run
+
+    def run_with_config(argv, **kwargs):
+        if argv[:2] == ["ssh", "-G"]:
+            argv = ["ssh", "-F", str(config), *argv[1:]]
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(ssh_module.subprocess, "run", run_with_config)
+    assert ssh_module.ssh_target("daic") == "jdoe@login.daic.example:22"
+    assert _control_path("daic") == _control_path("jdoe@login.daic.example")
+    assert _control_path("daic") != _control_path("other@login.daic.example")
+
+
+def test_ssh_target_falls_back_to_what_was_typed(monkeypatch):
+    def no_ssh(*a, **k):
+        raise FileNotFoundError("ssh")
+
+    monkeypatch.setattr(ssh_module.subprocess, "run", no_ssh)
+    assert ssh_module.ssh_target("daic") == "daic"
 
 
 def test_auth_error_picks_the_meaningful_line():
@@ -323,15 +351,29 @@ def test_connect_remote_is_a_noop_in_local_mode():
 
 # Stands in for ssh: prompts on its pty exactly like a 2FA login does, and
 # "becomes reachable" (touches the ready file) only once both answers are right.
+# Like ssh it talks to /dev/tty, not stdin/stdout: a fake that read stdin passed
+# while every real password login failed, because the pty was never the child's
+# controlling terminal and ssh could not open /dev/tty at all.
 _FAKE_SSH = r"""
 import os, sys, time
 ready = sys.argv[1]
 print("debug1: Authenticating to login:22", flush=True)
-sys.stdout.write("jdoe@login's password: "); sys.stdout.flush()
-password = sys.stdin.readline().strip()
-sys.stdout.write("\nDuo two-factor login for jdoe\n\nPasscode or option (1-3): ")
-sys.stdout.flush()
-code = sys.stdin.readline().strip()
+try:
+    tty = os.open("/dev/tty", os.O_RDWR)
+except OSError as e:
+    print(f"debug1: read_passphrase: can't open /dev/tty: {e}", flush=True)
+    print("jdoe@login: Permission denied (password).", flush=True)
+    sys.exit(255)
+
+def ask(prompt):
+    os.write(tty, prompt.encode())
+    answer = b""
+    while not answer.endswith(b"\n"):
+        answer += os.read(tty, 1)
+    return answer.decode().strip()
+
+password = ask("jdoe@login's password: ")
+code = ask("\nDuo two-factor login for jdoe\n\nPasscode or option (1-3): ")
 if password == "hunter2" and code == "123456":
     open(ready, "w").close()
     print("\nAuthenticated.", flush=True)
@@ -356,7 +398,7 @@ class _FakeAuthSession(SSHSession):
     def _master_argv(self):
         return [sys.executable, "-u", self._script, self._ready]
 
-    async def _master_alive(self):
+    async def _master_alive(self, control_path=None):
         return os.path.exists(self._ready)
 
 
@@ -653,3 +695,68 @@ def test_a_genuinely_dead_master_is_still_restarted(monkeypatch):
 
     _run(scenario())
     assert len(logins) == 2, "a dropped connection has to re-authenticate"
+
+
+# ---------------------------------------------------------------------------
+# Riding the user's own ssh master
+# ---------------------------------------------------------------------------
+
+
+def test_a_live_master_from_the_users_ssh_config_is_reused(monkeypatch):
+    """`ssh daic` with ControlMaster left a connection; no password needed."""
+    monkeypatch.setattr(ssh_module, "user_control_path", lambda host: "/home/me/.ssh/cm-daic")
+    session = SSHSession("daic", prompt_cb=None)
+    checked = []
+
+    async def alive(control_path=None):
+        checked.append(control_path)
+        return control_path == "/home/me/.ssh/cm-daic"
+
+    async def no_master_please():
+        raise AssertionError("must not start a master of its own")
+
+    monkeypatch.setattr(session, "_master_alive", alive)
+    monkeypatch.setattr(session, "_master_argv", no_master_please)
+    ok, msg = _run(session._start_master())
+    assert ok and "your ssh connection" in msg
+    assert session.control_path == "/home/me/.ssh/cm-daic"
+    assert session._borrowed
+
+
+def test_a_borrowed_master_is_left_running_on_close(monkeypatch):
+    session = SSHSession("daic")
+    session._borrowed = True
+    spawned = []
+
+    async def fake_exec(*argv, **kwargs):
+        spawned.append(argv)
+        raise AssertionError("close must not touch the user's master")
+
+    monkeypatch.setattr(ssh_module.asyncio, "create_subprocess_exec", fake_exec)
+    _run(session.close())
+    assert spawned == []
+
+
+def test_without_a_live_user_master_it_logs_in_on_its_own_socket(monkeypatch):
+    monkeypatch.setattr(ssh_module, "user_control_path", lambda host: "/home/me/.ssh/cm-daic")
+    session = SSHSession("daic")
+    session.control_path, session._borrowed = "/home/me/.ssh/cm-daic", True  # from before
+
+    async def alive(control_path=None):
+        return False
+
+    monkeypatch.setattr(session, "_master_alive", alive)
+    monkeypatch.setattr(session, "_master_argv", lambda: ["false"])
+    _run(session._start_master())
+    assert session.control_path == _control_path("daic")
+    assert not session._borrowed
+
+
+def test_user_control_path_reads_ssh_config(monkeypatch):
+    monkeypatch.setattr(ssh_module, "_ssh_settings",
+                        lambda host: {"controlpath": "/home/me/.ssh/cm-x"})
+    assert ssh_module.user_control_path("x") == "/home/me/.ssh/cm-x"
+    monkeypatch.setattr(ssh_module, "_ssh_settings", lambda host: {"controlpath": "none"})
+    assert ssh_module.user_control_path("x") == ""
+    monkeypatch.setattr(ssh_module, "_ssh_settings", lambda host: {})
+    assert ssh_module.user_control_path("x") == ""

@@ -210,3 +210,64 @@ def test_node_table_does_not_shadow_textuals_children():
             assert all(hasattr(child, "post_message") for child in table.children)
 
     _run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# A password prompt during the app's own login
+# ---------------------------------------------------------------------------
+
+
+class _PromptingSession:
+    """Stands in for SSHSession: asks for a password the way a real login does."""
+
+    def __init__(self, host, prompt_cb=None, **kwargs):
+        self.host = host
+        self.prompt_cb = prompt_cb
+        self.connected = False
+        self.answers: list[str | None] = []
+
+    async def connect(self):
+        answer = await self.prompt_cb(f"{self.host}'s password:", True)
+        self.answers.append(answer)
+        if answer != "hunter2":
+            return False, "Permission denied (password)."
+        self.connected = True
+        return True, f"Connected to {self.host}"
+
+    async def close(self):
+        self.connected = False
+
+    async def run(self, command, timeout=None):
+        if "scontrol" in command:
+            return "ClusterName = test-cluster\n", "", 0
+        return "", "", 0
+
+
+def test_the_app_asks_for_the_password_and_logs_in(monkeypatch, tmp_path):
+    """The prompt used to raise NoActiveWorker: the login ran in an event
+    handler, and only a worker may wait on a screen."""
+    from lazyslurm import config as persistent_config
+
+    monkeypatch.setattr(persistent_config, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(persistent_config, "CLUSTERS_FILE", tmp_path / "clusters.json")
+    monkeypatch.setattr(slurm, "_sessions", {})
+    monkeypatch.setattr(slurm, "_attached", "")
+    monkeypatch.setattr(slurm, "SSHSession", _PromptingSession)
+
+    async def scenario():
+        app = LazySlurmApp(Config(remote="me@login", refresh=0, no_live=True))
+        async with app.run_test(size=(120, 40)) as pilot:
+            for _ in range(20):
+                await pilot.pause()
+                if isinstance(app.screen, SSHPromptScreen):
+                    break
+            assert isinstance(app.screen, SSHPromptScreen)
+            await pilot.press(*"hunter2", "enter")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            session = slurm.get_session()
+            assert session is not None and session.connected
+            assert session.answers == ["hunter2"]
+            assert not isinstance(app.screen, SSHPromptScreen)
+
+    _run(scenario())
