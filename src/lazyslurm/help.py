@@ -234,14 +234,14 @@ def render(context: str = JOBS) -> str:
     lines.append("")
 
     for key in panel.keys:
-        lines.append(f"  [bold cyan]{_escape(key.display):<{width}}[/] {key.text}")
+        lines.append(f"  [bold ansi_cyan]{_escape(key.display):<{width}}[/] {key.text}")
     for note in panel.notes:
         lines.append(f"  [dim]{_escape(note)}[/]")
 
     lines.append("")
     lines.append("[bold]Anywhere[/]")
     for key in GLOBAL:
-        lines.append(f"  [bold cyan]{_escape(key.display):<{width}}[/] {key.text}")
+        lines.append(f"  [bold ansi_cyan]{_escape(key.display):<{width}}[/] {key.text}")
 
     others = [p for p in PANELS if p.context != panel.context]
     if others:
@@ -249,7 +249,7 @@ def render(context: str = JOBS) -> str:
         lines.append("[bold]Other panels[/] [dim](press ? inside one for its keys)[/]")
         for other in others:
             keys = _escape(" ".join(k.display for k in other.keys[:4]))
-            lines.append(f"  [cyan]{other.title:<18}[/] [dim]{keys}[/]")
+            lines.append(f"  [ansi_cyan]{other.title:<18}[/] [dim]{keys}[/]")
 
     lines.append("")
     lines.append("Press [bold]?[/] or [bold]Escape[/] to close.")

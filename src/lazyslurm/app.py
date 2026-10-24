@@ -19,6 +19,7 @@ from textual.widgets import DataTable, Input, RichLog, Static
 
 from lazyslurm import help as help_topics
 from lazyslurm import slurm
+from lazyslurm.theme import textual_theme
 from lazyslurm.models import (
     Config,
     NodeSample,
@@ -169,7 +170,7 @@ class ConfirmResubmitScreen(ModalScreen[bool]):
         with Vertical():
             yield Static(
                 f"[bold]Resubmit job {self.job_id}?[/]\n\n"
-                f"Script: [cyan]{self.script}[/]\n\n"
+                f"Script: [ansi_cyan]{self.script}[/]\n\n"
                 "Press [bold]y[/] to confirm, [bold]n[/] or [bold]Escape[/] to abort."
             )
 
@@ -442,8 +443,8 @@ class NodeScreen(Screen):
         gpus_total = sum(n.gpus_total for n in nodes)
         summary = (
             f"[bold]{self.partition}[/]   {len(nodes)} nodes   "
-            f"[green]{idle}[/] idle  [yellow]{mixed}[/] mixed  "
-            f"[dark_orange]{busy}[/] full  [red]{out}[/] down/drained"
+            f"[green]{idle}[/] idle  [ansi_yellow]{mixed}[/] mixed  "
+            f"[#ff8700]{busy}[/] full  [red]{out}[/] down/drained"
         )
         if gpus_total:
             summary += f"   GPUs [bold]{gpus_used}[/]/{gpus_total} in use"
@@ -656,7 +657,7 @@ class PartitionScreen(Screen):
         if self._counts_known:
             running = sum(p.running for p in partitions)
             pending = sum(p.pending for p in partitions)
-            jobs = f"[green]{running}[/] running   [yellow]{pending}[/] pending"
+            jobs = f"[green]{running}[/] running   [ansi_yellow]{pending}[/] pending"
         else:
             jobs = "[dim]counting jobs…[/]"
         self.query_one("#partition-bar", Static).update(
@@ -982,6 +983,7 @@ class LazySlurmApp(App):
     ) -> None:
         super().__init__(**kwargs)
         self.config = config or Config()
+        self.theme = textual_theme(self.config.theme)
         self._config_overrides = config_overrides or []
         self._config_warnings = config_warnings or []
         # Track which right panel has focus: "detail" or "metadata"
@@ -2291,6 +2293,7 @@ class LazySlurmApp(App):
             deprecated_config_keys,
             parse_node_expand,
             parse_resource_monitor,
+            parse_theme,
             unknown_config_keys,
         )
 
@@ -2321,7 +2324,8 @@ class LazySlurmApp(App):
         gpu_column, column_warning = parse_gpu_column(
             saved.get("gpu_column", old.gpu_column)
         )
-        for warning in (expand_warning, column_warning):
+        theme, theme_warning = parse_theme(saved.get("theme", old.theme))
+        for warning in (expand_warning, column_warning, theme_warning):
             if warning:
                 self._log("config file", warning)
 
@@ -2353,7 +2357,9 @@ class LazySlurmApp(App):
             node_expand=node_expand,
             gpu_column=gpu_column,
             cluster_name=str(saved.get("cluster_name", old.cluster_name)).strip(),
+            theme=theme,
         )
+        self.theme = textual_theme(theme)
         # An edit to the file is an explicit choice, so it wins over whatever
         # Shift+M left the session on.
         if monitor != old.resource_monitor:
@@ -2391,6 +2397,7 @@ class LazySlurmApp(App):
             "editor", "max_name_width", "max_partition_width", "abbreviate_states",
             "partition_order", "cache_max_age_days", "script_cache_dir",
             "interactive_shell", "resource_monitor", "node_expand", "gpu_column",
+            "theme",
         ):
             old_val = getattr(old, field)
             new_val = getattr(self.config, field)

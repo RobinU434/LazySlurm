@@ -66,6 +66,12 @@ the command, the import package and the config directory are all `lazyslurm`.
   browser instead of exiting — that case is not an error, it is what running it on a
   laptop looks like.
 
+- **Light mode that follows the terminal**
+  ([#77](https://github.com/RobinU434/LazySlurm/issues/77)). New `theme` setting: `auto`
+  (default), `dark` or `light`. `auto` asks the terminal for its background colour, then
+  falls back to `COLORFGBG` and the macOS appearance; otherwise it stays dark. The cluster
+  bar counts and help keys no longer vanish on a light background.
+
 ### Fixed
 
 - **Job caches no longer collide across clusters**

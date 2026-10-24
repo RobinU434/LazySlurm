@@ -938,6 +938,13 @@ a warning popup reminding you to be mindful of resource usage on shared login no
 
 Cosmetic settings, all of them optional and all in [config.toml](#configuration).
 
+### Light and dark
+
+LazySlurm follows your terminal: on a light background it uses a light theme. With the
+default `theme = "auto"` it asks the terminal for its background colour at startup, then
+falls back to `COLORFGBG` and, on macOS, the system appearance. If none of them answers it
+stays dark. Set `theme = "light"` or `theme = "dark"` to pick one yourself.
+
 ### Column Width Limits
 
 <details>
@@ -1048,6 +1055,7 @@ pager = "less"           # pager for browsing whole logs with 'l' ("less", "more
 resource_monitor = "graph"
 node_expand = "gpu"      # partition monitor: what Enter unfolds a node row into
 gpu_column = "count"     # node view GPUs column: "count" (7/8) or "glyphs" (▣▣▢▣)
+theme = "auto"           # "auto" follows the terminal / system, or "light" / "dark"
 
 # Column display settings
 max_name_width = 16      # max characters for job name column (0 = unlimited)

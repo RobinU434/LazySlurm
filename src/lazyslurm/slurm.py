@@ -2253,7 +2253,7 @@ def format_cluster_summary(
     parts: list[str] = [
         f"[bold]{user}[/]",
         f"[green]{running}[/] running",
-        f"[yellow]{pending}[/] pending",
+        f"[ansi_yellow]{pending}[/] pending",
     ]
     if part_info:
         parts.append("  " + "  ".join(part_info))
@@ -2327,7 +2327,7 @@ async def get_gpu_status(node: str, job_id: str = "") -> str:
 
     header = f"[bold]Node: {first_node}[/]"
     if job_id:
-        header += f"  [dim yellow](showing all GPUs — srun --overlap failed, falling back to SSH)[/]"
+        header += f"  [dim ansi_yellow](showing all GPUs — srun --overlap failed, falling back to SSH)[/]"
     return f"{header}\n\n{stdout}"
 
 

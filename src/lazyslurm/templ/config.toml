@@ -51,6 +51,12 @@ config_version = "0.0.0"
 #            expanding anything. Falls back to the count past 12 devices.
 # gpu_column = "count"
 
+# Light or dark.
+#   auto  = follow the terminal's background colour, or failing that the
+#           system appearance (default)
+#   dark / light = always that one
+# theme = "auto"
+
 # Column display settings
 # max_name_width = 16        # max characters for job name column (0 = unlimited)
 # max_partition_width = 16   # max characters for partition column (0 = unlimited)

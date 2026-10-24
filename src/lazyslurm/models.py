@@ -43,6 +43,8 @@ class Config:
     # What to call this cluster in the per-cluster caches. Empty means "ask
     # Slurm"; see slurm.get_cluster_name() for the fallback chain.
     cluster_name: str = ""
+    # Light or dark: "auto" follows the terminal / system (see theme.py).
+    theme: str = "auto"
     # Set by the CLI when there is no Slurm here and no --remote: the cluster
     # browser is the landing page rather than an error. Not a file setting.
     start_in_browser: bool = False
@@ -258,6 +260,9 @@ NODE_EXPAND_MODES = ("gpu", "cpu", "both", "off")
 
 # How the node table's GPUs column renders: "7/8", or one mark per device.
 GPU_COLUMN_MODES = ("count", "glyphs")
+
+# The `theme` setting. "auto" asks the terminal, then the system; see theme.py.
+THEME_MODES = ("auto", "dark", "light")
 
 
 @dataclass

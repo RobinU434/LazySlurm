@@ -42,6 +42,7 @@ _FILE_ONLY_KEYS = frozenset({
     "gpu_column",
     "config_version",
     "cluster_name",
+    "theme",
 })
 
 KNOWN_CONFIG_KEYS = frozenset(_CONFIG_KEYS) | _FILE_ONLY_KEYS
@@ -193,6 +194,13 @@ def parse_gpu_column(raw: object) -> tuple[str, str]:
     from lazyslurm.models import GPU_COLUMN_MODES
 
     return _parse_mode(raw, GPU_COLUMN_MODES, "gpu_column")
+
+
+def parse_theme(raw: object) -> tuple[str, str]:
+    """Validate ``theme``: auto, dark or light."""
+    from lazyslurm.models import THEME_MODES
+
+    return _parse_mode(raw, THEME_MODES, "theme")
 
 
 def main() -> None:
@@ -353,8 +361,10 @@ def main() -> None:
     )
     node_expand, expand_warning = parse_node_expand(saved.get("node_expand", "gpu"))
     gpu_column, column_warning = parse_gpu_column(saved.get("gpu_column", "count"))
+    theme, theme_warning = parse_theme(saved.get("theme", "auto"))
     warnings = migration_notes + deprecated_config_keys(saved) + unknown_config_keys(saved)
-    for warning in (shell_warning, monitor_warning, expand_warning, column_warning):
+    for warning in (shell_warning, monitor_warning, expand_warning, column_warning,
+                    theme_warning):
         if warning:
             warnings.append(warning)
 
@@ -381,6 +391,7 @@ def main() -> None:
         node_expand=node_expand,
         gpu_column=gpu_column,
         cluster_name=str(saved.get("cluster_name", "")).strip(),
+        theme=theme,
     )
 
     # Bail out before the TUI starts rather than crashing on the first poll:
@@ -404,6 +415,12 @@ def main() -> None:
             print(_no_slurm_message(absent, str(resolved["remote"])), file=sys.stderr)
             raise SystemExit(1)
         config.start_in_browser = True
+
+    # Ask the terminal how it looks while it is still ours: once the app runs,
+    # Textual owns stdin and the answer would arrive as keypresses.
+    if config.theme == "auto":
+        from lazyslurm import theme as theme_module
+        theme_module.detect()
 
     from lazyslurm.app import LazySlurmApp
     app = LazySlurmApp(

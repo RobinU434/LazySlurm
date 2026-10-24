@@ -172,7 +172,7 @@ class MetadataView(Vertical):
             share = value / priority.total * 100 if priority.total else 0
             bar = priority_bar(value, priority.total)
             lines.append(
-                f"  {name:<{width}}  [cyan]{bar}[/] {value:>8}  {share:4.0f}%"
+                f"  {name:<{width}}  [ansi_cyan]{bar}[/] {value:>8}  {share:4.0f}%"
             )
         return "\n".join(lines)
 
